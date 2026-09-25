@@ -477,6 +477,9 @@ if (BUILD_TESTING)
   target_link_libraries(heap_placement_test PRIVATE gufo_core)
   add_test(NAME heap_placement_test COMMAND heap_placement_test)
   set_tests_properties(heap_placement_test PROPERTIES LABELS "cpu;hip;core")
+  add_executable(platform_tuning_test tests/core/platform_tuning_test.cpp)
+  add_test(NAME platform_tuning_test COMMAND platform_tuning_test)
+  set_tests_properties(platform_tuning_test PROPERTIES LABELS "cpu")
 
   add_executable(openai_chat_test
     tests/cli/openai_chat_test.cpp
