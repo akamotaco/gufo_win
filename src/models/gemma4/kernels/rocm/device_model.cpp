@@ -9,6 +9,7 @@
 #include <string_view>
 #include <vector>
 
+#include "src/core/hip/managed_alloc.hpp"
 #include "src/core/hip/weight_upload.hpp"
 #include "src/models/gemma4/kernels/rocm/gemv.hpp"
 #include "src/models/gemma4/kernels/rocm/moe.hpp"
@@ -23,6 +24,7 @@ constexpr std::size_t kTailMargin = 4096;
 
 struct Uploader {
   hip::WeightUpload& stager;
+  const hip::WeightAllocator& weights;
   std::vector<void*>& allocations;
   std::size_t& bytes;
   std::size_t& max_cols;
@@ -48,9 +50,9 @@ struct Uploader {
 
   void* Allocate(std::size_t size, const std::string& what) {
     void* ptr = nullptr;
-    if (hipMalloc(&ptr, size + kTailMargin) != hipSuccess) {
-      Fail("hipMalloc failed for " + what + " (" + std::to_string(size) +
-           " bytes)");
+    if (weights.Allocate(&ptr, size + kTailMargin) != hipSuccess) {
+      Fail("device allocation failed for " + what + " (" +
+           std::to_string(size) + " bytes)");
       return nullptr;
     }
     allocations.push_back(ptr);
@@ -252,7 +254,15 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
   if (!stager) {
     return nullptr;
   }
-  Uploader up{*stager, m->allocations_, m->bytes_, m->max_cols_, error_msg};
+  // The placement is decided once, from the mapped files: they hold every
+  // tensor this upload copies.
+  std::uint64_t file_bytes = 0;
+  for (const auto& shard : shards) {
+    file_bytes += shard.size;
+  }
+  const hip::WeightAllocator placement(file_bytes);
+  Uploader up{*stager,   placement,    m->allocations_,
+              m->bytes_, m->max_cols_, error_msg};
   m->token_embd_ = up.Copy(weights.token_embd);
   m->output_ = weights.TiedOutput() ? m->token_embd_ : up.Copy(weights.output);
   m->output_norm_ = up.Copy(weights.output_norm);
@@ -325,7 +335,7 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     std::uint32_t* overflow = nullptr;
     std::vector<std::uint32_t> counts(up.halves.size());
     bool converted =
-        hipMalloc(&overflow, counts.size() * sizeof(std::uint32_t)) ==
+        hip::AllocateDevice(&overflow, counts.size() * sizeof(std::uint32_t)) ==
             hipSuccess &&
         hipMemset(overflow, 0, counts.size() * sizeof(std::uint32_t)) ==
             hipSuccess;

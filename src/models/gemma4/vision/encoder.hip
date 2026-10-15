@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
+#include "src/core/hip/managed_alloc.hpp"
 #include "src/models/gemma4/vision/encoder.hpp"
 #include "src/models/gemma4/vision/prompt.hpp"
 #include "src/models/gemma4/vision/weights.hpp"
@@ -72,7 +73,9 @@ void CheckBlas(hipblasStatus_t status) {
 struct Allocation {
   void* data{nullptr};
   Allocation() = default;
-  explicit Allocation(std::size_t bytes) { Check(hipMalloc(&data, bytes)); }
+  explicit Allocation(std::size_t bytes) {
+    Check(hip::AllocateDevice(&data, bytes));
+  }
   ~Allocation() {
     if (data != nullptr)
       (void)hipFree(data);
@@ -735,7 +738,7 @@ std::shared_ptr<const Encoder::Embedding> Encoder::Encode(
   auto embedding = std::shared_ptr<Embedding>(new Embedding);
   embedding->rows_ = rows;
   embedding->width_ = width;
-  Check(hipMalloc(&embedding->data_,
+  Check(hip::AllocateDevice(&embedding->data_,
                   std::size_t{rows} * width * sizeof(float)));
   I.Gemm(I.projection, normed.As<Act>(), embedding->data_, rows, width,
          kHidden);

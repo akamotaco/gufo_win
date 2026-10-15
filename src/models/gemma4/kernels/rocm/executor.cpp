@@ -11,6 +11,7 @@
 #include <stdexcept>
 
 #include "src/core/hip/hip_utils.hpp"
+#include "src/core/hip/managed_alloc.hpp"
 #include "src/models/gemma4/kernels/rocm/gemv.hpp"
 #include "src/models/gemma4/kernels/rocm/kernels.hpp"
 #include "src/models/gemma4/kernels/rocm/moe.hpp"
@@ -256,7 +257,7 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
       throw std::runtime_error("hipblasCreate failed");
     }
   }
-  HIP_CHECK(hipMalloc(&scratch_, l.total));
+  HIP_CHECK(hip::AllocateDevice(&scratch_, l.total));
   auto* base = static_cast<std::uint8_t*>(scratch_);
   tokens_ = reinterpret_cast<std::int32_t*>(base + l.tokens);
   logit_index_ = reinterpret_cast<std::uint32_t*>(base + l.logit_index);
@@ -361,7 +362,7 @@ std::unique_ptr<KvCache> Executor::CreateCache(std::uint32_t max_context,
   cache->max_context = max_context;
   cache->ring = ring_;
   cache->bytes = CacheBytes(c, max_context, ring_, key_widths_);
-  if (hipMalloc(&cache->allocation, cache->bytes) != hipSuccess) {
+  if (hip::AllocateDevice(&cache->allocation, cache->bytes) != hipSuccess) {
     if (error_msg != nullptr) {
       *error_msg = "KV cache allocation failed (" +
                    std::to_string(cache->bytes) + " bytes)";
@@ -1211,7 +1212,7 @@ void Executor::CopyRuns(std::span<const CopyRun> runs) {
       copy_runs_capacity_ = 0;
     }
     const std::size_t capacity = std::bit_ceil(runs.size());
-    HIP_CHECK(hipMalloc(&copy_runs_, capacity * sizeof(CopyRun)));
+    HIP_CHECK(hip::AllocateDevice(&copy_runs_, capacity * sizeof(CopyRun)));
     copy_runs_capacity_ = capacity;
   }
   if (runs.empty()) {
