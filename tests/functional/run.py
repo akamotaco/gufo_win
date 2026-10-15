@@ -453,7 +453,7 @@ def main():
                     (output / "server.log").read_text(), available_before_load,
                     int(option(command, "--cache-ram-bytes", "0")), sessions)
             configured = bool(set(selected) & {"cache-bridge", "cache-pressure"}) and re.search(
-                r"event=snapshot_cache_configured .*?\bcapacity_bytes=(\d+)\b",
+                r"event=(?:snapshot_cache_configured|configured) .*?\bcapacity_bytes=(\d+)\b",
                 (output / "server.log").read_text())
             for suite in selected:
                 if suite == "cache":
@@ -477,7 +477,7 @@ def main():
                             "--url", base_url, "--model", model, "--prefix-repetitions", "16",
                             "--output", str(output / (label + ".json")), *extra]):
                         ready_to_restore.append(label)
-                # Last, so the drained log after this offset belongs to it.
+                # Retain the window; checkpoint IDs identify fixture-owned writes.
                 spacing_log = current_log
                 spacing_offset = spacing_log.stat().st_size
                 spacing = run("disk-spacing", "cache_disk_spacing.py", [
@@ -505,7 +505,8 @@ def main():
                 grown_log = log.read()
             report["disk_spacing"] = check_disk_spacing(
                 grown_log, (output / "server-restarted.log").read_text(),
-                json.loads((output / "disk-spacing.json").read_text())[0])
+                json.loads((output / "disk-spacing.json").read_text())[0],
+                json.loads((output / "disk-spacing-disk.json").read_text())[0])
     except Exception as error:
         report["error"] = str(error)
         report["traceback"] = traceback.format_exc()
