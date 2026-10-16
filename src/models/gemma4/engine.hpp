@@ -16,7 +16,9 @@
 #include "src/core/sampling.hpp"
 #include "src/models/gemma4/config.hpp"
 #include "src/models/gemma4/draft_policy.hpp"
+#include "src/models/gemma4/draft_vocab.hpp"
 #include "src/models/gemma4/tokenizer.hpp"
+#include "src/models/qwen38_flash_next/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
 #include "src/models/qwen38_flash_next/prompt_lookup.hpp"
 
@@ -31,6 +33,7 @@ struct DraftWeights;
 namespace rocm {
 class DeviceModel;
 class Executor;
+struct DraftHead;
 struct KvCache;
 }  // namespace rocm
 
@@ -277,6 +280,11 @@ public:
     /// following one were emitted.
     std::uint64_t siblings{0};
     std::uint64_t siblings_accepted{0};
+    /// Cycles whose drafter chain scored the small head (draft_vocab.hpp),
+    /// and their MTP drafts and accepted ones.
+    std::uint64_t small_head_cycles{0};
+    std::uint64_t small_head_drafted{0};
+    std::uint64_t small_head_accepted{0};
   };
   [[nodiscard]] const SpeculativeStats& Statistics() const noexcept {
     return stats_;
@@ -364,6 +372,8 @@ private:
     bool sampled{false};
     std::vector<qwen38_flash_next::MtpProposal> proposals;
     std::size_t copied{0};
+    /// The drafter chain scored the small head (PrepareDraftHead).
+    bool small_head{false};
     /// The drafter's next choice beside MTP drafts 1..siblings.size(),
     /// verified in rows after the chain (sampled: drawn from the draft's
     /// proposal without it), and each one's calibration signal.
@@ -386,6 +396,9 @@ private:
                   DraftShare* share = nullptr);
   /// Appends a finished chain's drafts and copies to the cycle's rows.
   void FinishDraft(Cycle& cycle);
+  /// Brings the draft vocabulary up to tokens_ (loading new table rows) and
+  /// picks the head for a chain after `anchor`.
+  rocm::DraftHead PrepareDraftHead(TokenId anchor);
   void FinishCycle(Cycle& cycle, std::span<const float> logits,
                    std::uint32_t first_hidden_row);
 
@@ -396,6 +409,10 @@ private:
   /// Prompt-lookup index over tokens_; cleared whenever tokens_ is rewritten
   /// rather than appended to.
   qwen38_flash_next::PromptLookup lookup_;
+  /// The request's draft vocabulary over tokens_ (PrepareDraftHead), reset
+  /// with lookup_.
+  qwen38_flash_next::MtpDraftVocab draft_vocab_{kDraftTableRows};
+  std::vector<std::int32_t> draft_added_;
   std::vector<float> logits_;
   bool valid_{false};
   /// Emitted but not yet evaluated; its predecessor's hidden state is the

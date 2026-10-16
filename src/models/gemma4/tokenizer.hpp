@@ -87,6 +87,13 @@ public:
   [[nodiscard]] std::optional<TokenId> FindToken(
       std::string_view text) const noexcept;
   [[nodiscard]] TokenType Type(TokenId token) const noexcept;
+  /// A token's vocabulary text as stored (`▁` for a space); empty outside
+  /// the vocabulary.
+  [[nodiscard]] std::string_view Piece(TokenId token) const noexcept;
+  /// Per token, the rank of the earliest merge that creates it, or
+  /// UINT32_MAX for tokens no merge creates (single symbols, special and
+  /// byte tokens).
+  [[nodiscard]] std::vector<std::uint32_t> CreationRanks() const;
 
 private:
   Tokenizer() = default;

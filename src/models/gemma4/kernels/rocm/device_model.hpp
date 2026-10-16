@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -67,6 +68,7 @@ public:
   [[nodiscard]] static std::unique_ptr<DeviceModel> Upload(
       const ModelWeights& weights, const core::GgufReader& reader,
       const DraftWeights* draft, const core::GgufReader* draft_reader,
+      std::span<const std::int32_t> draft_order,
       std::string* error_msg = nullptr);
 
   [[nodiscard]] const Config& config() const noexcept { return config_; }
@@ -92,6 +94,22 @@ public:
   }
   [[nodiscard]] bool has_draft() const noexcept { return has_draft_; }
   [[nodiscard]] const DeviceDraft& draft() const noexcept { return draft_; }
+  /// The token of each drafter head row when Upload stored the rows in the
+  /// `draft_order` it was given (empty otherwise).
+  [[nodiscard]] std::span<const std::int32_t> draft_head_tokens()
+      const noexcept {
+    return draft_head_tokens_;
+  }
+  /// The drafter head row of each token; only with draft_head_tokens().
+  [[nodiscard]] std::span<const std::uint32_t> draft_head_rows()
+      const noexcept {
+    return draft_head_rows_;
+  }
+  /// Bytes of one drafter head row (a multiple of 16), with
+  /// draft_head_tokens().
+  [[nodiscard]] std::size_t draft_row_bytes() const noexcept {
+    return draft_row_bytes_;
+  }
   [[nodiscard]] std::size_t resident_bytes() const noexcept { return bytes_; }
   /// Widest reduction dimension among the projections (activation staging).
   [[nodiscard]] std::size_t max_cols() const noexcept { return max_cols_; }
@@ -115,6 +133,9 @@ private:
   std::vector<DeviceLayer> layers_;
   bool has_draft_{false};
   DeviceDraft draft_;
+  std::vector<std::int32_t> draft_head_tokens_;
+  std::vector<std::uint32_t> draft_head_rows_;
+  std::size_t draft_row_bytes_{0};
   std::vector<void*> allocations_;
   std::size_t bytes_{0};
   std::size_t max_cols_{0};

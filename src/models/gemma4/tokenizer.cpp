@@ -306,6 +306,24 @@ TokenType Tokenizer::Type(TokenId token) const noexcept {
   return types_[token];
 }
 
+std::string_view Tokenizer::Piece(TokenId token) const noexcept {
+  if (token < 0 || static_cast<std::size_t>(token) >= tokens_.size()) {
+    return {};
+  }
+  return tokens_[token];
+}
+
+std::vector<std::uint32_t> Tokenizer::CreationRanks() const {
+  std::vector<std::uint32_t> ranks(tokens_.size(), UINT32_MAX);
+  for (const MergeSlot& entry : merges_) {
+    if (entry.key != kEmptyPair) {
+      std::uint32_t& rank = ranks[static_cast<std::size_t>(entry.merged)];
+      rank = std::min(rank, entry.rank);
+    }
+  }
+  return ranks;
+}
+
 bool Tokenizer::IsEndOfGeneration(TokenId token) const noexcept {
   return std::binary_search(eog_.begin(), eog_.end(), token);
 }

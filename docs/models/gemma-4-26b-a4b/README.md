@@ -95,4 +95,10 @@ about 2.3 GiB of KV and rings; the global layers keep few KV heads.
   4e-5 ([Quality](QUALITY.md)).
 - **MTP:** the calibrated draft policy uses this model's own cost table.
   Every verified row adds the experts it routes to, so verification grows
-  faster per row than on the dense 31B.
+  faster per row than on the dense 31B. A lone session's drafter scores
+  98,304 of its 262,144 vocabulary rows plus up to 1,024 rows of tokens the
+  request has already used. The rows are reordered at load by the merge that
+  creates each token. The full head takes over when the last token or two of
+  the last 32 fall outside that set, as in other scripts. The target still
+  verifies over the full vocabulary, so greedy output is unchanged
+  ([experiments](EXPERIMENTS.md)).

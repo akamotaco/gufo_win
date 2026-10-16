@@ -16,6 +16,7 @@
 #include "src/cli/serve/logging.hpp"
 #include "src/core/gguf_reader.hpp"
 #include "src/models/gemma4/chat_template.hpp"
+#include "src/models/gemma4/draft_vocab.hpp"
 #include "src/models/gemma4/kernels/rocm/device_model.hpp"
 #include "src/models/gemma4/kernels/rocm/executor.hpp"
 #include "src/models/gemma4/weights.hpp"
@@ -272,9 +273,15 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     }
     m->draft_weights_ = std::make_unique<DraftWeights>(std::move(*draft));
   }
-  m->device_ = rocm::DeviceModel::Upload(*m->weights_, *m->reader_,
-                                         m->draft_weights_.get(),
-                                         m->draft_reader_.get(), &error);
+  // Only the mixture-of-experts cycle is short enough for the smaller draft
+  // head to pay (draft_vocab.hpp).
+  const std::vector<TokenId> draft_order =
+      m->draft_weights_ && m->weights_->config.HasExperts()
+          ? DraftHeadOrder(*m->tokenizer_)
+          : std::vector<TokenId>{};
+  m->device_ = rocm::DeviceModel::Upload(
+      *m->weights_, *m->reader_, m->draft_weights_.get(),
+      m->draft_reader_.get(), draft_order, &error);
   if (!m->device_) {
     Fail(error_msg, error);
     return nullptr;
@@ -340,7 +347,8 @@ std::size_t Model::ResidentBytes() const noexcept {
 
 std::size_t Model::SessionBytes(std::uint32_t context) const noexcept {
   return rocm::Executor::CacheBytes(config(), context, executor_->ring(),
-                                    executor_->key_widths());
+                                    executor_->key_widths(),
+                                    executor_->draft_table_bytes());
 }
 
 std::size_t Model::SessionRingSlots() const noexcept {
@@ -372,6 +380,7 @@ void Session::Reset() {
   tokens_.clear();
   images_.clear();
   lookup_.Clear();
+  draft_vocab_.Reset();
   logits_.clear();
   valid_ = false;
   // A restored snapshot starts a request without Sync.
@@ -472,6 +481,7 @@ bool Session::Extend(std::size_t begin, std::string* error_msg,
       return std::size_t{image.offset} + image.rows > begin;
     });
     lookup_.Clear();
+    draft_vocab_.Reset();
     DropLookahead();
     return Fail(error_msg, e.what());
   }
@@ -575,6 +585,7 @@ bool Session::Sync(std::span<const TokenId> prompt,
   tokens_.assign(prompt.begin(), prompt.end());
   images_.assign(images.begin(), images.end());
   lookup_.Clear();
+  draft_vocab_.Reset();
   const bool ahead = lookahead.size() <= rocm::kSplitRows &&
                      prompt.size() + lookahead.size() <= cache_->max_context;
   return Extend(common, error_msg, embed,
@@ -987,6 +998,7 @@ struct Session::CycleDraft {
   std::vector<std::int32_t> context;
   std::vector<std::int32_t> copies;
   std::vector<std::int32_t> drafts;
+  bool small_head{false};
   /// Per MTP draft, the sibling it could have beside it.
   std::vector<Alternative> alternatives;
   sampling::SamplerState draft_sampler{sampling::SamplingConfig{}, {}};
@@ -1114,11 +1126,14 @@ bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
     }
     if (share == nullptr) {
       CycleDraft& draft = *cycle.draft;
+      const rocm::DraftHead head = PrepareDraftHead(pending);
+      draft.small_head = head.small;
       model_->executor_->DraftChain(
           *cache_, pending, position, steps, &draft.drafts,
           [&draft](const qwen38_flash_next::MtpCandidateLogits& c) {
             return draft.Propose(c);
-          });
+          },
+          head);
       FinishDraft(cycle);
     }
   } catch (const std::exception& e) {
@@ -1127,6 +1142,27 @@ bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
     return Fail(error_msg, e.what());
   }
   return true;
+}
+
+rocm::DraftHead Session::PrepareDraftHead(TokenId anchor) {
+  const std::span<const std::uint32_t> rows =
+      model_->device_->draft_head_rows();
+  if (rows.empty()) {
+    return {};
+  }
+  const auto common = [rows](std::int32_t token) {
+    return token >= 0 && static_cast<std::size_t>(token) < rows.size() &&
+           rows[static_cast<std::size_t>(token)] < kDraftHeadRows;
+  };
+  draft_added_.clear();
+  draft_vocab_.CatchUp(tokens_, common, &draft_added_);
+  model_->executor_->LoadDraftTable(
+      *cache_,
+      static_cast<std::uint32_t>(draft_vocab_.rare().size() -
+                                 draft_added_.size()),
+      draft_added_);
+  return {.small = draft_vocab_.Fits(anchor, common),
+          .table = draft_vocab_.rare()};
 }
 
 void Session::FinishDraft(Cycle& cycle) {
@@ -1186,6 +1222,7 @@ void Session::FinishDraft(Cycle& cycle) {
     cycle.expected = draft.calibrated.Expected();
     cycle.draft_ms = draft.calibrated.DraftMs();
   }
+  cycle.small_head = draft.small_head;
   cycle.draft.reset();
 }
 
@@ -1285,6 +1322,11 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
     }
   }
   stats_.copied_accepted += accepted > mtp ? accepted - mtp : 0;
+  if (cycle.small_head) {
+    stats_.small_head_cycles += 1;
+    stats_.small_head_drafted += mtp;
+    stats_.small_head_accepted += std::min(accepted, mtp);
+  }
 }
 
 bool Session::DecodeBatch(std::span<BatchDecode> decodes) {
@@ -1347,11 +1389,16 @@ bool Session::DecodeBatch(std::span<BatchDecode> decodes) {
                       [&draft](const qwen38_flash_next::MtpCandidateLogits& c) {
                         return draft.Propose(c);
                       },
-                      &draft.drafts});
+                      &draft.drafts,
+                      d.session->PrepareDraftHead(cycles[i].rows.front())});
       drafting.push_back(i);
     }
   }
   if (!jobs.empty()) {
+    // A lone chain drafts on its small head (Executor::DraftChains).
+    if (jobs.size() == 1) {
+      cycles[drafting.front()].draft->small_head = jobs.front().head.small;
+    }
     try {
       model.executor_->DraftChains(jobs);
     } catch (const std::exception& e) {
@@ -1882,6 +1929,7 @@ std::size_t Session::ReadHead(std::span<const std::uint8_t> head,
   }
   tokens_.resize(n);
   lookup_.Clear();
+  draft_vocab_.Reset();
   const std::size_t images_at = sizeof(header) + std::size_t{n} * 4;
   std::uint32_t image_count = 0;
   if (head.size() >= images_at + 4) {

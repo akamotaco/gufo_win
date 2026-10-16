@@ -12,6 +12,7 @@
 
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/hip/managed_alloc.hpp"
+#include "src/models/gemma4/draft_vocab.hpp"
 #include "src/models/gemma4/kernels/rocm/gemv.hpp"
 #include "src/models/gemma4/kernels/rocm/kernels.hpp"
 #include "src/models/gemma4/kernels/rocm/moe.hpp"
@@ -200,7 +201,8 @@ std::size_t Executor::ScratchBytes(const Config& config, const Config* draft,
 
 std::size_t Executor::CacheBytes(const Config& c, std::uint32_t max_context,
                                  std::uint32_t ring,
-                                 const std::vector<std::uint32_t>& key_widths) {
+                                 const std::vector<std::uint32_t>& key_widths,
+                                 std::size_t draft_table_bytes) {
   std::size_t bytes = 0;
   for (std::uint32_t l = 0; l < c.num_layers; ++l) {
     const std::size_t slots =
@@ -208,7 +210,14 @@ std::size_t Executor::CacheBytes(const Config& c, std::uint32_t max_context,
     bytes += AlignUp(slots * key_widths[l] * sizeof(std::uint16_t)) +
              AlignUp(slots * c.KvDim(l) * sizeof(std::uint16_t));
   }
-  return bytes + 2 * AlignUp(std::size_t{c.hidden_size} * sizeof(float));
+  return bytes + 2 * AlignUp(std::size_t{c.hidden_size} * sizeof(float)) +
+         AlignUp(draft_table_bytes);
+}
+
+std::size_t Executor::draft_table_bytes() const noexcept {
+  return model_.draft_head_tokens().empty()
+             ? 0
+             : std::size_t{kDraftTableRows} * model_.draft_row_bytes();
 }
 
 std::vector<std::uint32_t> Executor::KeyWidths(const DeviceModel& model) {
@@ -361,7 +370,8 @@ std::unique_ptr<KvCache> Executor::CreateCache(std::uint32_t max_context,
   auto cache = std::make_unique<KvCache>();
   cache->max_context = max_context;
   cache->ring = ring_;
-  cache->bytes = CacheBytes(c, max_context, ring_, key_widths_);
+  cache->bytes =
+      CacheBytes(c, max_context, ring_, key_widths_, draft_table_bytes());
   if (hip::AllocateDevice(&cache->allocation, cache->bytes) != hipSuccess) {
     if (error_msg != nullptr) {
       *error_msg = "KV cache allocation failed (" +
@@ -384,6 +394,10 @@ std::unique_ptr<KvCache> Executor::CreateCache(std::uint32_t max_context,
   cache->hidden = reinterpret_cast<float*>(at);
   cache->ahead_hidden = reinterpret_cast<float*>(
       at + AlignUp(std::size_t{c.hidden_size} * sizeof(float)));
+  if (draft_table_bytes() != 0) {
+    cache->draft_table =
+        at + 2 * AlignUp(std::size_t{c.hidden_size} * sizeof(float));
+  }
   return cache;
 }
 
@@ -1227,9 +1241,30 @@ void Executor::CopyRuns(std::span<const CopyRun> runs) {
 void Executor::DraftChain(KvCache& cache, std::int32_t token,
                           std::uint32_t position, std::uint32_t steps,
                           std::vector<std::int32_t>* drafts,
-                          const DraftProposer& propose) {
-  DraftJob job{&cache, token, position, steps, propose, drafts};
+                          const DraftProposer& propose, DraftHead head) {
+  DraftJob job{&cache, token, position, steps, propose, drafts, head};
   DraftChains(std::span<DraftJob>(&job, 1));
+}
+
+void Executor::LoadDraftTable(KvCache& cache, std::uint32_t first,
+                              std::span<const std::int32_t> tokens) {
+  if (tokens.empty()) {
+    return;
+  }
+  const auto rows = model_.draft_head_rows();
+  if (cache.draft_table == nullptr || first + tokens.size() > kDraftTableRows) {
+    throw std::invalid_argument("gemma4 draft table exceeds its capacity");
+  }
+  const std::size_t row_bytes = model_.draft_row_bytes();
+  const auto* head =
+      static_cast<const std::uint8_t*>(model_.draft().token_embd.data);
+  auto* table = static_cast<std::uint8_t*>(cache.draft_table);
+  std::vector<CopyRun> runs(tokens.size());
+  for (std::size_t i = 0; i < tokens.size(); ++i) {
+    runs[i] = {head + rows[static_cast<std::size_t>(tokens[i])] * row_bytes,
+               table + (first + i) * row_bytes, row_bytes};
+  }
+  CopyRuns(runs);
 }
 
 void Executor::DraftChains(std::span<DraftJob> jobs) {
@@ -1256,6 +1291,13 @@ void Executor::DraftChains(std::span<DraftJob> jobs) {
   using qwen38_flash_next::MtpCandidateLogits;
   const std::size_t candidate_ids =
       qwen38_flash_next::rocm::MtpCandidateWorkspaceSize(vocab);
+  const std::span<const std::int32_t> head_tokens = model_.draft_head_tokens();
+  const bool small = n == 1 && jobs[0].head.small && !head_tokens.empty() &&
+                     GemvFormatOf(dm.token_embd.type).has_value() &&
+                     dm.token_embd.rows > kDraftHeadRows &&
+                     jobs[0].head.table.size() <= kDraftTableRows;
+  const std::span<const std::int32_t> table =
+      small ? jobs[0].head.table : std::span<const std::int32_t>{};
   // Row j drafts for job j every step; rows whose chain ended keep being
   // projected (the batched projections cost the same) but are not attended,
   // ranked or proposed.
@@ -1353,16 +1395,31 @@ void Executor::DraftChains(std::span<DraftJob> jobs) {
     // projection back to the target width for the next step. Proposals have
     // no decode twin to match, so the fastest one-row kernel reads the head
     // (repacked as Q4_K at load).
-    if (const auto format = GemvFormatOf(dm.token_embd.type);
-        n != 1 || !format ||
-        !LaunchKQuantGemv(*format, dm.token_embd.data, draft_h_, draft_logits_,
-                          dm.token_embd.rows, dm.token_embd.cols, stream_)) {
+    // A lone chain on the small head scores the leading ordered rows, then
+    // its table rows right after them.
+    const auto format = GemvFormatOf(dm.token_embd.type);
+    std::uint32_t scored = vocab;
+    if (small &&
+        LaunchKQuantGemv(*format, dm.token_embd.data, draft_h_, draft_logits_,
+                         kDraftHeadRows, dm.token_embd.cols, stream_)) {
+      if (!table.empty() &&
+          !LaunchKQuantGemv(*format, jobs[0].cache->draft_table, draft_h_,
+                            draft_logits_ + kDraftHeadRows,
+                            static_cast<std::uint32_t>(table.size()),
+                            dm.token_embd.cols, stream_)) {
+        throw std::runtime_error("gemma4 draft table projection failed");
+      }
+      scored = kDraftHeadRows + static_cast<std::uint32_t>(table.size());
+    } else if (n != 1 || !format ||
+               !LaunchKQuantGemv(*format, dm.token_embd.data, draft_h_,
+                                 draft_logits_, dm.token_embd.rows,
+                                 dm.token_embd.cols, stream_)) {
       Project(dm.token_embd, draft_h_, nullptr, n, draft_logits_);
     }
     // The host picks each proposal (and where each chain ends) from its
     // row's top-64 candidates; the next step embeds them. One download and
     // one wait serve every row.
-    const std::size_t count = std::min<std::size_t>(vocab, kMtpCandidates);
+    const std::size_t count = std::min<std::size_t>(scored, kMtpCandidates);
     static_assert(offsetof(MtpCandidateLogits, logits) ==
                   kMtpCandidates * sizeof(std::uint32_t));
     for (std::uint32_t j = 0; j < n; ++j) {
@@ -1373,7 +1430,7 @@ void Executor::DraftChains(std::span<DraftJob> jobs) {
       qwen38_flash_next::rocm::MtpTopCandidates(
           draft_logits_ + std::size_t{j} * vocab, ids,
           draft_candidate_scratch_ + j * candidate_ids,
-          reinterpret_cast<float*>(ids + kMtpCandidates), vocab, stream_);
+          reinterpret_cast<float*>(ids + kMtpCandidates), scored, stream_);
       HIP_CHECK(hipMemcpyAsync(
           &draft_candidates_host_[j], ids,
           offsetof(MtpCandidateLogits, logits) + count * sizeof(float),
@@ -1387,6 +1444,15 @@ void Executor::DraftChains(std::span<DraftJob> jobs) {
       }
       auto& host = draft_candidates_host_[j];
       host.size = count;
+      // Head rows back to token ids.
+      if (!head_tokens.empty()) {
+        for (std::size_t k = 0; k < count; ++k) {
+          const auto row = static_cast<std::uint32_t>(host.ids[k]);
+          host.ids[k] = row >= kDraftHeadRows && scored != vocab
+                            ? table[row - kDraftHeadRows]
+                            : head_tokens[row];
+        }
+      }
       const DraftProposal proposal = jobs[j].propose(host);
       active[j] = 0;
       if (!proposal.token) {

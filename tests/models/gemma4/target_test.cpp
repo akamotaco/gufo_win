@@ -570,14 +570,33 @@ int main() {
                 single == GpuLogits(*mtp, tokens, 16),
             "verification rows differ from single-token decode");
     // ...so greedy speculation reproduces autoregressive output.
+    g4::Session::SpeculativeStats greedy_stats;
     for (const char* text :
          {"Write one sentence about the sea near Genoa.",
           "List the first twelve prime numbers, separated by commas.",
           "Explain in three sentences why the sky is blue."}) {
       const auto prompt = PromptTokens(*mtp, text);
       const auto ar = Generate(*mtp, prompt, 64, false);
-      const auto spec = Generate(*mtp, prompt, 64, true);
+      g4::Session::SpeculativeStats stats;
+      const auto spec = Generate(*mtp, prompt, 64, true, {}, &stats);
       Require(ar == spec, std::string("greedy MTP differs from AR: ") + text);
+      greedy_stats.small_head_cycles += stats.small_head_cycles;
+      greedy_stats.small_head_drafted += stats.small_head_drafted;
+      greedy_stats.small_head_accepted += stats.small_head_accepted;
+    }
+    // English drafts on the 26B-A4B's small head, whose rows map back to
+    // the right tokens: a wrong row order would leave nothing accepted.
+    std::cout << "small head: cycles " << greedy_stats.small_head_cycles
+              << ", drafted " << greedy_stats.small_head_drafted
+              << ", accepted " << greedy_stats.small_head_accepted << '\n';
+    if (mtp->config().HasExperts()) {
+      Require(greedy_stats.small_head_cycles > 0 &&
+                  greedy_stats.small_head_accepted * 2 >=
+                      greedy_stats.small_head_drafted,
+              "small draft head accepts too few drafts");
+    } else {
+      Require(greedy_stats.small_head_cycles == 0,
+              "the dense model drafted on the small head");
     }
     // Siblings: an accepted one's row and the keys it leaves in the cache
     // continue exactly as decode would.

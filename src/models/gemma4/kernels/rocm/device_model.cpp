@@ -11,7 +11,9 @@
 
 #include "src/core/hip/managed_alloc.hpp"
 #include "src/core/hip/weight_upload.hpp"
+#include "src/core/quant/ggml_dequant.hpp"
 #include "src/models/gemma4/kernels/rocm/gemv.hpp"
+#include "src/models/gemma4/kernels/rocm/kernels.hpp"
 #include "src/models/gemma4/kernels/rocm/moe.hpp"
 
 namespace gufo::models::gemma4::rocm {
@@ -233,7 +235,7 @@ DeviceModel::~DeviceModel() {
 std::unique_ptr<DeviceModel> DeviceModel::Upload(
     const ModelWeights& weights, const core::GgufReader& reader,
     const DraftWeights* draft, const core::GgufReader* draft_reader,
-    std::string* error_msg) {
+    std::span<const std::int32_t> draft_order, std::string* error_msg) {
   std::unique_ptr<DeviceModel> m(new DeviceModel());
   m->config_ = weights.config;
   m->vocab_ = weights.vocab_size;
@@ -404,6 +406,55 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
       m->bytes_ -= std::size_t{head.rows} * head.cols / 32 * 34 + kTailMargin;
       head.data = q4;
       head.type = core::GgmlType::kQ4_K;
+    }
+    // Rows in `draft_order`, so a draft step can score a leading range.
+    const std::size_t row_bytes =
+        quant::QuantizedRowBytes(head.type, head.cols);
+    if (draft_order.size() == head.rows && row_bytes != 0 &&
+        row_bytes % 16 == 0) {
+      const std::size_t size = row_bytes * head.rows;
+      void* ordered = up.Allocate(size, "draft vocabulary head (ordered)");
+      if (ordered == nullptr) {
+        return nullptr;
+      }
+      std::vector<CopyRun> runs(head.rows);
+      m->draft_head_rows_.assign(head.rows, 0);
+      for (std::uint32_t row = 0; row < head.rows; ++row) {
+        const auto token = static_cast<std::size_t>(draft_order[row]);
+        runs[row] = {
+            static_cast<const std::uint8_t*>(head.data) + token * row_bytes,
+            static_cast<std::uint8_t*>(ordered) + row * row_bytes, row_bytes};
+        m->draft_head_rows_[token] = row;
+      }
+      void* device_runs = nullptr;
+      if (hip::AllocateDevice(&device_runs, runs.size() * sizeof(CopyRun)) !=
+              hipSuccess ||
+          hipMemcpy(device_runs, runs.data(), runs.size() * sizeof(CopyRun),
+                    hipMemcpyHostToDevice) != hipSuccess) {
+        (void)hipFree(device_runs);
+        if (error_msg != nullptr) {
+          *error_msg = "draft vocabulary head reorder failed";
+        }
+        return nullptr;
+      }
+      CopyRuns(static_cast<const CopyRun*>(device_runs), head.rows, row_bytes,
+               nullptr);
+      const bool copied = hipDeviceSynchronize() == hipSuccess;
+      (void)hipFree(device_runs);
+      if (!copied) {
+        if (error_msg != nullptr) {
+          *error_msg = "draft vocabulary head reorder failed";
+        }
+        return nullptr;
+      }
+      auto& allocations = m->allocations_;
+      allocations.erase(
+          std::find(allocations.begin(), allocations.end(), head.data));
+      (void)hipFree(head.data);
+      m->bytes_ -= size + kTailMargin;
+      head.data = ordered;
+      m->draft_head_tokens_.assign(draft_order.begin(), draft_order.end());
+      m->draft_row_bytes_ = row_bytes;
     }
   }
   if (hipDeviceSynchronize() != hipSuccess) {

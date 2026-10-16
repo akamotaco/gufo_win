@@ -29,6 +29,14 @@ struct DraftProposal {
   bool last{false};
 };
 
+/// The drafter head rows a chain scores: the leading kDraftHeadRows rows of
+/// the ordered head plus the session's table rows, which hold `table`'s
+/// tokens; otherwise (or with more than one chain) the whole head.
+struct DraftHead {
+  bool small{false};
+  std::span<const std::int32_t> table;
+};
+
 /// Picks the next draft from the drafter's top candidate logits.
 using DraftProposer =
     std::function<DraftProposal(const qwen38_flash_next::MtpCandidateLogits&)>;
@@ -52,6 +60,9 @@ struct KvCache {
   /// The same for the last of the lookahead rows a prefill computed past the
   /// frontier (Session::Sync), adopted if the next Sync asks for them.
   float* ahead_hidden{nullptr};
+  /// kDraftTableRows drafter head rows (LoadDraftTable) when the head is
+  /// ordered (DeviceModel::draft_head_tokens), else null.
+  void* draft_table{nullptr};
   /// Positions [written_from, written_to) span every row Forward and MoveKey
   /// wrote since the owner last reset them (Session's shared snapshot
   /// blocks); a new cache counts as written everywhere.
@@ -87,7 +98,8 @@ public:
   /// Per-session cache bytes for per-layer K row widths (KeyWidths).
   [[nodiscard]] static std::size_t CacheBytes(
       const Config& config, std::uint32_t max_context, std::uint32_t ring,
-      const std::vector<std::uint32_t>& key_widths);
+      const std::vector<std::uint32_t>& key_widths,
+      std::size_t draft_table_bytes);
   /// Values per K cache row: the whole K, or only the rotated dims where one
   /// projection feeds K and V (K = rope(k_norm * V)).
   [[nodiscard]] static std::vector<std::uint32_t> KeyWidths(
@@ -148,7 +160,14 @@ public:
   /// returns; `drafts` ends where it returns nothing or a last token.
   void DraftChain(KvCache& cache, std::int32_t token, std::uint32_t position,
                   std::uint32_t steps, std::vector<std::int32_t>* drafts,
-                  const DraftProposer& propose);
+                  const DraftProposer& propose, DraftHead head);
+
+  /// Copies the drafter head rows of `tokens` into table rows
+  /// [first, first + tokens.size()) of the cache's draft table.
+  void LoadDraftTable(KvCache& cache, std::uint32_t first,
+                      std::span<const std::int32_t> tokens);
+  /// Bytes of a cache's draft table (0 when the head is not ordered).
+  [[nodiscard]] std::size_t draft_table_bytes() const noexcept;
 
   /// One session's chain in DraftChains.
   struct DraftJob {
@@ -158,6 +177,7 @@ public:
     std::uint32_t steps;
     DraftProposer propose;
     std::vector<std::int32_t>* drafts;
+    DraftHead head;
   };
   /// DraftChain for up to kMaxDraftSessions sessions at once: every step is
   /// one drafter forward over all chains still running (each attending its
