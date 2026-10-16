@@ -32,6 +32,19 @@ inline constexpr std::uint32_t kWmmaGemvRows = 16;
 [[nodiscard]] bool WmmaGemvSupports(core::GgmlType type, std::uint32_t m,
                                     std::uint32_t k) noexcept;
 
+/// Where a width-k activation pack lives in a LaunchWmmaGemv scratch: a
+/// kernel producing a projection input can fill rows [0, rows) of it
+/// (PackStaged, wmma_pack.hpp) and the projection then runs with
+/// `packed = true`. A null `hi` means no pack.
+struct WmmaPackOut {
+  void* hi{nullptr};
+  void* lo{nullptr};
+  float* inv{nullptr};
+  float* sums{nullptr};
+  std::uint32_t k{0};
+};
+[[nodiscard]] WmmaPackOut WmmaPackOf(void* scratch, std::uint32_t k) noexcept;
+
 /// Bytes of the activation pack and partial sums LaunchWmmaGemv needs for
 /// reductions up to `max_k`.
 [[nodiscard]] std::size_t WmmaGemvScratchBytes(std::uint32_t max_k) noexcept;

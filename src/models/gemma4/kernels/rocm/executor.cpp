@@ -506,6 +506,17 @@ std::optional<ExpertFormat> DenseGemvFormat(core::GgmlType type,
 
 }  // namespace
 
+bool Executor::WmmaProjection(const DeviceTensor& w, std::uint32_t rows) const {
+  return w.type != core::GgmlType::kF16 && rows >= 1 && rows <= kSplitRows &&
+         rows <= kWmmaGemvRows && !DenseGemvFormat(w.type, w.cols) &&
+         w.cols >= 2048 && (model_.has_draft() || rows >= 6) &&
+         WmmaGemvSupports(w.type, w.rows, w.cols);
+}
+
+WmmaPackOut Executor::PackFor(const DeviceTensor& w, std::uint32_t rows) const {
+  return WmmaProjection(w, rows) ? WmmaPackOf(wmma_, w.cols) : WmmaPackOut{};
+}
+
 void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
                        std::uint32_t rows, float* y, bool packed) {
   if (w.type == core::GgmlType::kF16) {
@@ -545,7 +556,7 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
   // Target projections take the WMMA kernel at every width when the drafter
   // is loaded (verification rows round like single tokens), and batched
   // autoregressive rows from six on, where it is faster.
-  if (w.cols >= 2048 && (model_.has_draft() || rows >= 6) &&
+  if (WmmaProjection(w, rows) &&
       LaunchWmmaGemv(w.type, w.data, x, y, rows, w.rows, w.cols, wmma_, stream_,
                      packed)) {
     return;
@@ -758,6 +769,8 @@ void Executor::Forward(std::span<const Segment> segments,
                 "writes past the grouped width");
   // Whether the previous layer's mixture wrote this layer's binary16 input.
   bool half_ready = false;
+  // Whether h_ (the current layer's input) already holds its WMMA pack.
+  bool h_packed = false;
   // A binary16 input whose every consumer is a Q8_0 or binary16 projection
   // (the binary16 GEMMs) needs no FP32 row.
   const auto half_only = [&](std::initializer_list<const DeviceTensor*> ws) {
@@ -805,27 +818,26 @@ void Executor::Forward(std::span<const Segment> segments,
     float* q_source = q_;
     float* k_source = k_;
     float* v_source = k_;
+    // h_packed: the previous layer's norm left h_'s pack (width d); the
+    // first WMMA projection over h_ packs it otherwise, for the rest.
     if (qkv_stride != 0) {
-      Project(L.attn_qkv, h_, hq, n, k_);
+      Project(L.attn_qkv, h_, hq, n, k_, h_packed);
       q_source = k_;
       k_source = k_ + c.QDim(l);
       if (separate_v) {
         v_source = k_ + std::size_t{n} * qkv_stride;
         Project(L.attn_v, h_, hq, n, v_source,
-                WmmaGemvSupports(L.attn_qkv.type, L.attn_qkv.rows,
-                                 L.attn_qkv.cols));
+                h_packed || WmmaProjection(L.attn_qkv, n));
       } else {
         v_source = L.attn_v.empty() ? k_source : k_source + c.KvDim(l);
       }
     } else {
-      Project(L.attn_q, h_, hq, n, q_);
-      const bool q_packed =
-          WmmaGemvSupports(L.attn_q.type, L.attn_q.rows, L.attn_q.cols);
+      Project(L.attn_q, h_, hq, n, q_, h_packed);
+      const bool q_packed = h_packed || WmmaProjection(L.attn_q, n);
       Project(L.attn_k, h_, hq, n, k_, q_packed);
       if (!L.attn_v.empty()) {
         Project(L.attn_v, h_, hq, n, v_,
-                q_packed || WmmaGemvSupports(L.attn_k.type, L.attn_k.rows,
-                                             L.attn_k.cols));
+                q_packed || WmmaProjection(L.attn_k, n));
         v_source = v_;
       }
     }
@@ -833,6 +845,11 @@ void Executor::Forward(std::span<const Segment> segments,
     const std::size_t kv_row = qkv_stride != 0 ? qkv_stride : c.KvDim(l);
     const std::size_t v_row =
         qkv_stride != 0 && !separate_v ? qkv_stride : c.KvDim(l);
+    // At decode widths the attention merge packs its FP32 rows for a WMMA
+    // output projection.
+    const WmmaPackOut attn_pack = prefill || half_only({&L.attn_output})
+                                      ? WmmaPackOut{}
+                                      : PackFor(L.attn_output, n);
     std::uint32_t row0 = 0;
     for (const Segment& seg : segments) {
       KvCache& cache = *seg.cache;
@@ -886,13 +903,16 @@ void Executor::Forward(std::span<const Segment> segments,
                : nullptr;
       att.siblings = post.siblings;
       att.spare_key = post.spare_key;
+      att.pack = attn_pack;
+      att.pack_row0 = row0;
       DeriveKeys(att, l);
       Attention(att, stream_);
       row0 += seg.rows;
     }
 
     Project(L.attn_output, attn_,
-            half ? x_half_ : Quantize(attn_, n, c.QDim(l)), n, o_);
+            half ? x_half_ : Quantize(attn_, n, c.QDim(l)), n, o_,
+            attn_pack.hi != nullptr);
     // Expert layers also normalize the attention residual for the experts.
     const bool moe = !L.gate_up_exps.empty();
     const bool dense_half_only = !L.ffn_gate_up.empty()
@@ -901,13 +921,19 @@ void Executor::Forward(std::span<const Segment> segments,
     const bool experts_half_only = half && moe && HalfExperts(L, c);
     const bool dense_fp32 =
         fp32_input({&L.ffn_gate_up, &L.ffn_gate, &L.ffn_up});
+    // At decode widths the norm packs h_ for a WMMA [gate | up] (or gate).
+    const WmmaPackOut ffn_pack =
+        prefill || dense_half_only
+            ? WmmaPackOut{}
+            : PackFor(!L.ffn_gate_up.empty() ? L.ffn_gate_up : L.ffn_gate, n);
     PostAttentionNorm(o_, L.post_attn_norm.f32(), x_, L.ffn_norm.f32(),
                       dense_half_only ? nullptr : h_, n, d, eps, stream_,
                       prefill && !dense_fp32 ? q8_ : nullptr,
                       moe ? L.pre_ffn_norm_2.f32() : nullptr,
                       moe && !experts_half_only ? moe_h_ : nullptr,
                       half ? x_half_ : nullptr,
-                      half && moe ? moe_x_half_ : nullptr);
+                      half && moe ? moe_x_half_ : nullptr, ffn_pack);
+    const bool ffn_packed = ffn_pack.hi != nullptr;
     const void* fq = prefill && !dense_fp32 ? q8_
                      : half                 ? x_half_
                                             : Quantize(h_, n, d);
@@ -922,6 +948,7 @@ void Executor::Forward(std::span<const Segment> segments,
     }
     const void* gq = nullptr;
     const float* down_in = gate_;
+    WmmaPackOut down_pack{};
     const auto gate_up_half = DenseHalfFormat(L.ffn_gate_up.type);
     if (!L.ffn_gate_up.empty() && half && gate_up_half &&
         half_only({&L.ffn_down}) &&
@@ -932,15 +959,19 @@ void Executor::Forward(std::span<const Segment> segments,
       // (free) gate rows as the down projection's binary16 input.
       gq = gate_;
     } else if (!L.ffn_gate_up.empty() && !prefill) {
-      // One projection writes [gate | up] rows.
-      Project(L.ffn_gate_up, h_, fq, n, gate_);
-      GeGluPacked(gate_, half_only({&L.ffn_down}) ? nullptr : act_, n,
-                  c.ffn_size, stream_, half ? x_half_ : nullptr);
+      // One projection writes [gate | up] rows; GeGLU packs its rows for a
+      // WMMA down projection.
+      Project(L.ffn_gate_up, h_, fq, n, gate_, ffn_packed);
+      const bool act_fp32 = !half_only({&L.ffn_down});
+      down_pack = act_fp32 ? PackFor(L.ffn_down, n) : WmmaPackOut{};
+      GeGluPacked(gate_, act_fp32 ? act_ : nullptr, n, c.ffn_size, stream_,
+                  half ? x_half_ : nullptr, down_pack);
       down_in = act_;
       gq = half ? x_half_ : Quantize(act_, n, c.ffn_size);
     } else {
-      Project(L.ffn_gate, h_, fq, n, gate_);
-      Project(L.ffn_up, h_, fq, n, up_);
+      Project(L.ffn_gate, h_, fq, n, gate_, ffn_packed);
+      Project(L.ffn_up, h_, fq, n, up_,
+              ffn_packed || WmmaProjection(L.ffn_gate, n));
       // A binary16 down projection narrows the FP32 GeGLU rows itself.
       if (prefill && L.ffn_down.type != core::GgmlType::kF16) {
         GeGluQuantize(gate_, up_, q8_, n, c.ffn_size, stream_);
@@ -950,8 +981,20 @@ void Executor::Forward(std::span<const Segment> segments,
         gq = Quantize(gate_, n, c.ffn_size);
       }
     }
-    Project(L.ffn_down, down_in, gq, n, o_);
+    Project(L.ffn_down, down_in, gq, n, o_, down_pack.hi != nullptr);
     const bool last = l + 1 == c.num_layers;
+    // At decode widths the layer's last norm packs the next layer's input for
+    // its WMMA Q/K/V projections (the vocabulary head after the last layer
+    // packs its gathered rows itself).
+    WmmaPackOut next_pack{};
+    if (!last && !prefill) {
+      const DeviceLayer& N = layers[l + 1];
+      if (WmmaProjection(N.attn_q, n) ||
+          (!N.attn_qkv.empty() && WmmaProjection(N.attn_qkv, n))) {
+        next_pack = WmmaPackOf(wmma_, d);
+      }
+    }
+    bool next_h_packed = false;
     const float* next =
         !last ? layers[l + 1].attn_norm.f32() : model_.output_norm().f32();
     // The output-normed rows of the last layer feed the vocabulary head and
@@ -978,8 +1021,10 @@ void Executor::Forward(std::span<const Segment> segments,
       finish.used = c.experts_used;
       finish.eps = eps;
       finish.h_half = half && !last ? x_half_ : nullptr;
+      finish.pack = next_pack;
       MoeFinish(finish, stream_);
       half_ready = finish.h_half != nullptr;
+      next_h_packed = next_pack.hi != nullptr;
     } else {
       // Binary16 prefill: the norm also writes the next layer's binary16
       // input (and only that when every consumer reads binary16).
@@ -988,9 +1033,11 @@ void Executor::Forward(std::span<const Segment> segments,
           o_, L.post_ffn_norm.f32(), L.output_scale, x_, next,
           next_half && qkv_half_only(layers[l + 1]) ? nullptr : h_, n, d, eps,
           stream_, prefill && !last && !qkv_fp32(layers[l + 1]) ? q8_ : nullptr,
-          next_half ? x_half_ : nullptr);
+          next_half ? x_half_ : nullptr, next_pack);
       half_ready = next_half;
+      next_h_packed = next_pack.hi != nullptr;
     }
+    h_packed = next_h_packed;
     if (tap_sink_) {
       tap_sink_(l, x_, n, stream_);
     }

@@ -16,6 +16,8 @@
 #include <cstdint>
 #include <optional>
 #include <utility>
+
+#include "src/models/gemma4/kernels/rocm/wmma_pack.hpp"
 #ifndef ROTMUL
 #define ROTMUL 5
 #endif
@@ -62,9 +64,7 @@ Pack PackOf(void* scratch, std::uint32_t k) {
   return p;
 }
 
-/// One thread per (row, 32-value sub-block): the scale 2^e putting the
-/// sub-block's maximum in [2^13, 2^14), x 2^e as binary16 hi + lo, 2^-e, and
-/// the sequential FP32 sum of x.
+/// One thread per (row, 32-value sub-block).
 __global__ void PackKernel(const float* __restrict__ x, std::uint32_t rows,
                            std::uint32_t k, __half* __restrict__ hi,
                            __half* __restrict__ lo, float* __restrict__ inv,
@@ -76,52 +76,7 @@ __global__ void PackKernel(const float* __restrict__ x, std::uint32_t rows,
   }
   const std::uint32_t t = i / blocks;
   const std::uint32_t b = i % blocks;
-  const auto* src =
-      reinterpret_cast<const float4*>(x + std::size_t{t} * k + b * 32);
-  float v[32];
-#pragma unroll
-  for (int j = 0; j < 8; ++j) {
-    const float4 f = src[j];
-    v[4 * j] = f.x;
-    v[4 * j + 1] = f.y;
-    v[4 * j + 2] = f.z;
-    v[4 * j + 3] = f.w;
-  }
-  float peak = 0.0F;
-  float sum = 0.0F;
-#pragma unroll
-  for (int j = 0; j < 32; ++j) {
-    peak = fmaxf(peak, fabsf(v[j]));
-    sum += v[j];
-  }
-  int e = 0;
-  if (peak > 0.0F) {
-    int exponent = 0;
-    (void)frexpf(peak, &exponent);
-    e = 14 - exponent;
-  }
-  const float scale = ldexpf(1.0F, e);
-  __half h[32];
-  __half l[32];
-#pragma unroll
-  for (int j = 0; j < 32; ++j) {
-    const float s = v[j] * scale;
-    h[j] = __float2half_rn(s);
-    l[j] = __float2half_rn(s - __half2float(h[j]));
-  }
-  auto* dh = reinterpret_cast<uint4*>(hi + std::size_t{t} * k + b * 32);
-  auto* dl = reinterpret_cast<uint4*>(lo + std::size_t{t} * k + b * 32);
-#pragma unroll
-  for (int j = 0; j < 4; ++j) {
-    uint4 a;
-    uint4 c;
-    __builtin_memcpy(&a, &h[8 * j], 16);
-    __builtin_memcpy(&c, &l[8 * j], 16);
-    dh[j] = a;
-    dl[j] = c;
-  }
-  inv[b * kWmmaGemvRows + t] = ldexpf(1.0F, -e);
-  sums[b * kWmmaGemvRows + t] = sum;
+  PackWmmaBlock(x + std::size_t{t} * k + b * 32, t, b, k, hi, lo, inv, sums);
 }
 
 __device__ __forceinline__ std::uint32_t ByteOf(const uint4& h, int i) {
@@ -679,6 +634,11 @@ std::optional<WmmaFormat> FormatOf(core::GgmlType type) {
 bool WmmaGemvSupports(core::GgmlType type, std::uint32_t m,
                       std::uint32_t k) noexcept {
   return FormatOf(type).has_value() && m > 0 && k > 0 && k % kSuper == 0;
+}
+
+WmmaPackOut WmmaPackOf(void* scratch, std::uint32_t k) noexcept {
+  const Pack p = PackOf(scratch, k);
+  return {.hi = p.hi, .lo = p.lo, .inv = p.inv, .sums = p.sums, .k = k};
 }
 
 std::size_t WmmaGemvScratchBytes(std::uint32_t max_k) noexcept {

@@ -221,6 +221,13 @@ private:
   /// `packed` says `wmma_` already holds `x`'s WMMA activation pack.
   void Project(const DeviceTensor& w, const float* x, const void* xq,
                std::uint32_t rows, float* y, bool packed = false);
+  /// Whether Project reads `w` at `rows` with the WMMA kernel.
+  [[nodiscard]] bool WmmaProjection(const DeviceTensor& w,
+                                    std::uint32_t rows) const;
+  /// The WMMA pack a producer of Project(w, rows)'s input fills (null when
+  /// that projection takes another kernel).
+  [[nodiscard]] WmmaPackOut PackFor(const DeviceTensor& w,
+                                    std::uint32_t rows) const;
   /// Project for drafter weights, which need not round like any other width.
   void ProjectDraft(const DeviceTensor& w, const float* x, std::uint32_t rows,
                     float* y);

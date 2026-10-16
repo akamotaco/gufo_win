@@ -6,6 +6,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "src/models/gemma4/kernels/rocm/wmma_gemv.hpp"
+
 namespace gufo::models::gemma4::rocm {
 
 /// Routed expert weight formats with decode and verification kernels.
@@ -174,6 +176,8 @@ struct MoeFinishArgs {
   /// Optional binary16 copy of h (round to nearest, as NarrowActivations);
   /// h may then be null.
   void* h_half;
+  /// Decode widths: h's rows also fill this WMMA activation pack.
+  WmmaPackOut pack;
 };
 void MoeFinish(const MoeFinishArgs& args, hipStream_t stream);
 

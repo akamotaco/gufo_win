@@ -15,6 +15,7 @@
 
 #include "src/models/gemma4/kernels/rocm/gemv_tasks.hpp"
 #include "src/models/gemma4/kernels/rocm/half_store.hpp"
+#include "src/models/gemma4/kernels/rocm/wmma_pack.hpp"
 
 namespace gufo::models::gemma4::rocm {
 namespace {
@@ -811,6 +812,7 @@ __global__ void __launch_bounds__(kFinishThreads)
   }
   const float rx =
       1.0F / sqrtf(WideBlockSum<kFinishThreads>(ss_x, scratch) / n + a.eps);
+  extern __shared__ float pack_stage[];
 #pragma unroll
   for (std::uint32_t j = 0; j < kFinishRegisters; ++j) {
     const std::uint32_t i = threadIdx.x + j * kFinishThreads;
@@ -822,7 +824,13 @@ __global__ void __launch_bounds__(kFinishThreads)
       if (a.h_half != nullptr) {
         static_cast<__half*>(a.h_half)[base + i] = HalfOf(v);
       }
+      if (a.pack.hi != nullptr) {
+        pack_stage[i] = v;
+      }
     }
+  }
+  if (a.pack.hi != nullptr) {
+    PackStaged(pack_stage, a.hidden / 32, blockIdx.x, 0, a.pack);
   }
 }
 
@@ -1008,7 +1016,10 @@ bool LaunchDenseGemv(ExpertFormat format, const void* w, const float* x,
 void MoeFinish(const MoeFinishArgs& args, hipStream_t stream) {
   // One row per 1024-thread block keeps six values per thread in registers
   // (narrower blocks spill the row).
-  MoeFinishKernel<1024><<<args.rows, 1024, 0, stream>>>(args);
+  MoeFinishKernel<1024>
+      <<<args.rows, 1024,
+         args.pack.hi != nullptr ? args.hidden * sizeof(float) : 0, stream>>>(
+          args);
 }
 
 void ScaleRouter(float* router, const float* scale, std::uint32_t experts,
