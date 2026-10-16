@@ -211,9 +211,8 @@ __global__ void __launch_bounds__(kThreads)
   constexpr int kActChunks = kTileTokens * kStageK / 8;
   constexpr int kActPer = (kActChunks + kThreads - 1) / kThreads;
   __shared__
-      __attribute__((aligned(16))) std::uint8_t s_rows[kRowsPerBlock * kStride];
-  __shared__
       __attribute__((aligned(16))) __half s_act[kTileTokens * kActStride];
+  auto* s_rows = reinterpret_cast<std::uint8_t*>(s_act);
   int expert = 0;
   int t_local = 0;
   int bucket_begin = 0;
@@ -410,12 +409,7 @@ __global__ void __launch_bounds__(kThreads)
   fetch_act(0);
   for (int stage = 0; stage < stages; ++stage) {
     commit_weights();
-    commit_act();
-    __syncthreads();
-    if (stage + 1 < stages) {
-      fetch_weights(stage + 1);
-      fetch_act(stage + 1);
-    }
+    __builtin_amdgcn_s_waitcnt(0x007f);
     const auto* row =
         reinterpret_cast<const uint4*>(s_rows + (wave * 16 + sub) * kStride);
     const uint4 q[4] = {row[0], row[1], row[2], row[3]};
@@ -425,6 +419,13 @@ __global__ void __launch_bounds__(kThreads)
       qh[1] = row[5];
     }
     const uint4 sc4 = row[kScaleChunk];
+    __syncthreads();
+    commit_act();
+    __syncthreads();
+    if (stage + 1 < stages) {
+      fetch_weights(stage + 1);
+      fetch_act(stage + 1);
+    }
     const __half2 scale[4] = {
         __builtin_bit_cast(__half2, sc4.x), __builtin_bit_cast(__half2, sc4.y),
         __builtin_bit_cast(__half2, sc4.z), __builtin_bit_cast(__half2, sc4.w)};

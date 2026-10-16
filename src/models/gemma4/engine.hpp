@@ -400,6 +400,7 @@ private:
   /// picks the head for a chain after `anchor`.
   rocm::DraftHead PrepareDraftHead(TokenId anchor);
   void FinishCycle(Cycle& cycle, std::span<const float> logits,
+                   std::span<const std::uint32_t> argmax,
                    std::uint32_t first_hidden_row);
 
   std::shared_ptr<Model> model_;

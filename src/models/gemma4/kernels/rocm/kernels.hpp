@@ -55,6 +55,7 @@ struct QkvPostArgs {
   /// Floats between consecutive rows of q, k and v when they are slices of
   /// one fused projection's rows; 0 means packed rows of their own widths.
   std::uint32_t row_stride;
+  std::uint32_t v_stride;
   /// Packed destination of the processed Q ([rows][heads * head_dim]); null
   /// rewrites q in place.
   float* q_out;
@@ -64,14 +65,27 @@ struct QkvPostArgs {
 void QkvPost(const QkvPostArgs& args, hipStream_t stream);
 
 /// Query-only post-processing (MTP draft layers): Q = rope(rms(q) * q_norm)
-/// at one shared position for every row; with `rotated_pairs` > 0 the
-/// unrotated dims are multiplied by `key_weight` as QkvPost does.
+/// at `position` (or `position + row` when `!shared_position`); with
+/// `rotated_pairs` > 0 the unrotated dims are multiplied by `key_weight` as
+/// QkvPost does.
 void QueryPost(float* q, const float* q_norm, float theta_scale,
                const float* freq_factors, std::uint32_t rows,
                std::uint32_t heads, std::uint32_t head_dim,
                std::uint32_t position, bool shared_position, float eps,
                const float* key_weight, std::uint32_t rotated_pairs,
                hipStream_t stream);
+
+/// Fused MTP drafter input staging: for each row r < rows,
+/// out[2 r] = embed[r] * scale and out[2 r + 1] = hidden[r] (width `dim`).
+struct DraftConcatArgs {
+  const float* embed;
+  const float* hidden[8];
+  float* out;
+  float scale;
+  std::uint32_t rows;
+  std::uint32_t dim;
+};
+void DraftConcat(const DraftConcatArgs& args, hipStream_t stream);
 
 /// Scale-1 attention of FP32 queries over binary16 K/V caches.
 /// Row r queries position `first_position + r` (or `first_position` for all

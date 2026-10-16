@@ -411,7 +411,8 @@ __global__ void __launch_bounds__(kThreads)
                float* __restrict__ y, std::uint32_t rows, std::uint32_t m,
                std::uint32_t k, std::uint32_t per_split) {
   using Format = Fmt<F>;
-  __shared__ __attribute__((aligned(16))) __half s_x[2][16 * kActStride];
+  constexpr int kTiles = kPacked ? 1 : 2;
+  __shared__ __attribute__((aligned(16))) __half s_x[kTiles][16 * kActStride];
   // [32-value block][half][i]: row 2 i + half.
   __shared__ __attribute__((aligned(16))) float s_inv[8][2][8];
   __shared__ __attribute__((aligned(16))) float s_sum[8][2][8];
@@ -471,9 +472,9 @@ __global__ void __launch_bounds__(kThreads)
         a01;
     if constexpr (!kPacked) {
       *reinterpret_cast<uint4*>(
-          &s_x[1][(c0 / 32) * kActStride + (c0 % 32) * 8]) = a10;
+          &s_x[kTiles - 1][(c0 / 32) * kActStride + (c0 % 32) * 8]) = a10;
       *reinterpret_cast<uint4*>(
-          &s_x[1][(c1 / 32) * kActStride + (c1 % 32) * 8]) = a11;
+          &s_x[kTiles - 1][(c1 / 32) * kActStride + (c1 % 32) * 8]) = a11;
     }
     const int s = (tid & 127) >> 4;
     const int t = tid & 15;
@@ -504,7 +505,8 @@ __global__ void __launch_bounds__(kThreads)
       hi_chain = Wmma(a, g.frag[f], hi_chain);
       if constexpr (!kPacked) {
         v16h l;
-        __builtin_memcpy(&l, &s_x[1][sub * kActStride + kOffset + 16 * f], 32);
+        __builtin_memcpy(
+            &l, &s_x[kTiles - 1][sub * kActStride + kOffset + 16 * f], 32);
         lo_chain = Wmma(l, g.frag[f], lo_chain);
       }
     }
@@ -558,8 +560,12 @@ __global__ void __launch_bounds__(kThreads)
   // channels together; each row's order stays fixed. The next super-block
   // loads while this one computes.
   const int span = sb1 - sb0;
-  const int rot = span > 0 ? static_cast<int>(blockIdx.x) % span : 0;
-  const auto at = [&](int i) { return sb0 + (i + rot) % span; };
+  const int rot =
+      span > 0 ? static_cast<int>(blockIdx.x % static_cast<unsigned>(span)) : 0;
+  const auto at = [&](int i) {
+    const int idx = i + rot;
+    return sb0 + (idx >= span ? idx - span : idx);
+  };
   typename Format::Raw next{};
   if (span > 0) {
     next = Format::Load(super(at(0)));
@@ -652,14 +658,17 @@ std::size_t WmmaGemvScratchBytes(std::uint32_t max_k) noexcept {
 
 bool LaunchWmmaGemv(core::GgmlType type, const void* w, const float* x,
                     float* y, std::uint32_t rows, std::uint32_t m,
-                    std::uint32_t k, void* scratch, hipStream_t stream) {
+                    std::uint32_t k, void* scratch, hipStream_t stream,
+                    bool packed) {
   if (!WmmaGemvSupports(type, m, k) || rows == 0 || rows > kWmmaGemvRows) {
     return false;
   }
   const Pack pack = PackOf(scratch, k);
-  const std::uint32_t items = rows * (k / 32);
-  PackKernel<<<(items + kThreads - 1) / kThreads, kThreads, 0, stream>>>(
-      x, rows, k, pack.hi, pack.lo, pack.inv, pack.sums);
+  if (!packed) {
+    const std::uint32_t items = rows * (k / 32);
+    PackKernel<<<(items + kThreads - 1) / kThreads, kThreads, 0, stream>>>(
+        x, rows, k, pack.hi, pack.lo, pack.inv, pack.sums);
+  }
   const std::uint32_t per_split = PerSplit(m, k);
   const std::uint32_t splits = (k / kSuper + per_split - 1) / per_split;
   const dim3 grid((m + kRowsPerBlock - 1) / kRowsPerBlock, splits);

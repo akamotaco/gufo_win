@@ -476,6 +476,7 @@ __global__ void __launch_bounds__(kThreads) QkvPostKernel(QkvPostArgs a) {
   float v[kWaves][K];
   const std::size_t q_row = a.row_stride != 0 ? a.row_stride : a.heads * D;
   const std::size_t kv_row = a.row_stride != 0 ? a.row_stride : a.kv_heads * D;
+  const std::size_t v_row = a.v_stride != 0 ? a.v_stride : a.kv_heads * D;
   if (head < a.heads) {
     float* q = a.q + row * q_row + std::size_t{head} * D;
     load(q, v);
@@ -524,7 +525,7 @@ __global__ void __launch_bounds__(kThreads) QkvPostKernel(QkvPostArgs a) {
       }
     }
   }
-  load(a.v + in, v);
+  load(a.v + row * v_row + std::size_t{kvh} * D, v);
   norm_rope(v, nullptr, false);
 #pragma unroll
   for (int w = 0; w < kWaves; ++w) {
@@ -535,28 +536,85 @@ __global__ void __launch_bounds__(kThreads) QkvPostKernel(QkvPostArgs a) {
   }
 }
 
+template<int D>
 __global__ void __launch_bounds__(kThreads)
-    QueryPostKernel(float* q, const float* q_norm, float theta_scale,
-                    const float* freq_factors, std::uint32_t heads,
-                    std::uint32_t dim, std::uint32_t position,
-                    bool shared_position, float eps, const float* key_weight,
-                    std::uint32_t rotated_pairs) {
-  __shared__ float buf[512];
-  __shared__ float scratch[kWaves];
+    QueryPostWaveKernel(float* q, const float* q_norm, float theta_scale,
+                        const float* freq_factors, std::uint32_t heads,
+                        std::uint32_t position, bool shared_position, float eps,
+                        const float* key_weight, std::uint32_t rotated_pairs) {
+  constexpr int K = D / kThreads;
+  const int lane = static_cast<int>(threadIdx.x) % kWave;
   const std::uint32_t row = blockIdx.x;
-  float* qh = q + (static_cast<std::size_t>(row) * heads + blockIdx.y) * dim;
-  for (std::uint32_t i = threadIdx.x; i < dim; i += kThreads) {
-    buf[i] = qh[i];
+  const std::uint32_t head = blockIdx.y * kWaves + threadIdx.x / kWave;
+  if (head >= heads) {
+    return;
   }
-  __syncthreads();
-  NormRopeHead(buf, q_norm, dim, eps, true,
-               shared_position ? position : position + row, theta_scale,
-               freq_factors, scratch);
-  if (rotated_pairs != 0) {
-    FoldKeyWeight(buf, dim, key_weight, rotated_pairs);
+  const std::uint32_t pos = shared_position ? position : position + row;
+  const auto dim_of = [&](int w, int k) {
+    return static_cast<std::uint32_t>(kWave * w + lane + kThreads * k);
+  };
+  float* qh = q + (static_cast<std::size_t>(row) * heads + head) * D;
+  float v[kWaves][K];
+  float total = 0.0F;
+#pragma unroll
+  for (int w = 0; w < kWaves; ++w) {
+    float ss = 0.0F;
+#pragma unroll
+    for (int k = 0; k < K; ++k) {
+      const float x = qh[dim_of(w, k)];
+      v[w][k] = x;
+      ss += x * x;
+    }
+    total += WaveSum(ss);
   }
-  for (std::uint32_t i = threadIdx.x; i < dim; i += kThreads) {
-    qh[i] = buf[i];
+  const float r = RmsScale(total, D, eps);
+#pragma unroll
+  for (int w = 0; w < kWaves; ++w) {
+#pragma unroll
+    for (int k = 0; k < K; ++k) {
+      const float x = v[w][k] * r;
+      v[w][k] = q_norm != nullptr ? x * q_norm[dim_of(w, k)] : x;
+    }
+  }
+  constexpr int kDw = (D / 2) % kThreads / kWave;
+  constexpr int kDk = (D / 2) / kThreads;
+#pragma unroll
+  for (int w = 0; w + kDw < kWaves; ++w) {
+#pragma unroll
+    for (int k = 0; k + kDk < K; ++k) {
+      const std::uint32_t d = dim_of(w, k);
+      if (d >= D / 2) {
+        continue;
+      }
+      const float theta = RopeAngle(pos, d, theta_scale, freq_factors);
+      const float c = __ocml_cos_f32(theta);
+      const float sn = __ocml_sin_f32(theta);
+      const float lo = v[w][k];
+      const float hi = v[w + kDw][k + kDk];
+      v[w][k] = lo * c - hi * sn;
+      v[w + kDw][k + kDk] = lo * sn + hi * c;
+    }
+  }
+#pragma unroll
+  for (int w = 0; w < kWaves; ++w) {
+#pragma unroll
+    for (int k = 0; k < K; ++k) {
+      const std::uint32_t d = dim_of(w, k);
+      if (rotated_pairs != 0 && d % (D / 2) >= rotated_pairs) {
+        v[w][k] *= key_weight[d];
+      }
+      qh[d] = v[w][k];
+    }
+  }
+}
+
+__global__ void __launch_bounds__(kThreads)
+    DraftConcatKernel(DraftConcatArgs a) {
+  const std::uint32_t r = blockIdx.x;
+  const std::uint32_t col = blockIdx.y * kThreads + threadIdx.x;
+  if (r < a.rows && col < a.dim) {
+    a.out[(2 * r) * a.dim + col] = a.embed[r * a.dim + col] * a.scale;
+    a.out[(2 * r + 1) * a.dim + col] = a.hidden[r][col];
   }
 }
 
@@ -1566,9 +1624,29 @@ void QueryPost(float* q, const float* q_norm, float theta_scale,
                std::uint32_t position, bool shared_position, float eps,
                const float* key_weight, std::uint32_t rotated_pairs,
                hipStream_t stream) {
-  QueryPostKernel<<<dim3(rows, heads), kThreads, 0, stream>>>(
-      q, q_norm, theta_scale, freq_factors, heads, head_dim, position,
-      shared_position, eps, key_weight, rotated_pairs);
+  const dim3 grid(rows, (heads + kWaves - 1) / kWaves);
+  switch (head_dim) {
+    case 256:
+      QueryPostWaveKernel<256><<<grid, kThreads, 0, stream>>>(
+          q, q_norm, theta_scale, freq_factors, heads, position,
+          shared_position, eps, key_weight, rotated_pairs);
+      return;
+    case 512:
+      QueryPostWaveKernel<512><<<grid, kThreads, 0, stream>>>(
+          q, q_norm, theta_scale, freq_factors, heads, position,
+          shared_position, eps, key_weight, rotated_pairs);
+      return;
+    default:
+      throw std::invalid_argument("QueryPost supports head_dim 256 and 512");
+  }
+}
+
+void DraftConcat(const DraftConcatArgs& args, hipStream_t stream) {
+  if (args.rows == 0 || args.dim == 0) {
+    return;
+  }
+  const dim3 grid(args.rows, (args.dim + kThreads - 1) / kThreads);
+  DraftConcatKernel<<<grid, kThreads, 0, stream>>>(args);
 }
 
 void Attention(const AttentionArgs& args, hipStream_t stream) {

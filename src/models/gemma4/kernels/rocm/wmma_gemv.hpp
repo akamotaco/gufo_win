@@ -42,7 +42,8 @@ inline constexpr std::uint32_t kWmmaGemvRows = 16;
 [[nodiscard]] bool LaunchWmmaGemv(core::GgmlType type, const void* w,
                                   const float* x, float* y, std::uint32_t rows,
                                   std::uint32_t m, std::uint32_t k,
-                                  void* scratch, hipStream_t stream);
+                                  void* scratch, hipStream_t stream,
+                                  bool packed = false);
 
 }  // namespace gufo::models::gemma4::rocm
 

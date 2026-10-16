@@ -143,6 +143,11 @@ public:
   /// Keeps hidden row `row` of the last Forward as the cache's frontier
   /// state for drafting.
   void CommitHidden(KvCache& cache, std::uint32_t row);
+  /// Argmax token id per row of the last Forward's `rows` logit rows.
+  [[nodiscard]] std::span<const std::uint32_t> ReadArgmax(
+      std::size_t rows) const;
+  /// Copies logit row `row` of the last Forward to `out`.
+  void CopyLogitsRow(std::uint32_t row, std::vector<float>* out) const;
   /// Copies row `row` of the last forward to cache.ahead_hidden, and that
   /// back to cache.hidden.
   void StashHidden(KvCache& cache, std::uint32_t row);
@@ -193,6 +198,7 @@ public:
   void SetTapSink(TapSink sink) { tap_sink_ = std::move(sink); }
 
   /// Copies the logits of the last Forward to the host, [rows][vocab].
+  [[nodiscard]] std::span<const float> ReadLogits(std::size_t rows) const;
   void CopyLogits(std::size_t rows, std::vector<float>* out) const;
   /// Post-norm hidden rows of the last Forward, [tokens][hidden].
   [[nodiscard]] const float* hidden() const noexcept { return h_; }
@@ -207,8 +213,9 @@ public:
 private:
   /// y[rows][w.rows] = x[rows][w.cols] * W^T; `xq` is x staged for the
   /// prefill GEMMs when rows exceed the small-batch limit (Quantize).
+  /// `packed` says `wmma_` already holds `x`'s WMMA activation pack.
   void Project(const DeviceTensor& w, const float* x, const void* xq,
-               std::uint32_t rows, float* y);
+               std::uint32_t rows, float* y, bool packed = false);
   /// Project for binary16 weights: the batch-invariant small-batch GEMV up
   /// to kSplitRows rows, the binary16 WMMA GEMM past that.
   void ProjectHalf(const DeviceTensor& w, const float* x, const void* xq,
@@ -299,11 +306,14 @@ private:
   float* draft_o_{nullptr};
   float* draft_gate_{nullptr};
   float* draft_up_{nullptr};
+  float* draft_act_{nullptr};
   float* draft_logits_{nullptr};
   float* draft_next_{nullptr};
   std::uint32_t* draft_candidates_{nullptr};
   std::uint32_t* draft_candidate_scratch_{nullptr};
   qwen38_flash_next::MtpCandidateLogits* draft_candidates_host_{nullptr};
+  std::uint32_t* argmax_host_{nullptr};
+  mutable std::vector<float> logits_host_;
 };
 
 /// Longest draft chain one cycle may request; verification then carries

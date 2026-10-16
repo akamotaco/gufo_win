@@ -37,19 +37,36 @@ __device__ __forceinline__ void ScaleMin(std::uint32_t w0, std::uint32_t w1,
   *m = static_cast<float>(low ? (b & 63U) : ((c >> 4) | ((b >> 6) << 4)));
 }
 
+/// Converts the four bytes of `v` to float and applies scale * byte + offset.
+__device__ __forceinline__ void DequantWord(std::uint32_t v, float scale,
+                                            float offset, float* out) {
+#pragma unroll
+  for (int b = 0; b < 4; ++b) {
+    out[b] = __builtin_fmaf(scale, static_cast<float>((v >> (8 * b)) & 0xFFU),
+                            offset);
+  }
+}
+
 /// Dequantizes 16 values packed per byte (optional high bits) as
-/// scale * v + offset.
+/// scale * v + offset, four bytes per word.
 __device__ __forceinline__ void Dequant16(const std::uint8_t* q, int shift,
                                           const std::uint8_t* high, int hshift,
                                           int hmask, float scale, float offset,
                                           float* out) {
+  std::uint32_t qw[4];
+  __builtin_memcpy(qw, q, 16);
+  std::uint32_t hw[4] = {};
+  if (high != nullptr) {
+    __builtin_memcpy(hw, high, 16);
+  }
+  const std::uint32_t mask = static_cast<std::uint32_t>(hmask) * 0x01010101U;
 #pragma unroll
-  for (int i = 0; i < 16; ++i) {
-    int v = (q[i] >> shift) & 0xF;
+  for (int i = 0; i < 4; ++i) {
+    std::uint32_t v = (qw[i] >> shift) & 0x0F0F0F0FU;
     if (high != nullptr) {
-      v |= ((high[i] >> hshift) & hmask) << 4;
+      v |= ((hw[i] >> hshift) & mask) << 4U;
     }
-    out[i] = __builtin_fmaf(scale, static_cast<float>(v), offset);
+    DequantWord(v, scale, offset, out + 4 * i);
   }
 }
 
@@ -241,13 +258,8 @@ __device__ __forceinline__ void DecodeQ5_1(const std::uint8_t* block,
         (((qh >> (16 + 4 * i)) & 15U) * 0x00204081U & 0x01010101U) << 4;
     const std::uint32_t lo = (qs[i] & 0x0F0F0F0FU) | lo_bits;
     const std::uint32_t hi = ((qs[i] >> 4) & 0x0F0F0F0FU) | hi_bits;
-#pragma unroll
-    for (int b = 0; b < 4; ++b) {
-      w[4 * i + b] =
-          __builtin_fmaf(d, static_cast<float>((lo >> (8 * b)) & 0xFFU), m);
-      w[16 + 4 * i + b] =
-          __builtin_fmaf(d, static_cast<float>((hi >> (8 * b)) & 0xFFU), m);
-    }
+    DequantWord(lo, d, m, w + 4 * i);
+    DequantWord(hi, d, m, w + 16 + 4 * i);
   }
 }
 
@@ -315,13 +327,8 @@ __device__ __forceinline__ void DecodeQ5_0(const std::uint8_t* block, bool odd,
         (((qh >> (16 + 4 * i)) & 15U) * 0x00204081U & 0x01010101U) << 4;
     const std::uint32_t lo = (qs[i] & 0x0F0F0F0FU) | lo_bits;
     const std::uint32_t hi = ((qs[i] >> 4) & 0x0F0F0F0FU) | hi_bits;
-#pragma unroll
-    for (int b = 0; b < 4; ++b) {
-      w[4 * i + b] = __builtin_fmaf(
-          d, static_cast<float>((lo >> (8 * b)) & 0xFFU), offset);
-      w[16 + 4 * i + b] = __builtin_fmaf(
-          d, static_cast<float>((hi >> (8 * b)) & 0xFFU), offset);
-    }
+    DequantWord(lo, d, offset, w + 4 * i);
+    DequantWord(hi, d, offset, w + 16 + 4 * i);
   }
 }
 
