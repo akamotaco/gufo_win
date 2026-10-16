@@ -221,6 +221,9 @@ private:
   /// `packed` says `wmma_` already holds `x`'s WMMA activation pack.
   void Project(const DeviceTensor& w, const float* x, const void* xq,
                std::uint32_t rows, float* y, bool packed = false);
+  /// Project for drafter weights, which need not round like any other width.
+  void ProjectDraft(const DeviceTensor& w, const float* x, std::uint32_t rows,
+                    float* y);
   /// Project for binary16 weights: the batch-invariant small-batch GEMV up
   /// to kSplitRows rows, the binary16 WMMA GEMM past that.
   void ProjectHalf(const DeviceTensor& w, const float* x, const void* xq,

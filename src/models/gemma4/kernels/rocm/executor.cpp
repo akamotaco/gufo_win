@@ -609,6 +609,23 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
   hip::LaunchGEMV(w.data, w.type, x, y, w.rows, w.cols, stream_);
 }
 
+void Executor::ProjectDraft(const DeviceTensor& w, const float* x,
+                            std::uint32_t rows, float* y) {
+  // Drafter projections have no decode twin to match (as the head): a lone
+  // chain reads the shapes the WMMA kernel would take with the Gemma GEMV,
+  // which spreads the drafter's 1024 outputs over every WGP. Cold weights,
+  // Q4_0: 1024 x 10752 33.7 us (shared small-batch 40.3), 1024 x 8192 27.1
+  // (35.2).
+  if (rows == 1 && w.cols >= 2048 && WmmaGemvSupports(w.type, w.rows, w.cols)) {
+    if (const auto format = GemvFormatOf(w.type);
+        format &&
+        LaunchKQuantGemv(*format, w.data, x, y, w.rows, w.cols, stream_)) {
+      return;
+    }
+  }
+  Project(w, x, nullptr, rows, y);
+}
+
 static_assert(
     kMaxHalfGemvRows == kSplitRows,
     "the binary16 GEMV serves every row count below the prefill GEMM");
@@ -1381,7 +1398,7 @@ void Executor::DraftChains(std::span<DraftJob> jobs) {
           step == 0 ? jobs[j].cache->hidden : draft_next_ + j * target_hidden;
     }
     DraftConcat(concat, stream_);
-    Project(dm.pre_projection, draft_concat_, nullptr, n, draft_x_);
+    ProjectDraft(dm.pre_projection, draft_concat_, n, draft_x_);
     RmsNorm(draft_x_, dm.layers[0].attn_norm.f32(), draft_h_, n, hidden, eps,
             stream_);
     for (std::uint32_t l = 0; l < c.num_layers; ++l) {
@@ -1390,7 +1407,7 @@ void Executor::DraftChains(std::span<DraftJob> jobs) {
       const std::uint32_t dim = c.HeadDim(l);
       const std::uint32_t q_dim = c.QDim(l);
       const std::uint32_t source = c.SharedKvSource(l, tc);
-      Project(L.attn_q, draft_h_, nullptr, n, draft_q_);
+      ProjectDraft(L.attn_q, draft_h_, n, draft_q_);
       for (std::uint32_t j = 0; j < n; ++j) {
         if (active[j] == 0) {
           continue;
@@ -1422,20 +1439,19 @@ void Executor::DraftChains(std::span<DraftJob> jobs) {
         DeriveKeys(att, source);
         Attention(att, stream_);
       }
-      Project(L.attn_output, draft_attn_, nullptr, n, draft_o_);
+      ProjectDraft(L.attn_output, draft_attn_, n, draft_o_);
       PostAttentionNorm(draft_o_, L.post_attn_norm.f32(), draft_x_,
                         L.ffn_norm.f32(), draft_h_, n, hidden, eps, stream_);
-      if (!L.ffn_gate_up.empty() &&
-          L.ffn_gate_up.type == core::GgmlType::kQ8_0) {
-        Project(L.ffn_gate_up, draft_h_, nullptr, n, draft_gate_);
+      if (!L.ffn_gate_up.empty()) {
+        ProjectDraft(L.ffn_gate_up, draft_h_, n, draft_gate_);
         GeGluPacked(draft_gate_, draft_act_, n, c.ffn_size, stream_);
-        Project(L.ffn_down, draft_act_, nullptr, n, draft_o_);
+        ProjectDraft(L.ffn_down, draft_act_, n, draft_o_);
       } else {
-        Project(L.ffn_gate, draft_h_, nullptr, n, draft_gate_);
-        Project(L.ffn_up, draft_h_, nullptr, n, draft_up_);
+        ProjectDraft(L.ffn_gate, draft_h_, n, draft_gate_);
+        ProjectDraft(L.ffn_up, draft_h_, n, draft_up_);
         GeGlu(draft_gate_, draft_up_, draft_gate_, std::size_t{n} * c.ffn_size,
               stream_);
-        Project(L.ffn_down, draft_gate_, nullptr, n, draft_o_);
+        ProjectDraft(L.ffn_down, draft_gate_, n, draft_o_);
       }
       const float* next = l + 1 < c.num_layers
                               ? dm.layers[l + 1].attn_norm.f32()
@@ -1523,7 +1539,7 @@ void Executor::DraftChains(std::span<DraftJob> jobs) {
     HIP_CHECK(hipMemcpyAsync(draft_tokens_, tokens.data(),
                              n * sizeof(std::int32_t), hipMemcpyHostToDevice,
                              stream_));
-    Project(dm.post_projection, draft_h_, nullptr, n, draft_next_);
+    ProjectDraft(dm.post_projection, draft_h_, n, draft_next_);
   }
 }
 
