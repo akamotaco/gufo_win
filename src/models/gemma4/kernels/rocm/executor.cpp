@@ -203,6 +203,7 @@ std::size_t Executor::ScratchBytes(const Config& config, const Config* draft,
 std::size_t Executor::CacheBytes(const Config& c, std::uint32_t max_context,
                                  std::uint32_t ring,
                                  const std::vector<std::uint32_t>& key_widths,
+                                 std::uint32_t vocab,
                                  std::size_t draft_table_bytes) {
   std::size_t bytes = 0;
   for (std::uint32_t l = 0; l < c.num_layers; ++l) {
@@ -212,6 +213,7 @@ std::size_t Executor::CacheBytes(const Config& c, std::uint32_t max_context,
              AlignUp(slots * c.KvDim(l) * sizeof(std::uint16_t));
   }
   return bytes + 2 * AlignUp(std::size_t{c.hidden_size} * sizeof(float)) +
+         AlignUp(std::size_t{vocab} * sizeof(float)) +
          AlignUp(draft_table_bytes);
 }
 
@@ -385,8 +387,8 @@ std::unique_ptr<KvCache> Executor::CreateCache(std::uint32_t max_context,
   auto cache = std::make_unique<KvCache>();
   cache->max_context = max_context;
   cache->ring = ring_;
-  cache->bytes =
-      CacheBytes(c, max_context, ring_, key_widths_, draft_table_bytes());
+  cache->bytes = CacheBytes(c, max_context, ring_, key_widths_,
+                            model_.vocab_size(), draft_table_bytes());
   if (hip::AllocateDevice(&cache->allocation, cache->bytes) != hipSuccess) {
     if (error_msg != nullptr) {
       *error_msg = "KV cache allocation failed (" +
@@ -406,12 +408,15 @@ std::unique_ptr<KvCache> Executor::CreateCache(std::uint32_t max_context,
     cache->v.push_back(reinterpret_cast<std::uint16_t*>(at));
     at += bytes;
   }
+  const std::size_t hidden_bytes =
+      AlignUp(std::size_t{c.hidden_size} * sizeof(float));
   cache->hidden = reinterpret_cast<float*>(at);
-  cache->ahead_hidden = reinterpret_cast<float*>(
-      at + AlignUp(std::size_t{c.hidden_size} * sizeof(float)));
+  cache->ahead_hidden = reinterpret_cast<float*>(at + hidden_bytes);
+  at += 2 * hidden_bytes;
+  cache->logits = reinterpret_cast<float*>(at);
+  at += AlignUp(std::size_t{model_.vocab_size()} * sizeof(float));
   if (draft_table_bytes() != 0) {
-    cache->draft_table =
-        at + 2 * AlignUp(std::size_t{c.hidden_size} * sizeof(float));
+    cache->draft_table = at;
   }
   return cache;
 }
@@ -1538,11 +1543,19 @@ std::span<const std::uint32_t> Executor::ReadArgmax(std::size_t rows) const {
   return std::span<const std::uint32_t>(argmax_host_, rows);
 }
 
-void Executor::CopyLogitsRow(std::uint32_t row, std::vector<float>* out) const {
+void Executor::CommitLogits(KvCache& cache, std::uint32_t row) {
   const std::size_t vocab = model_.vocab_size();
-  HIP_CHECK(
-      hipMemcpyAsync(logits_host_.data(), logits_ + std::size_t{row} * vocab,
-                     vocab * sizeof(float), hipMemcpyDeviceToHost, stream_));
+  HIP_CHECK(hipMemcpyAsync(cache.logits, logits_ + std::size_t{row} * vocab,
+                           vocab * sizeof(float), hipMemcpyDeviceToDevice,
+                           stream_));
+}
+
+void Executor::CopyCacheLogits(const KvCache& cache,
+                               std::vector<float>* out) const {
+  const std::size_t vocab = model_.vocab_size();
+  HIP_CHECK(hipMemcpyAsync(logits_host_.data(), cache.logits,
+                           vocab * sizeof(float), hipMemcpyDeviceToHost,
+                           stream_));
   HIP_CHECK(hipStreamSynchronize(stream_));
   out->assign(logits_host_.begin(),
               logits_host_.begin() + static_cast<std::ptrdiff_t>(vocab));

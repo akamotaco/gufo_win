@@ -290,9 +290,8 @@ public:
     return stats_;
   }
 
-  [[nodiscard]] std::span<const float> Logits() const noexcept {
-    return valid_ ? std::span<const float>(logits_) : std::span<const float>{};
-  }
+  /// Copies a row greedy decode kept on the device (FinishCycle) first.
+  [[nodiscard]] std::span<const float> Logits() const;
   [[nodiscard]] std::span<const TokenId> Tokens() const noexcept {
     return tokens_;
   }
@@ -414,7 +413,12 @@ private:
   /// with lookup_.
   qwen38_flash_next::MtpDraftVocab draft_vocab_{kDraftTableRows};
   std::vector<std::int32_t> draft_added_;
-  std::vector<float> logits_;
+  /// Host logits of the frontier token; stale while logits_on_device_, when
+  /// cache_->logits holds them (EnsureLogits copies them back).
+  mutable std::vector<float> logits_;
+  mutable bool logits_on_device_{false};
+  /// Brings logits_ up to date; the caller holds the model mutex.
+  void EnsureLogits() const;
   bool valid_{false};
   /// Emitted but not yet evaluated; its predecessor's hidden state is the
   /// cache's frontier hidden.

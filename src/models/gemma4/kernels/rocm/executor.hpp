@@ -60,6 +60,9 @@ struct KvCache {
   /// The same for the last of the lookahead rows a prefill computed past the
   /// frontier (Session::Sync), adopted if the next Sync asks for them.
   float* ahead_hidden{nullptr};
+  /// Logit row of the frontier token while the owning Session keeps it on
+  /// the device (CommitLogits; greedy decode never reads it on the host).
+  float* logits{nullptr};
   /// kDraftTableRows drafter head rows (LoadDraftTable) when the head is
   /// ordered (DeviceModel::draft_head_tokens), else null.
   void* draft_table{nullptr};
@@ -98,7 +101,7 @@ public:
   /// Per-session cache bytes for per-layer K row widths (KeyWidths).
   [[nodiscard]] static std::size_t CacheBytes(
       const Config& config, std::uint32_t max_context, std::uint32_t ring,
-      const std::vector<std::uint32_t>& key_widths,
+      const std::vector<std::uint32_t>& key_widths, std::uint32_t vocab,
       std::size_t draft_table_bytes);
   /// Values per K cache row: the whole K, or only the rotated dims where one
   /// projection feeds K and V (K = rope(k_norm * V)).
@@ -146,8 +149,10 @@ public:
   /// Argmax token id per row of the last Forward's `rows` logit rows.
   [[nodiscard]] std::span<const std::uint32_t> ReadArgmax(
       std::size_t rows) const;
-  /// Copies logit row `row` of the last Forward to `out`.
-  void CopyLogitsRow(std::uint32_t row, std::vector<float>* out) const;
+  /// Keeps logit row `row` of the last Forward in cache.logits.
+  void CommitLogits(KvCache& cache, std::uint32_t row);
+  /// Copies cache.logits to `out`.
+  void CopyCacheLogits(const KvCache& cache, std::vector<float>* out) const;
   /// Copies row `row` of the last forward to cache.ahead_hidden, and that
   /// back to cache.hidden.
   void StashHidden(KvCache& cache, std::uint32_t row);

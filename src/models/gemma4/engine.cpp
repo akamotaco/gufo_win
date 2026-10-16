@@ -348,7 +348,7 @@ std::size_t Model::ResidentBytes() const noexcept {
 
 std::size_t Model::SessionBytes(std::uint32_t context) const noexcept {
   return rocm::Executor::CacheBytes(config(), context, executor_->ring(),
-                                    executor_->key_widths(),
+                                    executor_->key_widths(), VocabSize(),
                                     executor_->draft_table_bytes());
 }
 
@@ -383,6 +383,7 @@ void Session::Reset() {
   lookup_.Clear();
   draft_vocab_.Reset();
   logits_.clear();
+  logits_on_device_ = false;
   valid_ = false;
   // A restored snapshot starts a request without Sync.
   if (model_->options_.draft_calibration == DraftCalibrationScope::kRequest) {
@@ -473,6 +474,7 @@ bool Session::Extend(std::size_t begin, std::string* error_msg,
       if (holds_frontier) {
         logits_.assign(logits.begin(),
                        logits.begin() + static_cast<std::ptrdiff_t>(vocab));
+        logits_on_device_ = false;
       }
       if (last && !lookahead.empty()) {
         ahead_logits_.assign(logits.end() - static_cast<std::ptrdiff_t>(vocab),
@@ -642,6 +644,7 @@ bool Session::EvaluateAll(std::span<const TokenId> tokens,
   }
   logits_.assign(logits->end() - static_cast<std::ptrdiff_t>(vocab),
                  logits->end());
+  logits_on_device_ = false;
   valid_ = true;
   return true;
 }
@@ -1058,6 +1061,24 @@ DraftCalibration& Session::Calibration(bool sampled, bool sibling) {
   return tables[(sampled ? 1 : 0) + (sibling ? 2 : 0)];
 }
 
+std::span<const float> Session::Logits() const {
+  if (!valid_) {
+    return {};
+  }
+  if (logits_on_device_) {
+    std::lock_guard lock(model_->mutex_);
+    EnsureLogits();
+  }
+  return logits_;
+}
+
+void Session::EnsureLogits() const {
+  if (logits_on_device_) {
+    model_->executor_->CopyCacheLogits(*cache_, &logits_);
+    logits_on_device_ = false;
+  }
+}
+
 bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
                          std::string* error_msg, const DraftBatch& others,
                          DraftShare* share) {
@@ -1073,6 +1094,7 @@ bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
     if (!valid_) {
       return Fail(error_msg, "session has no logits to decode from");
     }
+    EnsureLogits();
     const auto token = static_cast<TokenId>(sampler.Sample(logits_));
     sampler.Accept(static_cast<sampling::TokenId>(token));
     result->tokens.push_back(token);
@@ -1317,11 +1339,15 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
   const auto committed_row =
       first_hidden_row + static_cast<std::uint32_t>(last);
   model_->executor_->CommitHidden(*cache_, committed_row);
+  // Greedy decode keeps the row on the device: nothing reads it on the
+  // host before the next cycle (EnsureLogits).
   if (!argmax.empty()) {
-    model_->executor_->CopyLogitsRow(committed_row, &logits_);
+    model_->executor_->CommitLogits(*cache_, committed_row);
+    logits_on_device_ = true;
   } else {
     const auto kept = logits.subspan(last * vocab, vocab);
     logits_.assign(kept.begin(), kept.end());
+    logits_on_device_ = false;
   }
   valid_ = true;
   pending_ = result->tokens.back();
@@ -1550,6 +1576,7 @@ bool Session::EvaluateBatch(std::span<Session* const> sessions,
     s.logits_.assign(
         logits.begin() + static_cast<std::ptrdiff_t>(i * vocab),
         logits.begin() + static_cast<std::ptrdiff_t>((i + 1) * vocab));
+    s.logits_on_device_ = false;
     s.valid_ = true;
   }
   return true;
@@ -1831,7 +1858,7 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
   }
   auto& tail = snapshot->tail_;
   tail.resize(std::size_t{model_->VocabSize()} * 4);
-  std::memcpy(tail.data(), logits_.data(), tail.size());
+  std::memcpy(tail.data(), Logits().data(), tail.size());
   snapshot->memory_ = model_->snapshot_memory_;
 
   auto& executor = *model_->executor_;
@@ -2072,6 +2099,7 @@ bool Session::RestoreSnapshot(const SessionSnapshot& snapshot,
   logits_.assign(reinterpret_cast<const float*>(snapshot.tail_.data()),
                  reinterpret_cast<const float*>(snapshot.tail_.data()) +
                      model_->VocabSize());
+  logits_on_device_ = false;
   valid_ = true;
   return true;
 }
@@ -2119,6 +2147,7 @@ bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
   logits_.resize(model_->VocabSize());
   std::memcpy(logits_.data(), payload.data() + (payload.size() - tail_bytes),
               tail_bytes);
+  logits_on_device_ = false;
   valid_ = true;
   return true;
 }
