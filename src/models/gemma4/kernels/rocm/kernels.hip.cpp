@@ -1408,15 +1408,17 @@ void LaunchSplitAttention(const AttentionArgs& a, hipStream_t stream) {
             a, first_split, splits);
   } else if constexpr (G == kWaves) {
     // hd512 keeps a block's rows within the register file, so one block
-    // still streams each key once: up to four rows take one wave per head
+    // still streams each key once: up to three rows take one wave per head
     // (a second row group would only stage the tiles and wait at the
-    // barriers), five or six two waves of three rows, seven or eight two
-    // waves of four.
+    // barriers), and so do four once the launch has at least 128 blocks
+    // (fewer leave the four-row waves' latency exposed: the 26B's two KV
+    // heads at 4K and 16K ran +24% and +7%); otherwise up to six rows take
+    // two waves of three, seven or eight two waves of four.
     if (a.rows <= 3) {
       RowSplitAttentionKernel<D, G, 3, 1, CW>
           <<<dim3(1, a.kv_heads, chunk_blocks), kThreads, 0, stream>>>(
               a, first_split, splits);
-    } else if (a.rows == 4) {
+    } else if (a.rows == 4 && a.kv_heads * chunk_blocks >= 128) {
       RowSplitAttentionKernel<D, G, 4, 1, CW>
           <<<dim3(1, a.kv_heads, chunk_blocks), kThreads, 0, stream>>>(
               a, first_split, splits);

@@ -37,18 +37,20 @@ constexpr std::array<std::array<float, 16>, 5> kVerifyMs = {{
 // they read, follows the text) up to the 16 rows a batched forward verifies:
 // every verified row adds the experts it routes to, so verification grows
 // several times faster per row than on the dense family.
+// Two to four rows lowered 2026-10-17 by the measured global split-attention
+// saving of one wave per head (five layers).
 constexpr std::array<float, 5> kExpertDraftStepMs = {1.81F, 2.03F, 2.25F, 2.51F,
                                                      3.04F};
 constexpr std::array<std::array<float, 16>, 5> kExpertVerifyMs = {{
     {18.3F, 21.1F, 23.1F, 25.4F, 27.3F, 29.1F, 30.8F, 31.8F, 33.2F, 34.4F,
      37.1F, 40.6F, 42.3F, 44.8F, 44.6F, 46.0F},
-    {19.8F, 22.9F, 25.8F, 28.1F, 30.0F, 32.8F, 34.9F, 36.4F, 37.8F, 39.5F,
+    {19.8F, 22.8F, 25.7F, 28.1F, 30.0F, 32.8F, 34.9F, 36.4F, 37.8F, 39.5F,
      42.5F, 46.0F, 48.9F, 51.1F, 51.0F, 52.6F},
-    {20.8F, 24.6F, 27.3F, 29.5F, 32.1F, 35.1F, 37.9F, 39.6F, 41.9F, 43.5F,
+    {20.8F, 24.0F, 26.8F, 29.5F, 32.1F, 35.1F, 37.9F, 39.6F, 41.9F, 43.5F,
      46.8F, 50.5F, 52.6F, 55.3F, 55.5F, 57.6F},
-    {21.7F, 26.7F, 29.7F, 32.0F, 34.7F, 37.5F, 40.2F, 42.3F, 45.8F, 47.6F,
+    {21.7F, 25.2F, 28.3F, 31.5F, 34.7F, 37.5F, 40.2F, 42.3F, 45.8F, 47.6F,
      50.9F, 55.4F, 58.0F, 61.2F, 61.5F, 63.6F},
-    {23.6F, 28.2F, 31.9F, 34.2F, 37.6F, 41.6F, 45.6F, 48.0F, 53.5F, 55.6F,
+    {23.6F, 25.7F, 29.5F, 33.2F, 37.6F, 41.6F, 45.6F, 48.0F, 53.5F, 55.6F,
      60.0F, 64.7F, 69.0F, 72.4F, 73.0F, 76.0F},
 }};
 
