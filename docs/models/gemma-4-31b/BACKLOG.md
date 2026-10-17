@@ -178,7 +178,9 @@ suites decide.
 
 hipfire runs dense and MoE prefill through `v_wmma_i32_16x16x16_iu4`: weight
 nibbles feed the WMMA directly and activations are quantized to int4 per 128
-values (MSE-clipped). On Qwen3.8-27B it took Halo prefill from 450 to
+values (MSE-clipped). On gfx1151 the instruction sustains 110.7 TOPS, twice
+binary16 and int8 WMMA (57.1; four independent chains per wave, measured
+2026-10-17). On Qwen3.8-27B it took Halo prefill from 450 to
 581 tok/s (+29%); hipfire's later 27B figures are 737–796 tok/s against
 Gufo's 656 (pp2048, binary16 WMMA). Cost: WikiText-2 KLD against BF16
 0.057 → 0.076 (27B dense) and 0.057 → 0.088 (Flash-Next MoE, top-1 agreement
@@ -260,16 +262,14 @@ an NPU load.
 
 ## Housekeeping
 
-- Combined prefill benchmark of all 2026-10-17 rows against c06dc7db: running
-  at the end of that session; record it in EXPERIMENTS.md if it is missing.
 - Model card refresh: BENCHMARKS.md is from 2026-10-07 and holds none of the
   2026-10-17 gains; one full sweep (the `benchmark-model` skill) at the end of
   the round.
 - `gemma4.target` on 26B QAT fails "shared sampled MTP verified or accepted no
   siblings" with output identical to 2026-10-16's head: pre-existing,
   uninvestigated.
-- The branch is not pushed; its pull request title follows
-  [the release policy](../../RELEASING.md).
+- The branch is pushed to the `fork` remote (franzmoca/gufo) with no pull
+  request yet; its title follows [the release policy](../../RELEASING.md).
 
 ## Methods that worked
 
