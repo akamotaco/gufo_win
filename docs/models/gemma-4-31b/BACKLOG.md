@@ -107,6 +107,147 @@ revalidate quality.
 Already at ~94% of the measured DRAM read bandwidth; past work is in the
 decode GEMV rows of EXPERIMENTS.md.
 
+## Opt-in levers (quality trade, default off)
+
+Ideas that give up a measured amount of quality for speed. Production paths
+retain quality by default, so each lever is a product decision: one canonical
+long option, off by default, shipped only after a quality decision
+(`gemma4.target` KL against the scalar oracle, the functional suites, and
+long-context tasks for anything touching attention). Gains are 2026-10-17
+estimates, not measurements.
+
+| # | Lever | Speeds up | Est. gain | Quality risk | Effort |
+| ---: | --- | --- | --- | --- | --- |
+| L1 | Relaxed MTP acceptance | MTP decode | +15–30% prose, +5–10% code | Low–medium: output no longer equals greedy AR | Low–medium |
+| L2 | 8-bit KV cache (open item 2) | Decode at depth, KV memory | AR +5% at 32K, +14% at 128K | Low | High |
+| L3 | Target output-head shortlist | AR and MTP decode | ~+3% | Medium: tokens outside the list become impossible | Low–medium |
+| L4 | Binary16 dot products in decode and verification attention | MTP verification at five or more rows | +2–4% at 32K, +5–8% at 128K | Very low | Medium |
+| L5 | Binary16 prefill intermediates | Prefill | +1–1.5% | Very low | Low–medium |
+| L6 | Sparse long-context prefill attention | Prefill at depth | 1.5–2× at 128K, +10–15% at 32K | Medium–high | High (research) |
+| L7 | W4A4 prefill projections (INT4 WMMA) | Prefill, all depths | +20–30% | Medium–high | Very high |
+| L8 | NPU prefill offload | Prefill | 0–10% | Low–medium | Very high |
+
+### L1. Relaxed MTP acceptance
+
+Greedy verification accepts a draft only when it equals the target's argmax
+(`Session::FinishCycle`, `engine.cpp`); on prose at ~31K depth 42% of drafts
+pass (235/554). Many rejections are near-ties. Rule: accept the draft when
+p(draft) ≥ τ·p(top) and the target's entropy is above a threshold (Medusa's
+typical acceptance), top-1 only otherwise. The GPU argmax (`ReadArgmax`) would
+also return the top logit, the draft's logit and the log-sum-exp; the
+calibrated draft policy then learns the higher acceptance by itself. Measure
+before building: log per verified row the top-1, the draft's logit gap and the
+entropy, then replay thresholds offline for tokens per cycle against
+divergence from greedy. Sampled mode already uses exact rejection sampling; a
+relaxed variant there changes the output distribution.
+
+### L2. 8-bit KV cache
+
+Open item 2. hipfire's default KV cache on every GPU is Q8_0 (32-value blocks,
+one binary16 scale) and its quality gates are measured with it: a working
+reference for the format.
+
+### L3. Output-head shortlist
+
+The 31B's tied head (`token_embd`, Q5_K 262144 × 5376) is ~970 MB of the
+~18.8 GB read per token. A head over the first ~98K token ids plus a
+per-request table of used and special tokens, with a full-head fallback when
+the anchor falls outside it (the Qwen3.8 Flash-Next drafter's scheme,
+[its README](../qwen3.8-flash-next/README.md)), saves ~3%. The 26B's head rows
+are already ordered by merge rank, so its shortlist is a row prefix. Risk:
+non-English text and rare tokens.
+
+### L4. Binary16 attention dot products in decode and verification
+
+Round Q to binary16 and score with `v_dot2_f32_f16` (prefill attention already
+uses binary16 Q). Verification and single-row decode keep one arithmetic, so
+their bit-identity contract holds; only today's FP32 outputs change.
+
+### L5. Binary16 prefill intermediates
+
+Store the projection outputs that feed the norms and Q/K post-processing as
+binary16 instead of FP32; those passes are bandwidth-bound at 185–203 GB/s.
+
+### L6. Sparse long-context prefill attention
+
+Global layers attend to attention sinks, a local window and the top-k key
+blocks chosen by a cheap block score. Research grade; needle and long-context
+suites decide.
+
+### L7. W4A4 prefill projections (INT4 WMMA)
+
+hipfire runs dense and MoE prefill through `v_wmma_i32_16x16x16_iu4`: weight
+nibbles feed the WMMA directly and activations are quantized to int4 per 128
+values (MSE-clipped). On Qwen3.8-27B it took Halo prefill from 450 to
+581 tok/s (+29%); hipfire's later 27B figures are 737–796 tok/s against
+Gufo's 656 (pp2048, binary16 WMMA). Cost: WikiText-2 KLD against BF16
+0.057 → 0.076 (27B dense) and 0.057 → 0.088 (Flash-Next MoE, top-1 agreement
+91.8% → 89.7%); hipfire's agentic task scores stayed within seed spread.
+
+Two blockers for Gufo. hipfire's weights are FWHT-256-rotated offline (its MQ
+formats), which keeps activation outliers small enough for int4; GGUF Q4_K
+weights are unrotated, so A4 on them would likely cost much more, and rotating
+needs a requantized artifact from the BF16 source (hipfire uses GPTQ). And
+Q4_K's per-32 sub-block scales and minimums end the integer accumulation every
+two WMMAs, where hipfire's symmetric groups span 128–256 values. First step,
+before any kernel: simulate A4 on Gemma activations (per-128 groups, with and
+without a Hadamard rotation) and measure the KL with `gemma4.target`. W4A8 is
+no shortcut: int8 WMMA runs at the binary16 rate here, and Gufo's earlier W4A8
+path was slower.
+
+### L8. NPU prefill offload
+
+hipfire ships one NPU route: on Qwen3.8 Flash-Next (MoE) the trunk input
+projections of one 8192-row bank run on the XDNA2 NPU (int8 weights from its
+6-bit trunk, per-row int8 activations, BF16 output) while the GPU runs the
+other bank; 16K TTFT 7,878 → 7,085 ms (−10%). It needs Linux 7.3-rc7 with the
+IOMMU PerfOpt patch, plus hipfire's own AIE2P toolchain and `amdxdna` runtime
+(no XRT). Measured there: a concurrent NPU GEMM loop slowed GPU prefill by 10%
+through the shared fabric, and the NPU reaches ~22–26 int8 TOPS of its 59
+peak. Their dense co-op (27B gate/up and down columns split between GPU and
+NPU) was killed at +1.2% per step, bound by the NPU kernel's DDR traffic.
+For dense Gemma prefill the ceiling is a column split worth at most ~10%, and
+Q4_K's sub-block scales do not map onto an int8 NPU GEMM without per-32 partial
+sums. Revisit after the PerfOpt kernel, starting with the GPU slowdown under
+an NPU load.
+
+### Ruled out
+
+- Binary16-accumulate WMMA: same rate as FP32 accumulate.
+- A lower-bit drafter: −9% code acceptance, a net loss (EXPERIMENTS.md).
+- Windowing the drafter's global attention: acceptance falls with the window.
+
+## Notes from hipfire (2026-10-17)
+
+[warpfront/hipfire](https://github.com/warpfront/hipfire) v0.4.2, read at
+`bfb90b9c8`: a Rust runtime with its own quantization formats, kernel toolchain
+(PeaceMaker) and dispatch layer (Redline).
+
+- Qwen3.8 Flash-Next on Halo: 2,156 tok/s synthetic pp8192, 2,306 tok/s on a
+  32K prompt, 2,386 tok/s on a 16K prompt with the NPU; AR decode 34.1 tok/s;
+  greedy MTP 60.2 tok/s on its code prompts. Gufo (2026-10-16): 1,737 tok/s
+  pp2048 at d0, 1,624 at 32K, AR 28.3 tok/s. The prefill lead comes from lossy
+  defaults (the symmetric IU4 MoE route at BF16-reference KLD 0.103 against
+  0.066 on hipfire's own binary16 route, which ran ~1,455 tok/s at pp8192 when
+  IU4 became the default; the int4 trunk-activation overlay; the NPU route's
+  int8 activations) and from 8192-row chunks against Gufo's 2048-token
+  benchmark prompt. The AR decode lead (+20%) comes from none of those (decode
+  never takes them) nor from file size (125 GB against Gufo's 115 GB): worth a
+  per-kernel Flash-Next decode profile against bytes per token.
+- Redline retained PM4 replay of the decode graph: +12.6% on gfx1151 for
+  Qwen3.6 35B-A3B (102 → 115 tok/s), a small-active MoE where launches weigh.
+  Gufo's HIP-graph probe found the ~1.4 µs per removed launch GPU-side; PM4
+  replay is a way past it, mainly for 26B and Flash-Next decode.
+- Halo 16-row verify GEMMs (`HIPFIRE_GFX1151_XLDS`) stage activations in LDS
+  per block and reach 186–208 GB/s, about Gufo's verification GEMV
+  (207–217 GB/s): nothing new for open item 1.
+- hipfire's Gemma 4 runtime (`hipfire-arch-gemma4`) runs the 12B, E2B/E4B and
+  26B-A4B plus an opt-in EAGLE drafter; its plan lists the 31B as incoming.
+  It loads only hipfire's own formats (quantized from BF16 safetensors, no
+  GGUF), publishes no Gemma artifact or Strix Halo throughput, and its 0.4.2
+  notes say its gfx1151 Gemma defaults change numerics with no KLD measured:
+  no Gemma comparison exists yet. Its Gemma KV cache is Q8 by default.
+
 ## Measured, no change (do not retry without a new idea)
 
 - Fusing the prefill norms and Q/K post-processing: they move 154–230 MB per
