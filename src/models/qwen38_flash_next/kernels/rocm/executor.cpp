@@ -872,10 +872,15 @@ void Session::TrimRollback(std::uint32_t depth) noexcept {
   ngram_snapshots_.resize(depth);
 }
 
-void Session::Reset() {
+void Session::Reset(bool reuse_mtp) {
   // Reset leaves append-only rows intact. Preserve them at the first write
   // that would overwrite them, allowing cancellation to resume by rewind.
-  TrimRollback(0);
+  // Scratch is overwritten by the next verification. Retaining its stable
+  // addresses also retains the graphs; freeing it at every cache reassignment
+  // makes later MTP requests allocate and record those shapes again. Its full
+  // bound is already included in speculative SessionBytes and AllocatedBytes.
+  if (!reuse_mtp || !mtp_enabled_)
+    TrimRollback(0);
   snapshot_lineage_.reset();
   position_ = 0;
   spec_tokens_ = 0;
@@ -1074,6 +1079,10 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
   s.scores = f32(e->select_score_floats_);
   s.attn_partials = f32(static_cast<std::size_t>(kVecBatch) * c.num_heads *
                         kAttnSplits * (c.head_dim + 2));
+  s.attn_lists = Alloc<std::uint32_t>(
+      a, std::size_t{kVecBatch} * (c.indexer_top_k / c.compress_ratio),
+      error_msg);
+  s.attn_counts = Alloc<std::uint32_t>(a, kVecBatch, error_msg);
   if (c.ple_layer >= 0) {
     // PLE finishes before this layer's mixer/SSM. Its gate consumes key
     // and query before normalization/convolution reuse those two buffers.
@@ -2536,10 +2545,12 @@ bool Executor::Attention(const DeviceLayer& l, Session::AttentionState& s,
   // Narrow batches split each row's key tiles over kAttnSplits blocks so a
   // decode step at depth fills the device.
   const bool split = !MatrixRows(n_tokens);
-  rocm::Attention(s_.q, s.k_cache, s.v_cache, mask, mask_words_, s_.ctx,
-                  split ? s_.attn_partials : nullptr, kAttnSplits, n_tokens,
-                  pos, c.num_heads, c.num_kv_heads, c.head_dim,
-                  c.compress_ratio, stream_);
+  rocm::Attention(
+      s_.q, s.k_cache, s.v_cache, mask, mask_words_, s_.ctx,
+      split ? s_.attn_partials : nullptr, kAttnSplits, n_tokens, pos,
+      c.num_heads, c.num_kv_heads, c.head_dim, c.compress_ratio, stream_,
+      split ? s_.attn_lists : nullptr, split ? s_.attn_counts : nullptr,
+      c.compress_ratio > 0 ? c.indexer_top_k / c.compress_ratio : 0);
   const std::uint32_t q_dim = c.AttentionQDim();
   const std::size_t ctx_count = static_cast<std::size_t>(n_tokens) * q_dim;
   // A decode batch's output projection reads the gate's Q8_1 rows.
