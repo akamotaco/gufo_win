@@ -5,6 +5,7 @@ from copy import deepcopy
 import json
 import sys
 
+from templates import TYPED_NATIVE_CALLS
 from tool_reasoning import response_result
 from cache_growth import check_unchanged_retry, log_offset
 
@@ -138,7 +139,8 @@ def agent_tools():
             "parameters": {"type": "object", "properties": {"path": {"type": "string"}},
             "required": ["path"]}}}]
 
-def check_untyped_agent_tools(client, model, checks, chat_result, vision, image_content):
+def check_untyped_agent_tools(client, model, checks, chat_result, vision, image_content,
+                              sampling_preset="qwen38"):
     """An untyped neighbor must neither switch framing nor erase arguments."""
     def record(name, result):
         checks[name] = result
@@ -261,7 +263,9 @@ def check_untyped_agent_tools(client, model, checks, chat_result, vision, image_
     result = record("untyped_finite_object", chat_result(client, finite, True))
     # A finite root declares no parameters; as in llama.cpp the call stays
     # native with none rather than switching to a JSON envelope (#438).
-    check_call(result, arguments={})
+    # Typed native calls carry the root const itself (templates.py).
+    check_call(result, arguments=(
+        {"value": "alpha"} if sampling_preset in TYPED_NATIVE_CALLS else {}))
 
 
 def check_tool_agent_json(client, model, checks, chat_result):

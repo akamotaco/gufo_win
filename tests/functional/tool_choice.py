@@ -3,10 +3,11 @@
 import json
 import sys
 
+from templates import THINKING_OFF_OPENING_TOKENS
 from tool_native import assert_native, cached
 
 
-def check_tool_choice_cache(client, model, checks, chat_result):
+def check_tool_choice_cache(client, model, checks, chat_result, sampling_preset="qwen38"):
     function = {
         "name": "read", "description": "Read a file.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}},
@@ -51,7 +52,11 @@ def check_tool_choice_cache(client, model, checks, chat_result):
         if after is not None:
             continued["tool_choice"] = after
         done = record(label + "_continued", continued, index % 2 != 0)
-        expected = first["usage"]["prompt_tokens"] + first["usage"]["completion_tokens"]
+        # A template whose history drops the thinking-off opening reuses the
+        # stable boundary before it instead of the call (templates.py).
+        opening = THINKING_OFF_OPENING_TOKENS.get(sampling_preset)
+        expected = (first["usage"]["prompt_tokens"] + first["usage"]["completion_tokens"]
+                    if opening is None else first["usage"]["prompt_tokens"] - opening)
         assert cached(done["usage"]) >= expected, (
             label, "tool choice lost the generated frontier", expected, done)
         if after == "required":

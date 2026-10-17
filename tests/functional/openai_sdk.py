@@ -2813,7 +2813,8 @@ def main():
             "messages-tools": lambda: check_messages_tools(
                 client, args.model, checks, chat_result),
             "tool-untyped": lambda: check_untyped_agent_tools(
-                client, args.model, checks, chat_result, args.vision, image_content),
+                client, args.model, checks, chat_result, args.vision, image_content,
+                args.sampling_preset),
             "tool-mixed": lambda: check_mixed_tool_schemas(
                 client, args.model, checks, chat_result, args.vision, image_content,
                 args.sampling_preset),
@@ -2824,7 +2825,7 @@ def main():
                 client, args.model, checks, chat_result,
                 image_content("red") if args.vision else None, args.sampling_preset),
             "tool-choice-cache": lambda: check_tool_choice_cache(
-                client, args.model, checks, chat_result),
+                client, args.model, checks, chat_result, args.sampling_preset),
             "tool-schema-edges": lambda: check_tool_schema_edges(
                 client, args.model, checks, chat_result, args.vision, image_content,
                 args.sampling_preset, args.server_log),

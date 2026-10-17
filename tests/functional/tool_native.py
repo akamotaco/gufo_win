@@ -369,10 +369,10 @@ def check_finite_argument_types(client, model, checks, chat_result, image=None,
                 assert_native(result, label)
                 print(f"CHECK {label}", file=sys.stderr, flush=True)
     check_literal_history(client, model, checks, chat_result, image, sampling_preset)
-    check_integer_history(client, model, checks, chat_result)
+    check_integer_history(client, model, checks, chat_result, sampling_preset)
 
 
-def check_integer_history(client, model, checks, chat_result):
+def check_integer_history(client, model, checks, chat_result, sampling_preset="qwen38"):
     """Integers keep their decimal spelling, so replayed calls are reused (#611)."""
     function = {"name": "read", "description": "Read a local text file.",
                 "parameters": {"type": "object", "properties": {
@@ -404,7 +404,12 @@ def check_integer_history(client, model, checks, chat_result):
             done = chat_result(client, request, True)
             checks[label + "_continued"] = done
             details = done["usage"].get("prompt_tokens_details") or {}
-            assert details.get("cached_tokens", 0) >= first["usage"]["total_tokens"], (
+            # A template whose history drops the thinking-off opening reuses
+            # the stable boundary before it instead of the call (templates.py).
+            opening = THINKING_OFF_OPENING_TOKENS.get(sampling_preset)
+            floor = (first["usage"]["total_tokens"] if opening is None
+                     else first["usage"]["prompt_tokens"] - opening)
+            assert details.get("cached_tokens", 0) >= floor, (
                 label, "replayed integer arguments invalidated the generated call", first, done)
             print(f"CHECK {label}", file=sys.stderr, flush=True)
 
