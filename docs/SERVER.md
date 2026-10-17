@@ -245,8 +245,8 @@ With `preserve_thinking=false`, a new user turn removes reasoning from the
 preceding tool cycle. Gufo retains the state before that cycle and processes
 its changed suffix again.
 
-A loaded Qwen vision sidecar is prepared while the model loads, before the RAM
-cache is sized and before readiness: Gufo hashes the complete sidecar for image
+A loaded Qwen or Gemma 4 vision sidecar is prepared while the model loads,
+before the RAM cache is sized and before readiness: Gufo hashes the complete sidecar for image
 cache identities and uploads the encoder weights, so neither happens in the
 first image request and admission's free device memory already excludes them.
 The weights stay resident even if no image arrives, including a sidecar

@@ -165,9 +165,10 @@ std::shared_ptr<const models::qwen::vision::Prompt> QwenPrompt(
 // runner claims state capacity and the RAM cache is sized. Otherwise the first
 // image request hashes the whole sidecar in its queue time and uploads the
 // weights in its prefill, after admission and the cache were sized without
-// them.
-void PrepareVision(
-    const std::shared_ptr<models::qwen::vision::Encoder>& encoder) {
+// them. `Encoder` is the Qwen or Gemma 4 vision encoder.
+template<class Encoder>
+void PrepareVision(const std::shared_ptr<Encoder>& encoder,
+                   std::string_view model) {
   if (!encoder)
     return;
   const auto started = Clock::now();
@@ -176,8 +177,8 @@ void PrepareVision(
   try {
     encoder->Upload();
   } catch (const std::exception& e) {
-    throw std::runtime_error(
-        std::string("could not upload the Qwen vision sidecar: ") + e.what());
+    throw std::runtime_error("could not upload the " + std::string(model) +
+                             " vision sidecar: " + e.what());
   }
   const auto uploaded = Clock::now();
   std::size_t heap_free = 0, heap_total = 0;
@@ -4350,7 +4351,7 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
       speculative_options.enable_adaptive_draft_length = false;
     }
 
-    PrepareVision(model->VisionEncoder());
+    PrepareVision(model->VisionEncoder(), "Qwen");
     auto new_state = std::make_shared<Impl::State>();
     new_state->sampling_defaults.model =
         sampling::TextPreset(model->GetConfig());
@@ -4525,7 +4526,7 @@ bool InferenceBackend::load(
     return false;
   }
   try {
-    PrepareVision(model->VisionEncoder());
+    PrepareVision(model->VisionEncoder(), "Qwen");
     auto new_state = std::make_shared<Impl::State>();
     new_state->sampling_defaults.model = sampling::TextModelPreset::kQwen38;
     new_state->sampling_defaults.supplied = {};
@@ -4603,6 +4604,7 @@ bool InferenceBackend::load(
     return false;
   }
   try {
+    PrepareVision(vision, "Gemma 4");
     auto new_state = std::make_shared<Impl::State>();
     new_state->sampling_defaults.model = sampling::TextModelPreset::kGemma4;
     new_state->sampling_defaults.supplied = {};

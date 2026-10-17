@@ -607,6 +607,10 @@ std::size_t Encoder::ResidentBytes() const noexcept {
   return impl_->resident_bytes.load();
 }
 
+void Encoder::Upload() {
+  impl_->UploadWeights();
+}
+
 Encoder::Embedding::~Embedding() {
   if (data_ != nullptr)
     (void)hipFree(data_);
