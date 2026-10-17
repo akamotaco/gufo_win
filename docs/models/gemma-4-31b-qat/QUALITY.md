@@ -51,20 +51,20 @@ compared with `tools/gemma4/compare_logits.py L.g4lg G.g4lg`. Short prompt:
 
 ## Benchmark method
 
-Gufo October 7, 2026 (revision 2a24b0c, `nix build`, binary SHA-256 prefix
-d1eb64e09180774b), llama.cpp September 28; one warmed sample per point, greedy, thinking off, the
+Gufo October 17, 2026 (revision a9ff98e, `nix build`, binary SHA-256 prefix
+d92d910545862f6b) on a reduced grid (single-user depths 0, 4096, 16384 and
+32768, one and two users; the other Gufo cells are TODO), llama.cpp
+September 28 (not re-measured); one warmed sample per point (sampled MTP: five
+seeds), greedy, thinking off, the
 same driver workloads, server flags and table grid as the
 [standard 31B](../gemma-4-31b/QUALITY.md#benchmark-method). MTP drafts up to
 15 tokens under Gufo's calibrated policy (the default) and up to four on
 llama.cpp. Loading drops the page cache
-(`sync; echo 3 > /proc/sys/vm/drop_caches`) before each launch. Commands,
-counts and server flags are recorded per row in the artifacts.
-Against the October 5 build (same prompts and completions), repetitive MTP tg
-reads 0.5–3.5% lower at depth although GPU kernel time per decode cycle is
-unchanged (CLI profile). In the server the power manager now holds a higher
-shader clock and a lower memory-fabric clock during decode (26B at 32K:
-2,680 against 2,390 MHz; FCLK 1,640 against 1,700 MHz, at 139 against
-128 W), and decode is bandwidth-bound. Requests still finish about 230 ms
-sooner end to end (first token 150 ms earlier, no snapshot pause after it). Single-user AR prefill at 128K is one 12-minute sample
-per point; the MTP tables' prefill at the same depth, through the same path,
-reads 2–5% above October 5.
+(`sync; echo 3 > /proc/sys/vm/drop_caches`) before each launch; loading and
+memory follow the standard 31B's projector-free and calibration-free setup.
+Every Gufo multi-user completion matches the isolated AR C1 hash (regenerated
+October 17). Commands, counts and server flags are recorded per row in the
+artifacts.
+Against the October 7 build: prefill +1% at d0 to +11% at 16K (AR), AR decode
+unchanged, MTP decode +4–16% except mixed text at 32K (+0.6%), memory
++0.06 GiB.
