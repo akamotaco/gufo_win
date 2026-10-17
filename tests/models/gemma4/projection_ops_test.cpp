@@ -462,7 +462,45 @@ void CheckWmmaShape(const Format& f, std::uint32_t m, std::uint32_t k,
       worst = std::max(worst, std::fabs(got - want) / magnitude);
     }
   }
-  std::cout << name << ": width-invariant, error " << worst << "\n";
+  // Cold-weight timings, rotating copies beyond the 32 MiB MALL.
+  const std::size_t bytes = std::size_t{m} * row_bytes;
+  const std::size_t copies = std::max<std::size_t>(2, (256u << 20) / bytes);
+  std::vector<std::uint8_t*> rot;
+  for (std::size_t c = 0; c < copies; ++c) {
+    rot.push_back(Device(w.data(), w.size()));
+  }
+  const auto time = [&](std::uint32_t width) {
+    const auto launch = [&](std::uint8_t* wp) {
+      (void)g4k::LaunchWmmaGemv(f.type, wp, dx, dy, width, m, k, scratch,
+                                nullptr);
+    };
+    for (int warm = 0; warm < 2; ++warm)
+      launch(rot[warm % copies]);
+    HIP_CHECK(hipDeviceSynchronize());
+    const auto t0 = std::chrono::steady_clock::now();
+    const int iters = 40;
+    for (int i = 0; i < iters; ++i)
+      launch(rot[i % copies]);
+    HIP_CHECK(hipDeviceSynchronize());
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+               .count() /
+           iters;
+  };
+  const double t1 = time(1);
+  const double t5 = time(5);
+  const double t16 = time(16);
+  std::uint64_t checksum = 1469598103934665603ULL;
+  for (const float v : full) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &v, 4);
+    checksum = (checksum ^ bits) * 1099511628211ULL;
+  }
+  std::cout << name << " [" << std::hex << checksum << std::dec << "]"
+            << ": width-invariant, error " << worst << "; one row " << t1 * 1e6
+            << " us (" << bytes / t1 / 1e9 << " GB/s), five rows " << t5 * 1e6
+            << " us, sixteen rows " << t16 * 1e6 << " us\n";
+  for (auto* ptr : rot)
+    HIP_CHECK(hipFree(ptr));
   Require(worst < 1e-6, name + ": error " + std::to_string(worst));
   HIP_CHECK(hipFree(dw));
   HIP_CHECK(hipFree(dx));
@@ -620,6 +658,17 @@ int main() {
     for (const auto& f : formats) {
       for (const auto& [m, k] : shapes) {
         CheckShape(f, m, k, rng);
+      }
+    }
+    // The MTP drafters' remaining one-row shapes, Q8_0 and Q4_0 (QAT): the
+    // 26B's pre-projection, attention output and q, both FFN downs, the fused
+    // [gate | up] and the projections back to the target widths.
+    const std::pair<std::size_t, std::size_t> draft_shapes[] = {
+        {1024, 8192}, {1024, 4096},  {1024, 5632},
+        {4096, 1024}, {16384, 1024}, {2816, 1024}};
+    for (const std::size_t f : {3U, 4U}) {
+      for (const auto& [m, k] : draft_shapes) {
+        CheckShape(formats[f], m, k, rng);
       }
     }
     // The 26B-A4B keeps attention, the dense MLP and the tied head in Q8_0

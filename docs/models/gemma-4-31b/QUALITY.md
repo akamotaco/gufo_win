@@ -93,31 +93,32 @@ them.
 
 ## Benchmark method
 
-Gufo October 7, 2026 (revision 2a24b0c, `nix build`, binary SHA-256 prefix
-d1eb64e09180774b), llama.cpp September 26–27; one warmed sample per point,
+Gufo October 17, 2026 (revision a9ff98e, `nix build`, binary SHA-256 prefix
+d92d910545862f6b), llama.cpp September 26–27 (not re-measured); one warmed sample per point,
 greedy, thinking off. MTP drafts up to 15 tokens under Gufo's calibrated
 policy (the default) and up to four on llama.cpp and the fork. Single-user uses pp2048/tg128 after a cached
 prefix of the stated depth. Loading: cold files (page cache dropped with
 `echo 3 > /proc/sys/vm/drop_caches`), C1, MTP, capacity 262144. Memory: C1, AR,
-capacity 133121, peak device-global HIP allocation. The llama.cpp reference is
+capacity 133121, peak device-global HIP allocation. Loading and memory run
+with the target in a directory without `mmproj-BF16.gguf`, since Gufo
+prepares a sidecar found beside the target at load. The memory server
+receives only the measured requests: the driver calibrates its synthetic
+text once per variant and process, so memory runs after a sampled table in
+the same process (a calibration probe on the memory server leaves 1.8 GiB of
+prompt snapshots resident on the Q4 peak). Sampled MTP: five seeds on both
+sides. The multi-user tables compare against Gufo AR C1 hashes regenerated
+October 17; the greedy text has changed since September. The llama.cpp reference is
 `b11069` (ROCm) from `flake.nix`. The third-party Vulkan fork
 halo-box/strix-llama.cpp (`8c1c282ec`, Vulkan RADV,
 `GGML_VK_MMV_NO_SPLIT=1 -b 2048 -ub 512`) was measured with the same driver; its results
 are in [artifacts/fork](artifacts/fork). Commands, counts and server flags are
 recorded per row in the artifacts.
-Against the October 5 build (same prompts and completions), repetitive MTP tg
-reads 0.5–3.5% lower at depth although GPU kernel time per decode cycle is
-unchanged (CLI profile). In the server the power manager now holds a higher
-shader clock and a lower memory-fabric clock during decode (26B at 32K:
-2,680 against 2,390 MHz; FCLK 1,640 against 1,700 MHz, at 139 against
-128 W), and decode is bandwidth-bound. Requests still finish about 230 ms
-sooner end to end (first token 150 ms earlier, no snapshot pause after it). Single-user AR prefill at 128K is one 12-minute sample
-per point; the MTP tables' prefill at the same depth, through the same path,
-reads 2–5% above October 5.
+Against the October 7 build: prefill +3.5% at d0 to +22% at 128K (Q4 AR),
+AR decode within 0.6%, MTP decode +3.5–9% (Q4 mixed), memory +0.06 GiB.
 
-UD-Q8_K_XL tables: Gufo October 7 (same build), llama.cpp September 30, 2026, a reduced grid
+UD-Q8_K_XL tables: Gufo October 17 (same build), llama.cpp September 30, 2026, a reduced grid
 under the same driver, workloads and server flags: single-user depths 0, 4096,
-16384 and 32768, sampled MTP at depth 0 (three seeds), one and two users,
+16384 and 32768, sampled MTP at depth 0 (five seeds), one and two users,
 memory and loading. Gufo drafts under its calibrated policy. Every Gufo
 multi-user completion matches its C1 hash (AR against AR C1, MTP against MTP
 C1); the AR C1 hashes llama.cpp's MTP rows are compared with were qualified

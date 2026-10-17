@@ -212,6 +212,12 @@ void TestMixedEnumValues() {
     assert(Accepts(*grammar, R"({"x":1})"));
     assert(!Accepts(*grammar, R"({"x":2})"));
   }
+  // Enum literals spell integers as decimals, so the model is never forced
+  // into 1e+05.
+  auto large = parse(R"({"type":"object","properties":{"x":{
+    "type":"integer"}},"required":["x"],"additionalProperties":false})");
+  large["enum"] = parse(R"([{"x":100000}])");
+  assert(Accepts(*JsonConstraint::Compile(large, true), R"({"x":100000})"));
   const auto list = JsonConstraint::Compile(
       parse(R"({"type":"object","properties":{"l":{"type":"array","items":{
         "anyOf":[{"type":"string"},{"type":"number"}]},"enum":[["a",1]]}},
@@ -1570,6 +1576,24 @@ void TestUntypedNonStrictTools() {
       assert(!Accepts(*json, R"({"value":42})"));
     }
   }
+  // Best effort reads an array without items as any values, so the rest of
+  // the tool's schema still holds instead of falling back to any object.
+  const auto untyped_array = parse(R"({"type":"object","properties":{
+    "text":{"type":"string","const":"alpha"},"values":{"type":"array"}},
+    "required":["text","values"],"additionalProperties":false})");
+  const auto json =
+      JsonConstraint::ToolParameters(untyped_array, false, Format::kJson);
+  assert(Accepts(*json, R"({"text":"alpha","values":[1,"x",null,{"k":[]}]})"));
+  assert(!Accepts(*json, R"({"text":"beta","values":[]})"));
+  assert(!Accepts(*json, R"({"values":[]})"));
+  assert(!Accepts(*json, R"({"text":"alpha","values":[],"other":1})"));
+  bool rejected = false;
+  try {
+    (void)JsonConstraint::ToolParameters(untyped_array, true, Format::kJson);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  assert(rejected);
 }
 
 void TestMixedBestEffortToolRoutes() {

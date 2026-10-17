@@ -610,19 +610,19 @@ void CheckFinish(std::mt19937& rng) {
 }
 
 /// The K-quant routed prefill GEMM over binary16 rows, in the routing layout
-/// the executor builds (Flash-Next compaction, 96-row tiles), against FP64
-/// dots of the dequantized rows and the binary16 inputs; Q4_K, Q5_K, Q5_1 and
-/// Q8_0 also bit for bit against Flash-Next's routed GEMM. At the gate/up
-/// shape the fused GeGLU matches the separate pass (for Q8_0 over Flash-Next's
-/// binary16 rows, the path it replaces; for binary16 and Q4_0 over the FP32
-/// rows rounded to binary16).
+/// the executor builds (Flash-Next compaction, kRoutedHalfTileRows-row tiles),
+/// against FP64 dots of the dequantized rows and the binary16 inputs; Q4_K,
+/// Q5_K, Q5_1 and Q8_0 also bit for bit against Flash-Next's routed GEMM. At
+/// the gate/up shape the fused GeGLU matches the separate pass (for Q8_0 over
+/// Flash-Next's binary16 rows, the path it replaces; for binary16 and Q4_0
+/// over the FP32 rows rounded to binary16).
 void CheckRoutedPrefill(const Format& f, std::uint32_t m, std::uint32_t k,
                         bool gate_up, std::mt19937& rng) {
   namespace fn = gufo::models::qwen38_flash_next::rocm;
-  // About 150 rows per expert: a full 96-row tile and a partly live one.
+  // About 150 rows per expert: a full tile and a partly live one.
   constexpr std::uint32_t kTokens = 300;
   constexpr std::uint32_t kExpertsHere = 16;
-  constexpr std::uint32_t kTile = 96;
+  constexpr std::uint32_t kTile = g4k::kRoutedHalfTileRows;
   std::vector<std::int32_t> ids(kTokens * kUsed);
   std::vector<std::uint32_t> counts(kExpertsHere, 0);
   for (std::uint32_t t = 0; t < kTokens; ++t) {
@@ -788,7 +788,7 @@ void CheckRoutedPrefill(const Format& f, std::uint32_t m, std::uint32_t k,
 /// an m whose last row block is partial.
 void CheckDensePrefill(const Format& f, std::uint32_t m, std::uint32_t k,
                        std::mt19937& rng) {
-  constexpr std::uint32_t kTile = 96;
+  constexpr std::uint32_t kTile = g4k::kRoutedHalfTileRows;
   const auto w = RandomMatrix(f, m, k, rng);
   auto* dw = Device(w.data(), w.size());
   for (const std::uint32_t rows : {1U, 97U, 300U}) {

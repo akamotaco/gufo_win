@@ -20,6 +20,7 @@
 #include "src/models/gemma4/kernels/rocm/device_model.hpp"
 #include "src/models/gemma4/kernels/rocm/executor.hpp"
 #include "src/models/gemma4/weights.hpp"
+#include "src/models/qwen/hip/ops/token.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
 
 namespace gufo::models::gemma4 {
@@ -347,7 +348,7 @@ std::size_t Model::ResidentBytes() const noexcept {
 
 std::size_t Model::SessionBytes(std::uint32_t context) const noexcept {
   return rocm::Executor::CacheBytes(config(), context, executor_->ring(),
-                                    executor_->key_widths(),
+                                    executor_->key_widths(), VocabSize(),
                                     executor_->draft_table_bytes());
 }
 
@@ -382,6 +383,7 @@ void Session::Reset() {
   lookup_.Clear();
   draft_vocab_.Reset();
   logits_.clear();
+  logits_on_device_ = false;
   valid_ = false;
   // A restored snapshot starts a request without Sync.
   if (model_->options_.draft_calibration == DraftCalibrationScope::kRequest) {
@@ -410,7 +412,6 @@ bool Session::Extend(std::size_t begin, std::string* error_msg,
   try {
     std::lock_guard lock(model_->mutex_);
     std::vector<rocm::ImageRows> rows;
-    std::vector<float> logits;
     std::size_t count = 0;
     for (std::size_t start = begin; start < tokens_.size(); start += count) {
       std::size_t end = std::min(start + chunk, tokens_.size());
@@ -462,15 +463,20 @@ bool Session::Extend(std::size_t begin, std::string* error_msg,
       if (logit_rows.empty()) {
         continue;
       }
-      executor.CopyLogits(logit_rows.size(), &logits);
-      const std::size_t vocab = model_->VocabSize();
       if (holds_frontier) {
         executor.CommitHidden(*cache_, logit_rows.front());
-        logits_.assign(logits.begin(),
-                       logits.begin() + static_cast<std::ptrdiff_t>(vocab));
       }
       if (last && !lookahead.empty()) {
         executor.StashHidden(*cache_, logit_rows.back());
+      }
+      const auto logits = executor.ReadLogits(logit_rows.size());
+      const std::size_t vocab = model_->VocabSize();
+      if (holds_frontier) {
+        logits_.assign(logits.begin(),
+                       logits.begin() + static_cast<std::ptrdiff_t>(vocab));
+        logits_on_device_ = false;
+      }
+      if (last && !lookahead.empty()) {
         ahead_logits_.assign(logits.end() - static_cast<std::ptrdiff_t>(vocab),
                              logits.end());
       }
@@ -638,6 +644,7 @@ bool Session::EvaluateAll(std::span<const TokenId> tokens,
   }
   logits_.assign(logits->end() - static_cast<std::ptrdiff_t>(vocab),
                  logits->end());
+  logits_on_device_ = false;
   valid_ = true;
   return true;
 }
@@ -1022,7 +1029,10 @@ bool Session::DecodeStep(std::size_t max_tokens,
     return true;
   }
   auto& executor = *model_->executor_;
-  std::vector<float> logits;
+  const bool use_argmax =
+      !cycle.sampled && sampler.config().can_use_unmodified_argmax();
+  std::span<const float> logits;
+  std::span<const std::uint32_t> argmax;
   try {
     std::vector<std::uint32_t> logit_rows(cycle.rows.size());
     for (std::uint32_t i = 0; i < logit_rows.size(); ++i) {
@@ -1030,12 +1040,16 @@ bool Session::DecodeStep(std::size_t max_tokens,
     }
     executor.Forward(*cache_, cycle.rows, cycle.position, logit_rows, {},
                      static_cast<std::uint32_t>(cycle.siblings.size()));
-    executor.CopyLogits(cycle.rows.size(), &logits);
+    if (use_argmax) {
+      argmax = executor.ReadArgmax(cycle.rows.size());
+    } else {
+      logits = executor.ReadLogits(cycle.rows.size());
+    }
+    FinishCycle(cycle, logits, argmax, 0);
   } catch (const std::exception& e) {
     Reset();
     return Fail(error_msg, e.what());
   }
-  FinishCycle(cycle, logits, 0);
   return true;
 }
 
@@ -1045,6 +1059,24 @@ DraftCalibration& Session::Calibration(bool sampled, bool sibling) {
           ? calibration_
           : model_->calibration_;
   return tables[(sampled ? 1 : 0) + (sibling ? 2 : 0)];
+}
+
+std::span<const float> Session::Logits() const {
+  if (!valid_) {
+    return {};
+  }
+  if (logits_on_device_) {
+    std::lock_guard lock(model_->mutex_);
+    EnsureLogits();
+  }
+  return logits_;
+}
+
+void Session::EnsureLogits() const {
+  if (logits_on_device_) {
+    model_->executor_->CopyCacheLogits(*cache_, &logits_);
+    logits_on_device_ = false;
+  }
 }
 
 bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
@@ -1062,6 +1094,7 @@ bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
     if (!valid_) {
       return Fail(error_msg, "session has no logits to decode from");
     }
+    EnsureLogits();
     const auto token = static_cast<TokenId>(sampler.Sample(logits_));
     sampler.Accept(static_cast<sampling::TokenId>(token));
     result->tokens.push_back(token);
@@ -1227,6 +1260,7 @@ void Session::FinishDraft(Cycle& cycle) {
 }
 
 void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
+                          std::span<const std::uint32_t> argmax,
                           std::uint32_t first_hidden_row) {
   auto& sampler = *cycle.sampler;
   auto* result = cycle.result;
@@ -1243,15 +1277,22 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
   const std::size_t siblings = cycle.siblings.size();
   const std::size_t chain = rows.size() - siblings;
   const std::size_t vocab = model_->VocabSize();
+  const auto sample_row = [&](std::size_t r) {
+    if (!argmax.empty()) {
+      return static_cast<TokenId>(hip::CheckedSampleToken(argmax[r], vocab));
+    }
+    return static_cast<TokenId>(
+        sampler.Sample(logits.subspan(r * vocab, vocab)));
+  };
   std::size_t row = 0;
   std::uint64_t accepted = 0;
   bool agrees = false;
   bool sibling = false;
   for (;; ++row) {
-    const auto row_logits = logits.subspan(row * vocab, vocab);
     agrees = false;
     const bool beside = row < siblings && row + 1 < chain;
     if (cycle.sampled && row + 1 < chain) {
+      const auto row_logits = logits.subspan(row * vocab, vocab);
       if (beside) {
         const auto verified = VerifyWithSibling(
             row_logits, cycle.proposals[row], cycle.siblings[row], sampler);
@@ -1265,7 +1306,7 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
         agrees = verified.accepted;
       }
     } else {
-      emit(static_cast<TokenId>(sampler.Sample(row_logits)));
+      emit(sample_row(row));
       agrees = row + 1 < chain && result->tokens.back() == rows[row + 1];
       sibling =
           beside && !agrees && result->tokens.back() == cycle.siblings[row];
@@ -1284,8 +1325,7 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
   std::size_t last = row;
   if (sibling && !result->stop && result->tokens.size() < cycle.max_tokens) {
     last = chain + row;
-    emit(static_cast<TokenId>(
-        sampler.Sample(logits.subspan(last * vocab, vocab))));
+    emit(sample_row(last));
     tokens_.insert(tokens_.end(), rows.begin(), rows.begin() + row + 1);
     tokens_.push_back(cycle.siblings[row]);
     model_->executor_->MoveKey(
@@ -1296,10 +1336,19 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
     // Rows [0, row] are committed; the last emitted token becomes pending.
     tokens_.insert(tokens_.end(), rows.begin(), rows.begin() + row + 1);
   }
-  model_->executor_->CommitHidden(
-      *cache_, first_hidden_row + static_cast<std::uint32_t>(last));
-  const auto kept = logits.subspan(last * vocab, vocab);
-  logits_.assign(kept.begin(), kept.end());
+  const auto committed_row =
+      first_hidden_row + static_cast<std::uint32_t>(last);
+  model_->executor_->CommitHidden(*cache_, committed_row);
+  // Greedy decode keeps the row on the device: nothing reads it on the
+  // host before the next cycle (EnsureLogits).
+  if (!argmax.empty()) {
+    model_->executor_->CommitLogits(*cache_, committed_row);
+    logits_on_device_ = true;
+  } else {
+    const auto kept = logits.subspan(last * vocab, vocab);
+    logits_.assign(kept.begin(), kept.end());
+    logits_on_device_ = false;
+  }
   valid_ = true;
   pending_ = result->tokens.back();
   stats_.cycles += 1;
@@ -1430,30 +1479,43 @@ bool Session::DecodeBatch(std::span<BatchDecode> decodes) {
     return ok;
   }
   auto& executor = *model.executor_;
-  std::vector<float> logits;
+  bool use_argmax = true;
+  for (const std::size_t i : active) {
+    use_argmax = use_argmax && !cycles[i].sampled &&
+                 cycles[i].sampler->config().can_use_unmodified_argmax();
+  }
+  std::span<const float> logits;
+  std::span<const std::uint32_t> argmax;
   try {
     std::vector<std::uint32_t> logit_rows(tokens.size());
     for (std::uint32_t i = 0; i < logit_rows.size(); ++i) {
       logit_rows[i] = i;
     }
     executor.Forward(segments, tokens, logit_rows);
-    executor.CopyLogits(tokens.size(), &logits);
+    if (use_argmax) {
+      argmax = executor.ReadArgmax(tokens.size());
+    } else {
+      logits = executor.ReadLogits(tokens.size());
+    }
+    const std::size_t vocab = model.VocabSize();
+    std::uint32_t row0 = 0;
+    for (const std::size_t i : active) {
+      const std::size_t count = cycles[i].rows.size();
+      decodes[i].session->FinishCycle(
+          cycles[i],
+          use_argmax ? std::span<const float>{}
+                     : logits.subspan(row0 * vocab, count * vocab),
+          use_argmax ? argmax.subspan(row0, count)
+                     : std::span<const std::uint32_t>{},
+          row0);
+      row0 += static_cast<std::uint32_t>(count);
+    }
   } catch (const std::exception& e) {
     for (const std::size_t i : active) {
       decodes[i].session->Reset();
       decodes[i].error = e.what();
     }
     return false;
-  }
-  const std::size_t vocab = model.VocabSize();
-  std::uint32_t row0 = 0;
-  for (const std::size_t i : active) {
-    const std::size_t count = cycles[i].rows.size();
-    decodes[i].session->FinishCycle(
-        cycles[i],
-        std::span<const float>(logits).subspan(row0 * vocab, count * vocab),
-        row0);
-    row0 += static_cast<std::uint32_t>(count);
   }
   return ok;
 }
@@ -1493,13 +1555,13 @@ bool Session::EvaluateBatch(std::span<Session* const> sessions,
     logit_rows[i] = i;
   }
   auto& executor = *model.executor_;
-  std::vector<float> logits;
+  std::span<const float> logits;
   try {
     executor.Forward(segments, rows, logit_rows);
     for (std::uint32_t i = 0; i < sessions.size(); ++i) {
       executor.CommitHidden(*sessions[i]->cache_, i);
     }
-    executor.CopyLogits(rows.size(), &logits);
+    logits = executor.ReadLogits(rows.size());
   } catch (const std::exception& e) {
     for (Session* s : sessions) {
       s->Reset();
@@ -1514,6 +1576,7 @@ bool Session::EvaluateBatch(std::span<Session* const> sessions,
     s.logits_.assign(
         logits.begin() + static_cast<std::ptrdiff_t>(i * vocab),
         logits.begin() + static_cast<std::ptrdiff_t>((i + 1) * vocab));
+    s.logits_on_device_ = false;
     s.valid_ = true;
   }
   return true;
@@ -1795,7 +1858,7 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
   }
   auto& tail = snapshot->tail_;
   tail.resize(std::size_t{model_->VocabSize()} * 4);
-  std::memcpy(tail.data(), logits_.data(), tail.size());
+  std::memcpy(tail.data(), Logits().data(), tail.size());
   snapshot->memory_ = model_->snapshot_memory_;
 
   auto& executor = *model_->executor_;
@@ -2036,6 +2099,7 @@ bool Session::RestoreSnapshot(const SessionSnapshot& snapshot,
   logits_.assign(reinterpret_cast<const float*>(snapshot.tail_.data()),
                  reinterpret_cast<const float*>(snapshot.tail_.data()) +
                      model_->VocabSize());
+  logits_on_device_ = false;
   valid_ = true;
   return true;
 }
@@ -2083,6 +2147,7 @@ bool Session::RestoreSnapshot(std::span<const std::uint8_t> payload,
   logits_.resize(model_->VocabSize());
   std::memcpy(logits_.data(), payload.data() + (payload.size() - tail_bytes),
               tail_bytes);
+  logits_on_device_ = false;
   valid_ = true;
   return true;
 }

@@ -211,9 +211,8 @@ __global__ void __launch_bounds__(kThreads)
   constexpr int kActChunks = kTileTokens * kStageK / 8;
   constexpr int kActPer = (kActChunks + kThreads - 1) / kThreads;
   __shared__
-      __attribute__((aligned(16))) std::uint8_t s_rows[kRowsPerBlock * kStride];
-  __shared__
       __attribute__((aligned(16))) __half s_act[kTileTokens * kActStride];
+  auto* s_rows = reinterpret_cast<std::uint8_t*>(s_act);
   int expert = 0;
   int t_local = 0;
   int bucket_begin = 0;
@@ -328,7 +327,26 @@ __global__ void __launch_bounds__(kThreads)
       dst[3 * f_part + 1] = f_code1;
       dst[3 * f_part + 2] = f_code2;
     }
-    if (f_part == 1) {
+    if constexpr (kQ4) {
+      // Q4_K: the row's two threads convert two of its four scale words
+      // each (Q5_K and Q6_K keep one thread: the split cost them registers).
+      const __half2 dm = __builtin_bit_cast(__half2, f_header.x);
+      std::uint32_t packed[2];
+#pragma unroll
+      for (int p = 0; p < 2; ++p) {
+        std::uint32_t sc = 0;
+        std::uint32_t mn = 0;
+        ScaleMinK4(f_header, 4 * f_half + 2 * f_part + p, &sc, &mn);
+        const float scale =
+            f_live ? __low2float(dm) * static_cast<float>(sc) : 0.0F;
+        const float offset =
+            f_live ? __high2float(dm) * static_cast<float>(mn) : 0.0F;
+        packed[p] = __builtin_bit_cast(std::uint32_t,
+                                       __floats2half2_rn(scale, -offset));
+      }
+      reinterpret_cast<uint2*>(dst + kScaleChunk)[f_part] =
+          make_uint2(packed[0], packed[1]);
+    } else if (f_part == 1) {
       std::uint32_t packed[4];
       if constexpr (kQ6) {
         const float d = f_live ? f_d : 0.0F;
@@ -410,12 +428,7 @@ __global__ void __launch_bounds__(kThreads)
   fetch_act(0);
   for (int stage = 0; stage < stages; ++stage) {
     commit_weights();
-    commit_act();
-    __syncthreads();
-    if (stage + 1 < stages) {
-      fetch_weights(stage + 1);
-      fetch_act(stage + 1);
-    }
+    __builtin_amdgcn_s_waitcnt(0x007f);
     const auto* row =
         reinterpret_cast<const uint4*>(s_rows + (wave * 16 + sub) * kStride);
     const uint4 q[4] = {row[0], row[1], row[2], row[3]};
@@ -425,6 +438,13 @@ __global__ void __launch_bounds__(kThreads)
       qh[1] = row[5];
     }
     const uint4 sc4 = row[kScaleChunk];
+    __syncthreads();
+    commit_act();
+    __syncthreads();
+    if (stage + 1 < stages) {
+      fetch_weights(stage + 1);
+      fetch_act(stage + 1);
+    }
     const __half2 scale[4] = {
         __builtin_bit_cast(__half2, sc4.x), __builtin_bit_cast(__half2, sc4.y),
         __builtin_bit_cast(__half2, sc4.z), __builtin_bit_cast(__half2, sc4.w)};
@@ -1140,8 +1160,11 @@ bool LaunchDenseHalfGemm(ExpertFormat format, const void* w, const void* x,
       (blockwise && out_half != nullptr && !geglu)) {
     return false;
   }
-  constexpr int kTile = 96;
-  // Token tiles per row-block sweep (cold 2048-row Gemma 31B shapes: 2 or 4
+  // Seven 16-token tiles: each decoded weight fragment feeds seven products
+  // instead of six, and the 30 KB of staged activations still let four blocks
+  // share a WGP (128 tokens take 35 KB and three).
+  constexpr int kTile = 112;
+  // Token tiles per row-block sweep (cold 2048-row Gemma 31B shapes: 2 or 3
   // beat both one and every tile).
   constexpr std::uint32_t kGroup = 2;
   const std::uint32_t token_tiles = (rows + kTile - 1) / kTile;
@@ -1204,7 +1227,7 @@ bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
                           const std::int32_t* rows_out, float* out,
                           void* out_half, std::uint32_t m, std::uint32_t k,
                           hipStream_t stream, bool geglu) {
-  if (tile_rows != 96 || n_tiles == 0 ||
+  if (tile_rows != kRoutedHalfTileRows || n_tiles == 0 ||
       (out == nullptr) == (out_half == nullptr) ||
       (format != ExpertFormat::kQ5_1 && format != ExpertFormat::kQ8_0 &&
        format != ExpertFormat::kF16 && format != ExpertFormat::kQ4_0 &&
@@ -1225,33 +1248,33 @@ bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
   switch (format) {
     case ExpertFormat::kQ4_K:
       if (geglu) {
-        RoutedHalfKQuantKernel<ExpertFormat::kQ4_K, 96, true>
+        RoutedHalfKQuantKernel<ExpertFormat::kQ4_K, kRoutedHalfTileRows, true>
             <<<geglu_grid, kThreads, 0, stream>>>(
                 wb, xh, tiles, pad_bounds, rows_in, rows_out, out, oh, m, k);
       } else {
-        RoutedHalfKQuantKernel<ExpertFormat::kQ4_K, 96>
+        RoutedHalfKQuantKernel<ExpertFormat::kQ4_K, kRoutedHalfTileRows>
             <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
                                             rows_out, out, oh, m, k);
       }
       return true;
     case ExpertFormat::kQ5_K:
       if (geglu) {
-        RoutedHalfKQuantKernel<ExpertFormat::kQ5_K, 96, true>
+        RoutedHalfKQuantKernel<ExpertFormat::kQ5_K, kRoutedHalfTileRows, true>
             <<<geglu_grid, kThreads, 0, stream>>>(
                 wb, xh, tiles, pad_bounds, rows_in, rows_out, out, oh, m, k);
       } else {
-        RoutedHalfKQuantKernel<ExpertFormat::kQ5_K, 96>
+        RoutedHalfKQuantKernel<ExpertFormat::kQ5_K, kRoutedHalfTileRows>
             <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
                                             rows_out, out, oh, m, k);
       }
       return true;
     case ExpertFormat::kQ6_K:
       if (geglu) {
-        RoutedHalfKQuantKernel<ExpertFormat::kQ6_K, 96, true>
+        RoutedHalfKQuantKernel<ExpertFormat::kQ6_K, kRoutedHalfTileRows, true>
             <<<geglu_grid, kThreads, 0, stream>>>(
                 wb, xh, tiles, pad_bounds, rows_in, rows_out, out, oh, m, k);
       } else {
-        RoutedHalfKQuantKernel<ExpertFormat::kQ6_K, 96>
+        RoutedHalfKQuantKernel<ExpertFormat::kQ6_K, kRoutedHalfTileRows>
             <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
                                             rows_out, out, oh, m, k);
       }
@@ -1260,7 +1283,7 @@ bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
       if (out == nullptr || k % kDownStageK != 0) {
         return false;
       }
-      RoutedHalfDownKernel<ExpertFormat::kQ5_1, 96>
+      RoutedHalfDownKernel<ExpertFormat::kQ5_1, kRoutedHalfTileRows>
           <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
                                           rows_out, out, nullptr, m, k);
       return true;
@@ -1269,12 +1292,12 @@ bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
         return false;
       }
       if (geglu) {
-        RoutedHalfDownKernel<ExpertFormat::kQ8_0, 96, true>
+        RoutedHalfDownKernel<ExpertFormat::kQ8_0, kRoutedHalfTileRows, true>
             <<<geglu_grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds,
                                                   rows_in, rows_out, nullptr,
                                                   oh, m, k);
       } else {
-        RoutedHalfDownKernel<ExpertFormat::kQ8_0, 96>
+        RoutedHalfDownKernel<ExpertFormat::kQ8_0, kRoutedHalfTileRows>
             <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
                                             rows_out, out, nullptr, m, k);
       }
@@ -1284,12 +1307,12 @@ bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
         return false;
       }
       if (geglu) {
-        RoutedHalfDownKernel<ExpertFormat::kQ4_0, 96, true>
+        RoutedHalfDownKernel<ExpertFormat::kQ4_0, kRoutedHalfTileRows, true>
             <<<geglu_grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds,
                                                   rows_in, rows_out, nullptr,
                                                   oh, m, k);
       } else {
-        RoutedHalfDownKernel<ExpertFormat::kQ4_0, 96>
+        RoutedHalfDownKernel<ExpertFormat::kQ4_0, kRoutedHalfTileRows>
             <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
                                             rows_out, out, nullptr, m, k);
       }
@@ -1298,7 +1321,7 @@ bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
       if (out == nullptr || k % kDownStageK != 0) {
         return false;
       }
-      RoutedHalfDownKernel<ExpertFormat::kQ5_0, 96>
+      RoutedHalfDownKernel<ExpertFormat::kQ5_0, kRoutedHalfTileRows>
           <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
                                           rows_out, out, nullptr, m, k);
       return true;
@@ -1307,12 +1330,12 @@ bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
         return false;
       }
       if (geglu) {
-        RoutedHalfDownKernel<ExpertFormat::kF16, 96, true>
+        RoutedHalfDownKernel<ExpertFormat::kF16, kRoutedHalfTileRows, true>
             <<<geglu_grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds,
                                                   rows_in, rows_out, nullptr,
                                                   oh, m, k);
       } else {
-        RoutedHalfDownKernel<ExpertFormat::kF16, 96>
+        RoutedHalfDownKernel<ExpertFormat::kF16, kRoutedHalfTileRows>
             <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
                                             rows_out, out, nullptr, m, k);
       }

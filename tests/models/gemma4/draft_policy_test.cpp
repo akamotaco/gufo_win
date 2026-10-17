@@ -83,7 +83,7 @@ void CheckCosts() {
           "d0 verification costs");
   Require(std::fabs(shallow.draft[7] - 7 * 1.95F) < 1e-4F, "d0 draft steps");
   const g4::DraftCosts mid = g4::DraftCostsAt(2048);
-  Require(std::fabs(mid.verify[3] - 0.5F * (100.6F + 107.0F)) < 1e-3F,
+  Require(std::fabs(mid.verify[3] - 0.5F * (100.6F + 106.5F)) < 1e-3F,
           "interpolation between depths");
   const g4::DraftCosts deep = g4::DraftCostsAt(131072);
   const g4::DraftCosts measured = g4::DraftCostsAt(65536);

@@ -60,6 +60,9 @@ struct KvCache {
   /// The same for the last of the lookahead rows a prefill computed past the
   /// frontier (Session::Sync), adopted if the next Sync asks for them.
   float* ahead_hidden{nullptr};
+  /// Logit row of the frontier token while the owning Session keeps it on
+  /// the device (CommitLogits; greedy decode never reads it on the host).
+  float* logits{nullptr};
   /// kDraftTableRows drafter head rows (LoadDraftTable) when the head is
   /// ordered (DeviceModel::draft_head_tokens), else null.
   void* draft_table{nullptr};
@@ -98,7 +101,7 @@ public:
   /// Per-session cache bytes for per-layer K row widths (KeyWidths).
   [[nodiscard]] static std::size_t CacheBytes(
       const Config& config, std::uint32_t max_context, std::uint32_t ring,
-      const std::vector<std::uint32_t>& key_widths,
+      const std::vector<std::uint32_t>& key_widths, std::uint32_t vocab,
       std::size_t draft_table_bytes);
   /// Values per K cache row: the whole K, or only the rotated dims where one
   /// projection feeds K and V (K = rope(k_norm * V)).
@@ -143,6 +146,13 @@ public:
   /// Keeps hidden row `row` of the last Forward as the cache's frontier
   /// state for drafting.
   void CommitHidden(KvCache& cache, std::uint32_t row);
+  /// Argmax token id per row of the last Forward's `rows` logit rows.
+  [[nodiscard]] std::span<const std::uint32_t> ReadArgmax(
+      std::size_t rows) const;
+  /// Keeps logit row `row` of the last Forward in cache.logits.
+  void CommitLogits(KvCache& cache, std::uint32_t row);
+  /// Copies cache.logits to `out`.
+  void CopyCacheLogits(const KvCache& cache, std::vector<float>* out) const;
   /// Copies row `row` of the last forward to cache.ahead_hidden, and that
   /// back to cache.hidden.
   void StashHidden(KvCache& cache, std::uint32_t row);
@@ -193,6 +203,7 @@ public:
   void SetTapSink(TapSink sink) { tap_sink_ = std::move(sink); }
 
   /// Copies the logits of the last Forward to the host, [rows][vocab].
+  [[nodiscard]] std::span<const float> ReadLogits(std::size_t rows) const;
   void CopyLogits(std::size_t rows, std::vector<float>* out) const;
   /// Post-norm hidden rows of the last Forward, [tokens][hidden].
   [[nodiscard]] const float* hidden() const noexcept { return h_; }
@@ -207,8 +218,19 @@ public:
 private:
   /// y[rows][w.rows] = x[rows][w.cols] * W^T; `xq` is x staged for the
   /// prefill GEMMs when rows exceed the small-batch limit (Quantize).
+  /// `packed` says `wmma_` already holds `x`'s WMMA activation pack.
   void Project(const DeviceTensor& w, const float* x, const void* xq,
-               std::uint32_t rows, float* y);
+               std::uint32_t rows, float* y, bool packed = false);
+  /// Whether Project reads `w` at `rows` with the WMMA kernel.
+  [[nodiscard]] bool WmmaProjection(const DeviceTensor& w,
+                                    std::uint32_t rows) const;
+  /// The WMMA pack a producer of Project(w, rows)'s input fills (null when
+  /// that projection takes another kernel).
+  [[nodiscard]] WmmaPackOut PackFor(const DeviceTensor& w,
+                                    std::uint32_t rows) const;
+  /// Project for drafter weights, which need not round like any other width.
+  void ProjectDraft(const DeviceTensor& w, const float* x, std::uint32_t rows,
+                    float* y);
   /// Project for binary16 weights: the batch-invariant small-batch GEMV up
   /// to kSplitRows rows, the binary16 WMMA GEMM past that.
   void ProjectHalf(const DeviceTensor& w, const float* x, const void* xq,
@@ -299,11 +321,14 @@ private:
   float* draft_o_{nullptr};
   float* draft_gate_{nullptr};
   float* draft_up_{nullptr};
+  float* draft_act_{nullptr};
   float* draft_logits_{nullptr};
   float* draft_next_{nullptr};
   std::uint32_t* draft_candidates_{nullptr};
   std::uint32_t* draft_candidate_scratch_{nullptr};
   qwen38_flash_next::MtpCandidateLogits* draft_candidates_host_{nullptr};
+  std::uint32_t* argmax_host_{nullptr};
+  mutable std::vector<float> logits_host_;
 };
 
 /// Longest draft chain one cycle may request; verification then carries

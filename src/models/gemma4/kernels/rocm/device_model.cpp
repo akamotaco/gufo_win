@@ -156,6 +156,12 @@ struct Uploader {
                        ? Fuse({&l.attn_q, &l.attn_k}, {&d.attn_q, &d.attn_k})
                        : Fuse({&l.attn_q, &l.attn_k, &l.attn_v},
                               {&d.attn_q, &d.attn_k, &d.attn_v});
+      if (d.attn_qkv.empty() && !l.attn_v.empty()) {
+        d.attn_qkv = Fuse({&l.attn_q, &l.attn_k}, {&d.attn_q, &d.attn_k});
+        if (!d.attn_qkv.empty()) {
+          d.attn_v = Copy(l.attn_v);
+        }
+      }
     }
     if (d.attn_qkv.empty()) {
       d.attn_q = Copy(l.attn_q);

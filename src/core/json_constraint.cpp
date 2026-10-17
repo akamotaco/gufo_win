@@ -1733,9 +1733,14 @@ private:
     return Seq({Byte('{'), ws_, suffix[0], ws_, Byte('}')});
   }
   std::uint32_t Array(const json::Value& schema, std::size_t depth) {
+    // Best effort reads a missing items schema as any value, like `items: {}`:
+    // one untyped array must not drop the rest of a tool's arguments.
+    static const json::Value kAnyItem = json::Value::object();
     const auto* items = schema.find("items");
-    if (!items)
+    if (!items && !ignore_unknown_keys_)
       Invalid("arrays require an items schema");
+    if (!items)
+      items = &kAnyItem;
     auto bound = [&](const char* name, std::size_t fallback) {
       const auto* value = schema.find(name);
       if (!value)
@@ -2092,6 +2097,32 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
                            : deepseek                  ? "</｜DSML｜invoke>"
                            : gemma                     ? "<tool_call|>"
                                    : "</function>\n</tool_call>");
+  // llama.cpp SPACE_RULE: empty, one space, or 1–2 newlines followed by up to
+  // 20 spaces/tabs (common/json-schema-to-grammar.cpp).
+  auto space_rule = [&] {
+    const auto space = static_cast<std::uint32_t>(grammar->rules_.size());
+    grammar->rules_.push_back({{}});
+    const auto single_space = literal(" ");
+    const auto newline = literal("\n");
+    const auto double_newline = literal("\n\n");
+    std::bitset<256> indentation;
+    indentation.set(' ');
+    indentation.set('\t');
+    const auto indent =
+        static_cast<std::uint32_t>(kTerminal | grammar->classes_.size());
+    grammar->classes_.push_back(indentation);
+    auto padding = static_cast<std::uint32_t>(grammar->rules_.size());
+    grammar->rules_.push_back({{}});
+    for (unsigned count = 0; count < 20; ++count) {
+      const auto next = static_cast<std::uint32_t>(grammar->rules_.size());
+      grammar->rules_.push_back({{}, {indent, padding}});
+      padding = next;
+    }
+    grammar->rules_[space].push_back({single_space});
+    grammar->rules_[space].push_back({newline, padding});
+    grammar->rules_[space].push_back({double_newline, padding});
+    return space;
+  };
   const auto calls = static_cast<std::uint32_t>(grammar->rules_.size());
   grammar->rules_.push_back({});
   // In tool-only mode ordinary text remains unconstrained until a canonical
@@ -2140,29 +2171,7 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
   if (ends_output) {
     grammar->rules_.push_back({{}});
     if (qwen) {
-      // llama.cpp SPACE_RULE: empty, one space, or 1–2 newlines followed
-      // by up to 20 spaces/tabs (common/json-schema-to-grammar.cpp).
-      const auto space = static_cast<std::uint32_t>(grammar->rules_.size());
-      grammar->rules_.push_back({{}});
-      const auto single_space = literal(" ");
-      const auto newline = literal("\n");
-      const auto double_newline = literal("\n\n");
-      std::bitset<256> indentation;
-      indentation.set(' ');
-      indentation.set('\t');
-      const auto indent =
-          static_cast<std::uint32_t>(kTerminal | grammar->classes_.size());
-      grammar->classes_.push_back(indentation);
-      auto padding = static_cast<std::uint32_t>(grammar->rules_.size());
-      grammar->rules_.push_back({{}});
-      for (unsigned count = 0; count < 20; ++count) {
-        const auto next = static_cast<std::uint32_t>(grammar->rules_.size());
-        grammar->rules_.push_back({{}, {indent, padding}});
-        padding = next;
-      }
-      grammar->rules_[space].push_back({single_space});
-      grammar->rules_[space].push_back({newline, padding});
-      grammar->rules_[space].push_back({double_newline, padding});
+      const auto space = space_rule();
       grammar->rules_[after] = {{space}};
       if (parallel)
         grammar->rules_[after].push_back({space, literal(marker), calls});
@@ -2243,6 +2252,10 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
     alternatives.push_back({prose});
   else if (format == ToolFormat::kJson)
     alternatives.push_back({literal(marker), calls});
+  else if (gemma)
+    // Gemma 4 writes its call marker directly. Unbounded whitespace let a
+    // model refuse a required call with spaces until its token limit.
+    alternatives.push_back({space_rule(), literal(marker), calls});
   else {
     std::bitset<256> whitespace;
     for (const unsigned char byte : std::string_view(" \t\r\n"))

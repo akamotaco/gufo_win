@@ -13,16 +13,16 @@
       "gpuDriver": "amdgpu",
       "gpuName": "AMD Radeon 8060S Graphics",
       "gpuPciId": "1002:1586",
-      "kernelRelease": "7.2.7-200.fc44.x86_64",
-      "memoryTotalBytes": 133616881664,
+      "kernelRelease": "7.2.10-200.fc44.x86_64",
+      "memoryTotalBytes": 133616861184,
       "memoryType": "LPDDR5X (Unified)",
       "rocmVersion": "7.2.3",
       "schemaVersion": "1.0.0"
     },
-    "fingerprintId": "c86da8c5c4d44fad94450e1ce48b284978d59b3e7c30d7abb1c6fffdf7c5348a",
+    "fingerprintId": "ddcd4cc998ad586a80ec09986c3b9e684e9f4eb99c6f69395e220c31cc040a4e",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-10-07",
+  "measuredOn": "2026-10-17",
   "mode": null,
   "model": {
     "id": "Gemma-4-26B-A4B-It",
@@ -35,13 +35,13 @@
   "referenceName": "llama.cpp",
   "rows": {
     "16K prefix, pp4096 + tg128": {
-      "command": "gufo serve --port 54193 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
-      "gib": 30.16,
+      "command": "gufo serve --port 59693 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
+      "gib": 30.22,
       "idle_gib": 3.01
     },
     "pp2048 + tg128": {
-      "command": "gufo serve --port 54193 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
-      "gib": 28.51,
+      "command": "gufo serve --port 59693 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf --context 133121 --served-model-name bench --think off --max-pending-per-client 8",
+      "gib": 28.57,
       "idle_gib": 3.01
     }
   },
@@ -51,7 +51,7 @@
       "gufo",
       "serve",
       "--port",
-      "54193",
+      "59693",
       "--sessions",
       "1",
       "llm",
@@ -69,8 +69,8 @@
   },
   "source": {
     "buildMode": "nix-release",
-    "dirty": false,
-    "revision": "2a24b0c7e9bf7729677e51cb14c1cd52cb232383"
+    "dirty": true,
+    "revision": "a9ff98e66b5fd1f027ab6e6949d04746a0860300"
   },
   "table": "memory-q6",
   "target": "gufo"

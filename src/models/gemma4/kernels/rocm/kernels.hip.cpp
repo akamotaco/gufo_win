@@ -11,6 +11,7 @@
 
 #include "src/models/gemma4/kernels/rocm/attention_wmma.hpp"
 #include "src/models/gemma4/kernels/rocm/half_store.hpp"
+#include "src/models/gemma4/kernels/rocm/wmma_pack.hpp"
 #include "src/models/qwen/hip/kernels/prefill_quant_gemm.hpp"
 
 namespace gufo::models::gemma4::rocm {
@@ -198,7 +199,9 @@ __device__ inline void StoreNormedRow(const float (&xv)[RowRegisters<kBlock>()],
                                       float r, const float* next_norm, float* h,
                                       void* q8, std::uint32_t rows,
                                       std::uint32_t dim,
-                                      __half* h_half = nullptr) {
+                                      __half* h_half = nullptr,
+                                      const WmmaPackOut& pack = {},
+                                      float* stage = nullptr) {
   const std::size_t base = static_cast<std::size_t>(blockIdx.x) * dim;
 #pragma unroll
   for (std::uint32_t j = 0; j < RowRegisters<kBlock>(); ++j) {
@@ -212,10 +215,16 @@ __device__ inline void StoreNormedRow(const float (&xv)[RowRegisters<kBlock>()],
         if (h_half != nullptr) {
           h_half[base + i] = HalfOf(v);
         }
+        if (pack.hi != nullptr) {
+          stage[i] = v;
+        }
       }
     } else if (i - threadIdx.x % kWave < dim) {
       QuantizeQ8Lane(q8, rows, dim / 32, blockIdx.x, i / 32, v);
     }
+  }
+  if (pack.hi != nullptr) {
+    PackStaged(stage, dim / 32, blockIdx.x, 0, pack);
   }
 }
 
@@ -235,7 +244,7 @@ __global__ void __launch_bounds__(kBlock)
                             const float* next_norm, float* h, std::uint32_t dim,
                             float eps, void* q8, std::uint32_t rows,
                             const float* second_norm, float* h2, __half* h_half,
-                            __half* h2_half) {
+                            __half* h2_half, WmmaPackOut pack) {
   constexpr std::uint32_t kRegs = RowRegisters<kBlock>();
   __shared__ float scratch[kBlock / kWave];
   const std::size_t base = static_cast<std::size_t>(blockIdx.x) * dim;
@@ -265,7 +274,9 @@ __global__ void __launch_bounds__(kBlock)
     }
   }
   const float r2 = RmsScale(BlockSumOf<kBlock>(ss2, scratch), dim, eps);
-  StoreNormedRow<kBlock>(xv, r2, next_norm, h, q8, rows, dim, h_half);
+  extern __shared__ float pack_stage[];
+  StoreNormedRow<kBlock>(xv, r2, next_norm, h, q8, rows, dim, h_half, pack,
+                         pack_stage);
   if (h2 != nullptr || h2_half != nullptr) {
 #pragma unroll
     for (std::uint32_t j = 0; j < kRegs; ++j) {
@@ -288,7 +299,8 @@ __global__ void __launch_bounds__(kBlock)
     PostFeedForwardNormKernel(const float* f, const float* post_norm,
                               float scale, float* x, const float* next_norm,
                               float* h, std::uint32_t dim, float eps, void* q8,
-                              std::uint32_t rows, __half* h_half) {
+                              std::uint32_t rows, __half* h_half,
+                              WmmaPackOut pack) {
   constexpr std::uint32_t kRegs = RowRegisters<kBlock>();
   __shared__ float scratch[kBlock / kWave];
   const std::size_t base = static_cast<std::size_t>(blockIdx.x) * dim;
@@ -321,7 +333,9 @@ __global__ void __launch_bounds__(kBlock)
     return;
   }
   const float r2 = RmsScale(BlockSumOf<kBlock>(ss2, scratch), dim, eps);
-  StoreNormedRow<kBlock>(xv, r2, next_norm, h, q8, rows, dim, h_half);
+  extern __shared__ float pack_stage[];
+  StoreNormedRow<kBlock>(xv, r2, next_norm, h, q8, rows, dim, h_half, pack,
+                         pack_stage);
 }
 
 // ---------------------------------------------------------------------------
@@ -476,6 +490,7 @@ __global__ void __launch_bounds__(kThreads) QkvPostKernel(QkvPostArgs a) {
   float v[kWaves][K];
   const std::size_t q_row = a.row_stride != 0 ? a.row_stride : a.heads * D;
   const std::size_t kv_row = a.row_stride != 0 ? a.row_stride : a.kv_heads * D;
+  const std::size_t v_row = a.v_stride != 0 ? a.v_stride : a.kv_heads * D;
   if (head < a.heads) {
     float* q = a.q + row * q_row + std::size_t{head} * D;
     load(q, v);
@@ -524,7 +539,7 @@ __global__ void __launch_bounds__(kThreads) QkvPostKernel(QkvPostArgs a) {
       }
     }
   }
-  load(a.v + in, v);
+  load(a.v + row * v_row + std::size_t{kvh} * D, v);
   norm_rope(v, nullptr, false);
 #pragma unroll
   for (int w = 0; w < kWaves; ++w) {
@@ -535,28 +550,85 @@ __global__ void __launch_bounds__(kThreads) QkvPostKernel(QkvPostArgs a) {
   }
 }
 
+template<int D>
 __global__ void __launch_bounds__(kThreads)
-    QueryPostKernel(float* q, const float* q_norm, float theta_scale,
-                    const float* freq_factors, std::uint32_t heads,
-                    std::uint32_t dim, std::uint32_t position,
-                    bool shared_position, float eps, const float* key_weight,
-                    std::uint32_t rotated_pairs) {
-  __shared__ float buf[512];
-  __shared__ float scratch[kWaves];
+    QueryPostWaveKernel(float* q, const float* q_norm, float theta_scale,
+                        const float* freq_factors, std::uint32_t heads,
+                        std::uint32_t position, bool shared_position, float eps,
+                        const float* key_weight, std::uint32_t rotated_pairs) {
+  constexpr int K = D / kThreads;
+  const int lane = static_cast<int>(threadIdx.x) % kWave;
   const std::uint32_t row = blockIdx.x;
-  float* qh = q + (static_cast<std::size_t>(row) * heads + blockIdx.y) * dim;
-  for (std::uint32_t i = threadIdx.x; i < dim; i += kThreads) {
-    buf[i] = qh[i];
+  const std::uint32_t head = blockIdx.y * kWaves + threadIdx.x / kWave;
+  if (head >= heads) {
+    return;
   }
-  __syncthreads();
-  NormRopeHead(buf, q_norm, dim, eps, true,
-               shared_position ? position : position + row, theta_scale,
-               freq_factors, scratch);
-  if (rotated_pairs != 0) {
-    FoldKeyWeight(buf, dim, key_weight, rotated_pairs);
+  const std::uint32_t pos = shared_position ? position : position + row;
+  const auto dim_of = [&](int w, int k) {
+    return static_cast<std::uint32_t>(kWave * w + lane + kThreads * k);
+  };
+  float* qh = q + (static_cast<std::size_t>(row) * heads + head) * D;
+  float v[kWaves][K];
+  float total = 0.0F;
+#pragma unroll
+  for (int w = 0; w < kWaves; ++w) {
+    float ss = 0.0F;
+#pragma unroll
+    for (int k = 0; k < K; ++k) {
+      const float x = qh[dim_of(w, k)];
+      v[w][k] = x;
+      ss += x * x;
+    }
+    total += WaveSum(ss);
   }
-  for (std::uint32_t i = threadIdx.x; i < dim; i += kThreads) {
-    qh[i] = buf[i];
+  const float r = RmsScale(total, D, eps);
+#pragma unroll
+  for (int w = 0; w < kWaves; ++w) {
+#pragma unroll
+    for (int k = 0; k < K; ++k) {
+      const float x = v[w][k] * r;
+      v[w][k] = q_norm != nullptr ? x * q_norm[dim_of(w, k)] : x;
+    }
+  }
+  constexpr int kDw = (D / 2) % kThreads / kWave;
+  constexpr int kDk = (D / 2) / kThreads;
+#pragma unroll
+  for (int w = 0; w + kDw < kWaves; ++w) {
+#pragma unroll
+    for (int k = 0; k + kDk < K; ++k) {
+      const std::uint32_t d = dim_of(w, k);
+      if (d >= D / 2) {
+        continue;
+      }
+      const float theta = RopeAngle(pos, d, theta_scale, freq_factors);
+      const float c = __ocml_cos_f32(theta);
+      const float sn = __ocml_sin_f32(theta);
+      const float lo = v[w][k];
+      const float hi = v[w + kDw][k + kDk];
+      v[w][k] = lo * c - hi * sn;
+      v[w + kDw][k + kDk] = lo * sn + hi * c;
+    }
+  }
+#pragma unroll
+  for (int w = 0; w < kWaves; ++w) {
+#pragma unroll
+    for (int k = 0; k < K; ++k) {
+      const std::uint32_t d = dim_of(w, k);
+      if (rotated_pairs != 0 && d % (D / 2) >= rotated_pairs) {
+        v[w][k] *= key_weight[d];
+      }
+      qh[d] = v[w][k];
+    }
+  }
+}
+
+__global__ void __launch_bounds__(kThreads)
+    DraftConcatKernel(DraftConcatArgs a) {
+  const std::uint32_t r = blockIdx.x;
+  const std::uint32_t col = blockIdx.y * kThreads + threadIdx.x;
+  if (r < a.rows && col < a.dim) {
+    a.out[(2 * r) * a.dim + col] = a.embed[r * a.dim + col] * a.scale;
+    a.out[(2 * r + 1) * a.dim + col] = a.hidden[r][col];
   }
 }
 
@@ -1247,7 +1319,8 @@ constexpr std::uint32_t kMaxSplits = 262144 / SplitChunk(256) + 2;
 template<int D>
 __global__ void __launch_bounds__(kMergeThreads)
     AttentionMergeKernel(const float* partials, float* out, std::uint32_t heads,
-                         std::uint32_t splits) {
+                         std::uint32_t splits, WmmaPackOut pack,
+                         std::uint32_t pack_row0) {
   __shared__ float scale[kMaxSplits];
   __shared__ float wave_max[kMergeThreads / kWave];
   const std::uint32_t head = blockIdx.x;
@@ -1284,8 +1357,14 @@ __global__ void __launch_bounds__(kMergeThreads)
   for (std::uint32_t s = 0; s < splits; ++s) {
     acc = __builtin_fmaf(src[s * (D + 2)], scale[s], acc);
   }
-  out[(static_cast<std::size_t>(row) * heads + head) * D + d] =
-      l > 0.0F ? acc / l : 0.0F;
+  const float v = l > 0.0F ? acc / l : 0.0F;
+  out[(static_cast<std::size_t>(row) * heads + head) * D + d] = v;
+  if (pack.hi != nullptr) {
+    extern __shared__ float pack_stage[];
+    pack_stage[threadIdx.x] = v;
+    PackStaged(pack_stage, kMergeThreads / 32, pack_row0 + row,
+               (head * D + blockIdx.z * kMergeThreads) / 32, pack);
+  }
 }
 
 template<int D, int G>
@@ -1328,10 +1407,22 @@ void LaunchSplitAttention(const AttentionArgs& a, hipStream_t stream) {
         <<<dim3(1, a.kv_heads, chunk_blocks), kBlock, 0, stream>>>(
             a, first_split, splits);
   } else if constexpr (G == kWaves) {
-    // hd512: two waves per head, three rows each, keep a block's rows within
-    // the register file; seven or eight rows take four waves of two, so one
-    // block still streams each key once.
-    if (a.rows > 6) {
+    // hd512 keeps a block's rows within the register file, so one block
+    // still streams each key once: up to three rows take one wave per head
+    // (a second row group would only stage the tiles and wait at the
+    // barriers), and so do four once the launch has at least 128 blocks
+    // (fewer leave the four-row waves' latency exposed: the 26B's two KV
+    // heads at 4K and 16K ran +24% and +7%); otherwise up to six rows take
+    // two waves of three, seven or eight two waves of four.
+    if (a.rows <= 3) {
+      RowSplitAttentionKernel<D, G, 3, 1, CW>
+          <<<dim3(1, a.kv_heads, chunk_blocks), kThreads, 0, stream>>>(
+              a, first_split, splits);
+    } else if (a.rows == 4 && a.kv_heads * chunk_blocks >= 128) {
+      RowSplitAttentionKernel<D, G, 4, 1, CW>
+          <<<dim3(1, a.kv_heads, chunk_blocks), kThreads, 0, stream>>>(
+              a, first_split, splits);
+    } else if (a.rows > 6) {
       constexpr std::uint32_t kRows = 4 * 2;
       RowSplitAttentionKernel<D, G, 4, 2, CW>
           <<<dim3((a.rows + kRows - 1) / kRows, a.kv_heads, chunk_blocks),
@@ -1352,8 +1443,9 @@ void LaunchSplitAttention(const AttentionArgs& a, hipStream_t stream) {
            kBlock, 0, stream>>>(a, first_split, splits);
   }
   AttentionMergeKernel<D>
-      <<<dim3(a.heads, a.rows, D / kMergeThreads), kMergeThreads, 0, stream>>>(
-          a.partials, a.out, a.heads, splits);
+      <<<dim3(a.heads, a.rows, D / kMergeThreads), kMergeThreads,
+         a.pack.hi != nullptr ? kMergeThreads * sizeof(float) : 0, stream>>>(
+          a.partials, a.out, a.heads, splits, a.pack, a.pack_row0);
 }
 
 /// out = binary16(x), round to nearest (NarrowActivations' rounding).
@@ -1417,9 +1509,12 @@ __global__ void GeGluKernel(const float* gate, const float* up, float* out,
 }
 
 /// GeGlu over fused gate/up rows ([slots][2 * width]).
+/// With `pack`, each wave's 32 values (one block of a row, as width is a
+/// multiple of 32) also go into the WMMA activation pack.
 __global__ void GeGluPackedKernel(const float* gu, float* out,
                                   std::uint32_t width, std::size_t count,
-                                  __half* out_half) {
+                                  __half* out_half, WmmaPackOut pack) {
+  extern __shared__ float pack_stage[];
   const std::size_t i =
       static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (i < count) {
@@ -1432,6 +1527,22 @@ __global__ void GeGluPackedKernel(const float* gu, float* out,
     }
     if (out_half != nullptr) {
       out_half[i] = HalfOf(v);
+    }
+    if (pack.hi != nullptr) {
+      pack_stage[threadIdx.x] = v;
+    }
+  }
+  if (pack.hi != nullptr) {
+    // One thread per staged 32-value block (blocks never straddle rows).
+    __syncthreads();
+    const std::size_t g =
+        std::size_t{blockIdx.x} * blockDim.x + threadIdx.x * 32;
+    if (threadIdx.x < blockDim.x / 32 && g < count) {
+      PackWmmaBlock(pack_stage + threadIdx.x * 32,
+                    static_cast<std::uint32_t>(g / width),
+                    static_cast<std::uint32_t>(g % width / 32), width,
+                    static_cast<__half*>(pack.hi),
+                    static_cast<__half*>(pack.lo), pack.inv, pack.sums);
     }
   }
 }
@@ -1566,9 +1677,29 @@ void QueryPost(float* q, const float* q_norm, float theta_scale,
                std::uint32_t position, bool shared_position, float eps,
                const float* key_weight, std::uint32_t rotated_pairs,
                hipStream_t stream) {
-  QueryPostKernel<<<dim3(rows, heads), kThreads, 0, stream>>>(
-      q, q_norm, theta_scale, freq_factors, heads, head_dim, position,
-      shared_position, eps, key_weight, rotated_pairs);
+  const dim3 grid(rows, (heads + kWaves - 1) / kWaves);
+  switch (head_dim) {
+    case 256:
+      QueryPostWaveKernel<256><<<grid, kThreads, 0, stream>>>(
+          q, q_norm, theta_scale, freq_factors, heads, position,
+          shared_position, eps, key_weight, rotated_pairs);
+      return;
+    case 512:
+      QueryPostWaveKernel<512><<<grid, kThreads, 0, stream>>>(
+          q, q_norm, theta_scale, freq_factors, heads, position,
+          shared_position, eps, key_weight, rotated_pairs);
+      return;
+    default:
+      throw std::invalid_argument("QueryPost supports head_dim 256 and 512");
+  }
+}
+
+void DraftConcat(const DraftConcatArgs& args, hipStream_t stream) {
+  if (args.rows == 0 || args.dim == 0) {
+    return;
+  }
+  const dim3 grid(args.rows, (args.dim + kThreads - 1) / kThreads);
+  DraftConcatKernel<<<grid, kThreads, 0, stream>>>(args);
 }
 
 void Attention(const AttentionArgs& args, hipStream_t stream) {
@@ -1609,7 +1740,7 @@ void PostAttentionNorm(const float* o, const float* post_norm, float* x,
                        const float* next_norm, float* h, std::uint32_t rows,
                        std::uint32_t dim, float eps, hipStream_t stream,
                        void* q8, const float* second_norm, float* h2,
-                       void* h_half, void* h2_half) {
+                       void* h_half, void* h2_half, const WmmaPackOut& pack) {
   if (dim > kRowElements) {
     throw std::invalid_argument("PostAttentionNorm row is too wide");
   }
@@ -1617,34 +1748,42 @@ void PostAttentionNorm(const float* o, const float* post_norm, float* x,
   auto* hh2 = static_cast<__half*>(h2_half);
   if (q8 == nullptr && rows <= kSplitRows) {
     PostAttentionNormKernel<kWideNormThreads>
-        <<<rows, kWideNormThreads, 0, stream>>>(o, post_norm, x, next_norm, h,
-                                                dim, eps, q8, rows, second_norm,
-                                                h2, hh, hh2);
+        <<<rows, kWideNormThreads, pack.hi != nullptr ? dim * sizeof(float) : 0,
+           stream>>>(o, post_norm, x, next_norm, h, dim, eps, q8, rows,
+                     second_norm, h2, hh, hh2, pack);
     return;
+  }
+  if (pack.hi != nullptr) {
+    throw std::invalid_argument("PostAttentionNorm packs decode rows only");
   }
   PostAttentionNormKernel<kThreads>
       <<<q8 != nullptr ? Q8Rows(rows) : rows, kThreads, 0, stream>>>(
           o, post_norm, x, next_norm, h, dim, eps, q8, rows, second_norm, h2,
-          hh, hh2);
+          hh, hh2, pack);
 }
 
 void PostFeedForwardNorm(const float* f, const float* post_norm, float scale,
                          float* x, const float* next_norm, float* h,
                          std::uint32_t rows, std::uint32_t dim, float eps,
-                         hipStream_t stream, void* q8, void* h_half) {
+                         hipStream_t stream, void* q8, void* h_half,
+                         const WmmaPackOut& pack) {
   if (dim > kRowElements) {
     throw std::invalid_argument("PostFeedForwardNorm row is too wide");
   }
   auto* hh = static_cast<__half*>(h_half);
   if (q8 == nullptr && rows <= kSplitRows) {
     PostFeedForwardNormKernel<kWideNormThreads>
-        <<<rows, kWideNormThreads, 0, stream>>>(
-            f, post_norm, scale, x, next_norm, h, dim, eps, q8, rows, hh);
+        <<<rows, kWideNormThreads, pack.hi != nullptr ? dim * sizeof(float) : 0,
+           stream>>>(f, post_norm, scale, x, next_norm, h, dim, eps, q8, rows,
+                     hh, pack);
     return;
+  }
+  if (pack.hi != nullptr) {
+    throw std::invalid_argument("PostFeedForwardNorm packs decode rows only");
   }
   PostFeedForwardNormKernel<kThreads>
       <<<q8 != nullptr ? Q8Rows(rows) : rows, kThreads, 0, stream>>>(
-          f, post_norm, scale, x, next_norm, h, dim, eps, q8, rows, hh);
+          f, post_norm, scale, x, next_norm, h, dim, eps, q8, rows, hh, pack);
 }
 
 void GeGluQuantize(const float* gate, const float* up, void* q8,
@@ -1656,10 +1795,16 @@ void GeGluQuantize(const float* gate, const float* up, void* q8,
 }
 
 void GeGluPacked(const float* gu, float* out, std::uint32_t slots,
-                 std::uint32_t width, hipStream_t stream, void* out_half) {
+                 std::uint32_t width, hipStream_t stream, void* out_half,
+                 const WmmaPackOut& pack) {
+  if (pack.hi != nullptr && (out == nullptr || width % 32 != 0)) {
+    throw std::invalid_argument("GeGluPacked packs FP32 rows of 32k values");
+  }
   const std::size_t count = std::size_t{slots} * width;
-  GeGluPackedKernel<<<Blocks(count), kThreads, 0, stream>>>(
-      gu, out, width, count, static_cast<__half*>(out_half));
+  GeGluPackedKernel<<<Blocks(count), kThreads,
+                      pack.hi != nullptr ? kThreads * sizeof(float) : 0,
+                      stream>>>(gu, out, width, count,
+                                static_cast<__half*>(out_half), pack);
 }
 
 void GeGluPackedHalf(const void* gu, void* out, std::uint32_t slots,

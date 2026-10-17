@@ -84,8 +84,6 @@ tokenization::ChatTemplateOptions QwenChatOptions(const ChatRequest& request,
                                                   std::uint32_t max_context) {
   auto options = tokenization::ResolveQwenChatOptions(request.reasoning,
                                                       request.add_vision_id);
-  options.require_tool_call =
-      request.tool_choice == ChatRequest::ToolChoice::kRequired;
   // gufo #285: the rendered prompt may be as long as the context can hold.
   options.max_output_bytes =
       tokenization::RenderedPromptBoundBytes(max_context);
@@ -161,6 +159,39 @@ std::shared_ptr<const models::qwen::vision::Prompt> QwenPrompt(
   if (!image)
     throw std::invalid_argument("invalid Qwen prompt context");
   return image->prompt;
+}
+
+// Hash the sidecar and upload its weights while the model loads, before the
+// runner claims state capacity and the RAM cache is sized. Otherwise the first
+// image request hashes the whole sidecar in its queue time and uploads the
+// weights in its prefill, after admission and the cache were sized without
+// them. `Encoder` is the Qwen or Gemma 4 vision encoder.
+template<class Encoder>
+void PrepareVision(const std::shared_ptr<Encoder>& encoder,
+                   std::string_view model) {
+  if (!encoder)
+    return;
+  const auto started = Clock::now();
+  (void)encoder->identity();
+  const auto hashed = Clock::now();
+  try {
+    encoder->Upload();
+  } catch (const std::exception& e) {
+    throw std::runtime_error("could not upload the " + std::string(model) +
+                             " vision sidecar: " + e.what());
+  }
+  const auto uploaded = Clock::now();
+  std::size_t heap_free = 0, heap_total = 0;
+  (void)hipMemGetInfo(&heap_free, &heap_total);
+  using Milliseconds = std::chrono::duration<double, std::milli>;
+  Logger::Info("loader",
+               "event=vision_prepared resident_bytes=" +
+                   std::to_string(encoder->ResidentBytes()) + " identity_ms=" +
+                   std::to_string(Milliseconds(hashed - started).count()) +
+                   " upload_ms=" +
+                   std::to_string(Milliseconds(uploaded - hashed).count()) +
+                   " device_heap_free_bytes=" + std::to_string(heap_free) +
+                   " " + Logger::MemoryStatus());
 }
 
 constexpr std::string_view kDeepSeekStateAbi =
@@ -1868,8 +1899,6 @@ public:
     options.tools_present =
         !request.tools.empty() &&
         request.tool_choice != ChatRequest::ToolChoice::kNone;
-    options.require_tool_call =
-        request.tool_choice == ChatRequest::ToolChoice::kRequired;
     auto tokens =
         DeepSeekRunnerTokens(model_->EncodeChat(messages, tools, options));
     if (tokens.empty()) {
@@ -4322,6 +4351,7 @@ bool InferenceBackend::load(std::shared_ptr<const hip::QwenGpuModel> model,
       speculative_options.enable_adaptive_draft_length = false;
     }
 
+    PrepareVision(model->VisionEncoder(), "Qwen");
     auto new_state = std::make_shared<Impl::State>();
     new_state->sampling_defaults.model =
         sampling::TextPreset(model->GetConfig());
@@ -4496,6 +4526,7 @@ bool InferenceBackend::load(
     return false;
   }
   try {
+    PrepareVision(model->VisionEncoder(), "Qwen");
     auto new_state = std::make_shared<Impl::State>();
     new_state->sampling_defaults.model = sampling::TextModelPreset::kQwen38;
     new_state->sampling_defaults.supplied = {};
@@ -4573,6 +4604,7 @@ bool InferenceBackend::load(
     return false;
   }
   try {
+    PrepareVision(vision, "Gemma 4");
     auto new_state = std::make_shared<Impl::State>();
     new_state->sampling_defaults.model = sampling::TextModelPreset::kGemma4;
     new_state->sampling_defaults.supplied = {};

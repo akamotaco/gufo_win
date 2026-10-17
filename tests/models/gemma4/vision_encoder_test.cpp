@@ -1,6 +1,9 @@
 // HIP vision encoder against the scalar reference on a small synthetic
-// image. Reads the sidecar named by GUFO_GEMMA4_MMPROJ (31B or 26B-A4B);
-// skips (77) without.
+// image, after `gufo serve llm`'s load-time Upload: the weights upload once
+// and Encode reuses them. Reads the sidecar named by GUFO_GEMMA4_MMPROJ (31B
+// or 26B-A4B); skips (77) without.
+#include <hip/hip_runtime_api.h>
+
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -16,6 +19,18 @@
 
 namespace vision = gufo::models::gemma4::vision;
 using gemma4_test::Require;
+
+namespace {
+// On Strix Halo the device heap is system memory, so the free figure also
+// moves with unrelated host allocations; compare it within this slack.
+constexpr std::size_t kSlackBytes = std::size_t{64} << 20;
+
+std::size_t FreeDeviceBytes() {
+  std::size_t free = 0, total = 0;
+  Require(hipMemGetInfo(&free, &total) == hipSuccess, "hipMemGetInfo failed");
+  return free;
+}
+}  // namespace
 
 int main() {
   const char* path = std::getenv("GUFO_GEMMA4_MMPROJ");
@@ -43,6 +58,18 @@ int main() {
           expected.emplace(stage, std::vector<float>(data.begin(), data.end()));
         });
     vision::Encoder encoder(path, width);
+    Require(encoder.ResidentBytes() == 0, "opening the sidecar uploaded");
+    const std::size_t before = FreeDeviceBytes();
+    encoder.Upload();
+    const std::size_t prepared = FreeDeviceBytes();
+    const std::size_t resident = encoder.ResidentBytes();
+    Require(resident > 0 && before > prepared &&
+                before - prepared + kSlackBytes >= resident,
+            "Upload did not allocate the weights");
+    encoder.Upload();
+    Require(encoder.ResidentBytes() == resident &&
+                FreeDeviceBytes() + kSlackBytes >= prepared,
+            "a second Upload allocated the weights again");
     std::size_t seen = 0;
     const auto embedding = encoder.Encode(
         image, [&](std::string_view stage, std::span<const float> data) {
@@ -63,6 +90,9 @@ int main() {
           ++seen;
         });
     Require(seen == expected.size(), "encoder skipped stages");
+    Require(encoder.ResidentBytes() == resident &&
+                FreeDeviceBytes() + kSlackBytes >= prepared,
+            "Encode uploaded the weights again");
     Require(embedding->rows() == 6 && embedding->width() == width,
             "embedding shape");
   });

@@ -1,12 +1,12 @@
 // Width-invariant WMMA projections (wmma_gemv.hpp states the arithmetic).
 //
-// A block computes 128 weight rows (eight waves of 16) over a range of
-// super-blocks. The weight rows are the WMMA B operand: lane L holds row
-// L % 16 (both half-waves alike) and loads its own super-block straight
-// from memory one super-block ahead, so each lane applies its own row's scale
-// (and minimum). The activation tiles are the A operand, staged per super-block
-// in LDS from the pack; C lane L then holds row L % 16 for tile rows
-// 2 i + L / 16.
+// A block computes 32, 64 or 128 weight rows (two, four or eight waves of
+// 16; BlockWaves) over a range of super-blocks. The weight rows are the WMMA B
+// operand: lane L holds row L % 16 (both half-waves alike) and loads its own
+// super-block straight from memory one super-block ahead, so each lane applies
+// its own row's scale (and minimum). The activation tiles are the A operand,
+// staged per super-block in LDS from the pack; C lane L then holds row L % 16
+// for tile rows 2 i + L / 16.
 #include "src/models/gemma4/kernels/rocm/wmma_gemv.hpp"
 
 #include <hip/hip_fp16.h>
@@ -16,6 +16,8 @@
 #include <cstdint>
 #include <optional>
 #include <utility>
+
+#include "src/models/gemma4/kernels/rocm/wmma_pack.hpp"
 #ifndef ROTMUL
 #define ROTMUL 5
 #endif
@@ -62,9 +64,7 @@ Pack PackOf(void* scratch, std::uint32_t k) {
   return p;
 }
 
-/// One thread per (row, 32-value sub-block): the scale 2^e putting the
-/// sub-block's maximum in [2^13, 2^14), x 2^e as binary16 hi + lo, 2^-e, and
-/// the sequential FP32 sum of x.
+/// One thread per (row, 32-value sub-block).
 __global__ void PackKernel(const float* __restrict__ x, std::uint32_t rows,
                            std::uint32_t k, __half* __restrict__ hi,
                            __half* __restrict__ lo, float* __restrict__ inv,
@@ -76,52 +76,7 @@ __global__ void PackKernel(const float* __restrict__ x, std::uint32_t rows,
   }
   const std::uint32_t t = i / blocks;
   const std::uint32_t b = i % blocks;
-  const auto* src =
-      reinterpret_cast<const float4*>(x + std::size_t{t} * k + b * 32);
-  float v[32];
-#pragma unroll
-  for (int j = 0; j < 8; ++j) {
-    const float4 f = src[j];
-    v[4 * j] = f.x;
-    v[4 * j + 1] = f.y;
-    v[4 * j + 2] = f.z;
-    v[4 * j + 3] = f.w;
-  }
-  float peak = 0.0F;
-  float sum = 0.0F;
-#pragma unroll
-  for (int j = 0; j < 32; ++j) {
-    peak = fmaxf(peak, fabsf(v[j]));
-    sum += v[j];
-  }
-  int e = 0;
-  if (peak > 0.0F) {
-    int exponent = 0;
-    (void)frexpf(peak, &exponent);
-    e = 14 - exponent;
-  }
-  const float scale = ldexpf(1.0F, e);
-  __half h[32];
-  __half l[32];
-#pragma unroll
-  for (int j = 0; j < 32; ++j) {
-    const float s = v[j] * scale;
-    h[j] = __float2half_rn(s);
-    l[j] = __float2half_rn(s - __half2float(h[j]));
-  }
-  auto* dh = reinterpret_cast<uint4*>(hi + std::size_t{t} * k + b * 32);
-  auto* dl = reinterpret_cast<uint4*>(lo + std::size_t{t} * k + b * 32);
-#pragma unroll
-  for (int j = 0; j < 4; ++j) {
-    uint4 a;
-    uint4 c;
-    __builtin_memcpy(&a, &h[8 * j], 16);
-    __builtin_memcpy(&c, &l[8 * j], 16);
-    dh[j] = a;
-    dl[j] = c;
-  }
-  inv[b * kWmmaGemvRows + t] = ldexpf(1.0F, -e);
-  sums[b * kWmmaGemvRows + t] = sum;
+  PackWmmaBlock(x + std::size_t{t} * k + b * 32, t, b, k, hi, lo, inv, sums);
 }
 
 __device__ __forceinline__ std::uint32_t ByteOf(const uint4& h, int i) {
@@ -403,15 +358,22 @@ __device__ __forceinline__ v8f Wmma(v16h a, v16h b, v8f c) {
 
 /// Packed (rows <= 8): one tile whose rows 0-7 are the hi parts of rows
 /// 0-7 and rows 8-15 their lo parts; otherwise a hi tile and a lo tile.
-/// Grid: (row blocks, splits); each split covers `per_split` super-blocks
-/// and writes partials unless it is the only one.
-template<WmmaFormat F, bool kPacked>
-__global__ void __launch_bounds__(kThreads)
+/// Grid: (row blocks of 16 kWaves rows, splits); each split covers
+/// `per_split` super-blocks and writes partials unless it is the only one.
+template<WmmaFormat F, bool kPacked, int kWaves>
+__global__ void __launch_bounds__(32 * kWaves)
     GemvKernel(const std::uint8_t* __restrict__ w, Pack pack,
                float* __restrict__ y, std::uint32_t rows, std::uint32_t m,
                std::uint32_t k, std::uint32_t per_split) {
   using Format = Fmt<F>;
-  __shared__ __attribute__((aligned(16))) __half s_x[2][16 * kActStride];
+  constexpr int kBlockThreads = 32 * kWaves;
+  constexpr int kBlockRows = 16 * kWaves;
+  // uint4 chunks of one staged tile, and inverse scales plus sums, per
+  // thread.
+  constexpr int kChunks = 16 * kSuper / 8 / kBlockThreads;
+  constexpr int kSides = 2 * 8 * 16 / kBlockThreads;
+  constexpr int kTiles = kPacked ? 1 : 2;
+  __shared__ __attribute__((aligned(16))) __half s_x[kTiles][16 * kActStride];
   // [32-value block][half][i]: row 2 i + half.
   __shared__ __attribute__((aligned(16))) float s_inv[8][2][8];
   __shared__ __attribute__((aligned(16))) float s_sum[8][2][8];
@@ -421,7 +383,7 @@ __global__ void __launch_bounds__(kThreads)
   const int sub = lane & 15;
   const int half = lane >> 4;
   const std::size_t row_bytes = std::size_t{k} / kSuper * Format::kSuperBytes;
-  const std::uint32_t row = blockIdx.x * kRowsPerBlock + wave * 16 + sub;
+  const std::uint32_t row = blockIdx.x * kBlockRows + wave * 16 + sub;
   const bool live = row < m;
   const std::uint8_t* w_row = w + std::size_t{live ? row : m - 1} * row_bytes;
   const int sb0 = static_cast<int>(blockIdx.y * per_split);
@@ -431,11 +393,11 @@ __global__ void __launch_bounds__(kThreads)
   const auto super = [&](int sb) {
     return w_row + std::size_t{static_cast<unsigned>(sb)} * Format::kSuperBytes;
   };
-  // Activation chunk c = tid + 256 j: tile row c / 32, eight values at
-  // 8 (c % 32). Rows past the input repeat its last row (their outputs are
-  // never stored).
+  // Activation chunk c = tid + kBlockThreads j: tile row c / 32, eight
+  // values at 8 (c % 32). Rows past the input repeat its last row (their
+  // outputs are never stored).
   const auto act = [&](int j, int sb, bool lo_tile) {
-    const int c = tid + j * kThreads;
+    const int c = tid + j * kBlockThreads;
     const int r = c / 32;
     const int t = min(kPacked ? (r & 7) : r, last);
     const __half* base =
@@ -444,40 +406,45 @@ __global__ void __launch_bounds__(kThreads)
         base + std::size_t{static_cast<unsigned>(t)} * k + sb * kSuper +
         (c % 32) * 8);
   };
-  uint4 a00;
-  uint4 a01;
-  uint4 a10;
-  uint4 a11;
-  float side = 0.0F;
+  uint4 a_hi[kChunks];
+  uint4 a_lo[kChunks];
+  float side[kSides];
   const auto fetch_x = [&](int sb) {
-    a00 = act(0, sb, false);
-    a01 = act(1, sb, false);
-    if constexpr (!kPacked) {
-      a10 = act(0, sb, true);
-      a11 = act(1, sb, true);
+#pragma unroll
+    for (int j = 0; j < kChunks; ++j) {
+      a_hi[j] = act(j, sb, false);
+      if constexpr (!kPacked) {
+        a_lo[j] = act(j, sb, true);
+      }
     }
-    // Threads 0-127 take the inverse scales, 128-255 the sums.
-    const int s = (tid & 127) >> 4;
-    const int t = min(tid & 15, last);
-    const float* src = tid < 128 ? pack.inv : pack.sums;
-    side = src[(sb * 8 + s) * kWmmaGemvRows + t];
+    // Values 0-127 are the inverse scales, 128-255 the sums.
+#pragma unroll
+    for (int v = 0; v < kSides; ++v) {
+      const int i = tid + v * kBlockThreads;
+      const int s = (i & 127) >> 4;
+      const int t = min(i & 15, last);
+      const float* src = i < 128 ? pack.inv : pack.sums;
+      side[v] = src[(sb * 8 + s) * kWmmaGemvRows + t];
+    }
   };
   const auto commit_x = [&] {
-    const int c0 = tid;
-    const int c1 = tid + kThreads;
-    *reinterpret_cast<uint4*>(&s_x[0][(c0 / 32) * kActStride + (c0 % 32) * 8]) =
-        a00;
-    *reinterpret_cast<uint4*>(&s_x[0][(c1 / 32) * kActStride + (c1 % 32) * 8]) =
-        a01;
-    if constexpr (!kPacked) {
-      *reinterpret_cast<uint4*>(
-          &s_x[1][(c0 / 32) * kActStride + (c0 % 32) * 8]) = a10;
-      *reinterpret_cast<uint4*>(
-          &s_x[1][(c1 / 32) * kActStride + (c1 % 32) * 8]) = a11;
+#pragma unroll
+    for (int j = 0; j < kChunks; ++j) {
+      const int c = tid + j * kBlockThreads;
+      *reinterpret_cast<uint4*>(&s_x[0][(c / 32) * kActStride + (c % 32) * 8]) =
+          a_hi[j];
+      if constexpr (!kPacked) {
+        *reinterpret_cast<uint4*>(
+            &s_x[kTiles - 1][(c / 32) * kActStride + (c % 32) * 8]) = a_lo[j];
+      }
     }
-    const int s = (tid & 127) >> 4;
-    const int t = tid & 15;
-    (tid < 128 ? s_inv : s_sum)[s][t & 1][t >> 1] = side;
+#pragma unroll
+    for (int v = 0; v < kSides; ++v) {
+      const int i = tid + v * kBlockThreads;
+      const int s = (i & 127) >> 4;
+      const int t = i & 15;
+      (i < 128 ? s_inv : s_sum)[s][t & 1][t >> 1] = side[v];
+    }
   };
 
   constexpr int kOut = kPacked ? 4 : 8;
@@ -504,7 +471,8 @@ __global__ void __launch_bounds__(kThreads)
       hi_chain = Wmma(a, g.frag[f], hi_chain);
       if constexpr (!kPacked) {
         v16h l;
-        __builtin_memcpy(&l, &s_x[1][sub * kActStride + kOffset + 16 * f], 32);
+        __builtin_memcpy(
+            &l, &s_x[kTiles - 1][sub * kActStride + kOffset + 16 * f], 32);
         lo_chain = Wmma(l, g.frag[f], lo_chain);
       }
     }
@@ -553,13 +521,18 @@ __global__ void __launch_bounds__(kThreads)
     }(std::make_integer_sequence<int, Format::kGroups>{});
   };
 
-  // Blocks walk their super-blocks from a rotation of the block index so
+  // Blocks walk their super-blocks from a rotation of the 128-row group so
   // that rows a power-of-two-like stride apart do not hit the same memory
-  // channels together; each row's order stays fixed. The next super-block
-  // loads while this one computes.
+  // channels together; each row's order stays fixed whatever the block
+  // height. The next super-block loads while this one computes.
   const int span = sb1 - sb0;
-  const int rot = span > 0 ? static_cast<int>(blockIdx.x) % span : 0;
-  const auto at = [&](int i) { return sb0 + (i + rot) % span; };
+  const unsigned row_group = blockIdx.x * kBlockRows / kRowsPerBlock;
+  const int rot =
+      span > 0 ? static_cast<int>(row_group % static_cast<unsigned>(span)) : 0;
+  const auto at = [&](int i) {
+    const int idx = i + rot;
+    return sb0 + (idx >= span ? idx - span : idx);
+  };
   typename Format::Raw next{};
   if (span > 0) {
     next = Format::Load(super(at(0)));
@@ -616,6 +589,27 @@ std::uint32_t PerSplit(std::uint32_t m, std::uint32_t k) {
   return (supers + want - 1) / want;
 }
 
+/// Waves (16 rows each) per block. Every height computes each row the same
+/// way (the super-block rotation follows the 128-row group), so the choice
+/// is free per launch: 128 rows unless shorter blocks spread the work more
+/// evenly over the 20 WGPs. Cold weights, one/five/sixteen rows: 64 rows
+/// take 5376 x 16384 Q4_K 279/286/335 -> 248/253/295 us and 2816 x 8192
+/// 80/82/108 -> 67/70/89, but slow 4096 x 5376 (32 blocks either way)
+/// 65 -> 68; past 144 blocks 32-row blocks gain 1-3% on packed tiles (43008 x
+/// 5376 627 -> 607) and lose on the two-tile path, which keeps 64 rows.
+int BlockWaves(std::uint32_t m, std::uint32_t splits, std::uint32_t rows) {
+  constexpr std::uint32_t kWgps = 20;
+  const std::uint32_t blocks = (m + kRowsPerBlock - 1) / kRowsPerBlock * splits;
+  if (blocks >= 144) {
+    return rows <= 8 ? 2 : 4;
+  }
+  // Fraction of the busiest WGP's time the average WGP works.
+  const auto balance = [](std::uint32_t b) {
+    return static_cast<double>(b) / (kWgps * ((b + kWgps - 1) / kWgps));
+  };
+  return balance(2 * blocks) >= balance(blocks) + 0.05 ? 4 : 8;
+}
+
 }  // namespace
 
 namespace {
@@ -642,6 +636,11 @@ bool WmmaGemvSupports(core::GgmlType type, std::uint32_t m,
   return FormatOf(type).has_value() && m > 0 && k > 0 && k % kSuper == 0;
 }
 
+WmmaPackOut WmmaPackOf(void* scratch, std::uint32_t k) noexcept {
+  const Pack p = PackOf(scratch, k);
+  return {.hi = p.hi, .lo = p.lo, .inv = p.inv, .sums = p.sums, .k = k};
+}
+
 std::size_t WmmaGemvScratchBytes(std::uint32_t max_k) noexcept {
   const std::size_t halves = std::size_t{kWmmaGemvRows} * max_k;
   const std::size_t blocks = std::size_t{kWmmaGemvRows} * (max_k / 32);
@@ -652,25 +651,35 @@ std::size_t WmmaGemvScratchBytes(std::uint32_t max_k) noexcept {
 
 bool LaunchWmmaGemv(core::GgmlType type, const void* w, const float* x,
                     float* y, std::uint32_t rows, std::uint32_t m,
-                    std::uint32_t k, void* scratch, hipStream_t stream) {
+                    std::uint32_t k, void* scratch, hipStream_t stream,
+                    bool packed) {
   if (!WmmaGemvSupports(type, m, k) || rows == 0 || rows > kWmmaGemvRows) {
     return false;
   }
   const Pack pack = PackOf(scratch, k);
-  const std::uint32_t items = rows * (k / 32);
-  PackKernel<<<(items + kThreads - 1) / kThreads, kThreads, 0, stream>>>(
-      x, rows, k, pack.hi, pack.lo, pack.inv, pack.sums);
+  if (!packed) {
+    const std::uint32_t items = rows * (k / 32);
+    PackKernel<<<(items + kThreads - 1) / kThreads, kThreads, 0, stream>>>(
+        x, rows, k, pack.hi, pack.lo, pack.inv, pack.sums);
+  }
   const std::uint32_t per_split = PerSplit(m, k);
   const std::uint32_t splits = (k / kSuper + per_split - 1) / per_split;
-  const dim3 grid((m + kRowsPerBlock - 1) / kRowsPerBlock, splits);
+  const int waves = BlockWaves(m, splits, rows);
+  const std::uint32_t block_rows = 16 * static_cast<std::uint32_t>(waves);
+  const dim3 grid((m + block_rows - 1) / block_rows, splits);
   const auto* wb = static_cast<const std::uint8_t*>(w);
   const auto launch = [&]<WmmaFormat F>() {
+    const auto go = [&]<bool kPacked, int kWaves>() {
+      GemvKernel<F, kPacked, kWaves><<<grid, 32 * kWaves, 0, stream>>>(
+          wb, pack, y, rows, m, k, per_split);
+    };
     if (rows <= 8) {
-      GemvKernel<F, true>
-          <<<grid, kThreads, 0, stream>>>(wb, pack, y, rows, m, k, per_split);
+      waves == 2   ? go.template operator()<true, 2>()
+      : waves == 4 ? go.template operator()<true, 4>()
+                   : go.template operator()<true, 8>();
     } else {
-      GemvKernel<F, false>
-          <<<grid, kThreads, 0, stream>>>(wb, pack, y, rows, m, k, per_split);
+      waves == 4 ? go.template operator()<false, 4>()
+                 : go.template operator()<false, 8>();
     }
   };
   switch (*FormatOf(type)) {

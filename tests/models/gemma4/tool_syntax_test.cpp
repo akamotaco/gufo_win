@@ -218,6 +218,14 @@ void CheckGrammar() {
     Require(!Accepts(*required, invalid), "rejected: " + invalid);
   }
   Require(!Accepts(*required, call + call), "one call without parallel calls");
+  // A required call admits llama.cpp's bounded space before its marker,
+  // never a stream of whitespace in place of the call.
+  Require(Accepts(*required, "\n" + call) &&
+              Accepts(*required, "\n\n" + std::string(20, ' ') + call),
+          "bounded space before a required call");
+  Require(!Accepts(*required, std::string(21, '\n') + call) &&
+              !Accepts(*required, std::string(100, ' ') + call),
+          "unbounded whitespace before a required call");
   const auto automatic = JsonConstraint::WithTools(
       nullptr, {{"edit", parameters}}, false, true, Format::kGemma4);
   Require(Accepts(*automatic, "Let me fix it. " + call + call) &&
@@ -273,6 +281,42 @@ void CheckGrammar() {
     rejected = true;
   }
   Require(rejected, "a function name with a brace has no Gemma 4 call");
+
+  // An array without `items` holds any values in best effort; it must not
+  // open the whole call, so its siblings' const, required keys and closed
+  // object still hold (functional tool-streaming's record tool).
+  const auto untyped = gufo::json::parse(R"({"type":"object",
+    "properties":{"text":{"type":"string","const":"a\\, b"},
+      "values":{"type":"array"}},
+    "required":["text","values"],"additionalProperties":false})");
+  const auto record = JsonConstraint::WithTools(
+      nullptr,
+      {{"record",
+        JsonConstraint::ToolParameters(untyped, false, Format::kGemma4)}},
+      true, false, Format::kGemma4);
+  const auto record_call = [](const std::string& arguments) {
+    return std::string(g4::kToolCallStart) + "call:record{" + arguments + "}" +
+           std::string(g4::kToolCallEnd);
+  };
+  Require(
+      Accepts(*record, record_call("text:<|\"|>a\\, b<|\"|>,values:[true,null,"
+                                   "{key:<|\"|>value<|\"|>},1]")),
+      "untyped array holds any values");
+  for (const std::string invalid : {
+           "text:<|\"|>a\\ b<|\"|>,values:[]",
+           "values:[]",
+           "text:<|\"|>a\\, b<|\"|>,values:[],other:1",
+       }) {
+    Require(!Accepts(*record, record_call(invalid)),
+            "untyped array keeps its siblings' schema: " + invalid);
+  }
+  rejected = false;
+  try {
+    (void)JsonConstraint::ToolParameters(untyped, true, Format::kGemma4);
+  } catch (const std::invalid_argument&) {
+    rejected = true;
+  }
+  Require(rejected, "strict arrays still need an items schema");
 }
 
 }  // namespace

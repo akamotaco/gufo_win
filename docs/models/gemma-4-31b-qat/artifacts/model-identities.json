@@ -30,5 +30,15 @@
     },
     "reference": "llama.cpp columns unchanged (pinned b11069, ROCm gfx1151; dates in BENCHMARKS.md)",
     "measurement": "One warmed sample per point (sampled MTP: three seeds), greedy, thinking off; MTP drafts up to 15 (Gufo, calibrated policy) and four (llama.cpp). Loading drops the page cache with sync; echo 3 > /proc/sys/vm/drop_caches before each launch."
+  },
+  "benchmarks-2026-10-17": {
+    "gufo": {
+      "revision": "a9ff98e",
+      "build": "nix build",
+      "binarySha256Prefix": "d92d910545862f6b",
+      "tables": "reduced grid: single-user depths 0, 4096, 16384 and 32768, sampled MTP at d0, one and two users, memory and loading; other Gufo cells TODO"
+    },
+    "reference": "llama.cpp columns unchanged (pinned b11069, ROCm gfx1151; dates in BENCHMARKS.md)",
+    "measurement": "One warmed sample per point (sampled MTP: five seeds), greedy, thinking off; MTP drafts up to 15 (Gufo, calibrated policy) and four (llama.cpp). Loading drops the page cache with sync; echo 3 > /proc/sys/vm/drop_caches before each launch. Loading and memory with no mmproj-BF16.gguf beside the target; memory on a server that received no tokenizer-calibration probe."
   }
 }

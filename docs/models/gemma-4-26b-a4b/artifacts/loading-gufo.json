@@ -13,16 +13,16 @@
       "gpuDriver": "amdgpu",
       "gpuName": "AMD Radeon 8060S Graphics",
       "gpuPciId": "1002:1586",
-      "kernelRelease": "7.2.7-200.fc44.x86_64",
-      "memoryTotalBytes": 133616881664,
+      "kernelRelease": "7.2.10-200.fc44.x86_64",
+      "memoryTotalBytes": 133616861184,
       "memoryType": "LPDDR5X (Unified)",
       "rocmVersion": "7.2.3",
       "schemaVersion": "1.0.0"
     },
-    "fingerprintId": "c86da8c5c4d44fad94450e1ce48b284978d59b3e7c30d7abb1c6fffdf7c5348a",
+    "fingerprintId": "ddcd4cc998ad586a80ec09986c3b9e684e9f4eb99c6f69395e220c31cc040a4e",
     "schemaVersion": "1.0.0"
   },
-  "measuredOn": "2026-10-07",
+  "measuredOn": "2026-10-17",
   "mode": "mtp",
   "model": {
     "id": "Gemma-4-26B-A4B-It",
@@ -35,20 +35,20 @@
   "referenceName": "llama.cpp",
   "rows": {
     "q4": {
-      "command": "gufo serve --port 55393 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-26B-A4B-it.gguf",
-      "ready_s": 3.799,
+      "command": "gufo serve --port 57129 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q4_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-26B-A4B-it.gguf",
+      "ready_s": 4.028,
       "ready_s_sd": null,
       "samples": 1
     },
     "q6": {
-      "command": "gufo serve --port 59263 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-26B-A4B-it.gguf",
-      "ready_s": 4.913,
+      "command": "gufo serve --port 50235 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q6_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-26B-A4B-it.gguf",
+      "ready_s": 4.921,
       "ready_s_sd": null,
       "samples": 1
     },
     "q8": {
-      "command": "gufo serve --port 46595 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-26B-A4B-it.gguf",
-      "ready_s": 5.673,
+      "command": "gufo serve --port 53343 --sessions 1 llm --model gemma-4-26B-A4B-it-UD-Q8_K_XL.gguf --context 262144 --served-model-name bench --think off --max-pending-per-client 8 --speculative mtp --mtp-model mtp-gemma-4-26B-A4B-it.gguf",
+      "ready_s": 5.693,
       "ready_s_sd": null,
       "samples": 1
     }
@@ -59,7 +59,7 @@
       "gufo",
       "serve",
       "--port",
-      "46595",
+      "53343",
       "--sessions",
       "1",
       "llm",
@@ -81,8 +81,8 @@
   },
   "source": {
     "buildMode": "nix-release",
-    "dirty": false,
-    "revision": "2a24b0c7e9bf7729677e51cb14c1cd52cb232383"
+    "dirty": true,
+    "revision": "a9ff98e66b5fd1f027ab6e6949d04746a0860300"
   },
   "table": "loading",
   "target": "gufo"

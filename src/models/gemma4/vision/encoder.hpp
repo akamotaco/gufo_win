@@ -53,9 +53,12 @@ public:
   /// SHA-256 of the whole sidecar, computed once.
   [[nodiscard]] const std::string& identity() const;
   [[nodiscard]] std::size_t ResidentBytes() const noexcept;
-  /// `image` is already resized (sides multiples of 48). Weights upload on
-  /// the first call; scratch is sized by the image. Calls are serialized by
-  /// the owner.
+  /// Upload the weights now instead of in the first Encode. Repeated calls
+  /// keep the existing upload.
+  void Upload();
+  /// `image` is already resized (sides multiples of 48). Uploads the weights
+  /// if Upload has not; scratch is sized by the image. Calls are serialized
+  /// by the owner.
   [[nodiscard]] std::shared_ptr<const Embedding> Encode(
       const core::Image& image, const Observer& observer = {},
       const CancellationCheck& is_cancelled = {});

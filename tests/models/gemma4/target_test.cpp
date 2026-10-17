@@ -747,9 +747,12 @@ int main() {
     g4::Session::SpeculativeStats shared_stats;
     for (int i = 0; i < 3; ++i) {
       chat.seed = 7 + i;
+      g4::Session::SpeculativeStats seed_stats;
       Require(
-          Generate(*shared, prompt, 96, true, chat, &shared_stats).size() == 96,
+          Generate(*shared, prompt, 96, true, chat, &seed_stats).size() == 96,
           "shared sampled MTP stopped early");
+      shared_stats.siblings += seed_stats.siblings;
+      shared_stats.siblings_accepted += seed_stats.siblings_accepted;
     }
     std::cout << "sampled siblings: verified " << shared_stats.siblings
               << ", accepted " << shared_stats.siblings_accepted << '\n';

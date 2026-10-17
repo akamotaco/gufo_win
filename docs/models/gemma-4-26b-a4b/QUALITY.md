@@ -121,33 +121,32 @@ near Genoa." --half-kv --tokens-out T.i32 --logits-out R.g4lg`, then
 
 ## Benchmark method
 
-Gufo October 7, 2026 (revision 2a24b0c, `nix build`, binary SHA-256 prefix
-d1eb64e09180774b, every table), llama.cpp September 28; one warmed sample per point (sampled MTP: three seeds),
+Gufo October 17, 2026 (revision a9ff98e, `nix build`, binary SHA-256 prefix
+d92d910545862f6b, every table), llama.cpp September 28 (not re-measured); one warmed sample per point (sampled MTP: five seeds),
 greedy, thinking off, the same driver workloads, server flags and table grid
 as the [31B](../gemma-4-31b/QUALITY.md#benchmark-method), per quant. Gufo
 drafts up to 15 tokens under the calibrated policy (the default), llama.cpp up
 to four. Loading drops the
 page cache (`sync; echo 3 > /proc/sys/vm/drop_caches`) before each launch.
+Loading and memory follow the 31B's projector-free and calibration-free setup.
 Every Gufo multi-user MTP completion (C1–C8, both workloads, every quant)
-matches its MTP C1 hash, and every multi-user AR completion matches its AR C1
-hash except UD-Q6_K_XL C2–C6 (1 of 2, 3 of 4, 3 of 6; C8 matches). Without the drafter one
+matches the isolated AR C1 hash (regenerated October 17), and every multi-user
+AR completion matches its AR C1 hash except one request each at UD-Q6_K_XL
+C4–C8 (3 of 4, 5 of 6, 7 of 8; C2 matches; October 7: 1 of 2, 3 of 4, 3 of 6). Without the drafter one
 session decodes with the faster AR GEMV and a batch with the small-batch or
 WMMA kernels, which round differently; this prompt sits on a greedy near-tie
 (neighbouring prompt lengths match at C1 and C2, and every batch width agrees
 with the others). `"ar_exactness": "reported"` in bench.json records the
 count instead of failing the table. Commands, counts and server flags are
 recorded per row in the artifacts.
-Against the October 5 build (same prompts and completions), repetitive MTP tg
-reads 0.5–3.5% lower at depth although GPU kernel time per decode cycle is
-unchanged (CLI profile). In the server the power manager now holds a higher
-shader clock and a lower memory-fabric clock during decode (26B at 32K:
-2,680 against 2,390 MHz; FCLK 1,640 against 1,700 MHz, at 139 against
-128 W), and decode is bandwidth-bound. Requests still finish about 230 ms
-sooner end to end (first token 150 ms earlier, no snapshot pause after it).
+Against the October 7 build: prefill +12–18% from 16K (UD-Q4_K_XL AR, d0
+within 1.5%), AR decode within 0.6%, MTP decode +3–13% from 8K, memory
++0.07 GiB. Shallow mixed MTP cells move with acceptance: the greedy text
+changed, so 4K drafts 1.37 tokens per step against 1.61.
 
-UD-Q8_K_XL tables: Gufo October 7 (same build), llama.cpp September 30, 2026, a reduced grid
+UD-Q8_K_XL tables: Gufo October 17 (same build), llama.cpp September 30, 2026, a reduced grid
 under the same driver, workloads and server flags: single-user depths 0, 4096,
-16384 and 32768, sampled MTP at depth 0 (three seeds), one and two users,
+16384 and 32768, sampled MTP at depth 0 (five seeds), one and two users,
 memory and loading. Gufo drafts under its calibrated policy. Every Gufo
 multi-user completion matches its C1 hash (AR against AR C1, MTP against MTP
 C1); the AR C1 hashes llama.cpp's MTP rows are compared with were qualified

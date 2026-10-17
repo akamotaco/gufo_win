@@ -6,6 +6,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "src/models/gemma4/kernels/rocm/wmma_gemv.hpp"
+
 namespace gufo::models::gemma4::rocm {
 
 /// x[r] *= scale; h[r] = rms(x[r]) * weight. Used for the scaled token
@@ -55,6 +57,7 @@ struct QkvPostArgs {
   /// Floats between consecutive rows of q, k and v when they are slices of
   /// one fused projection's rows; 0 means packed rows of their own widths.
   std::uint32_t row_stride;
+  std::uint32_t v_stride;
   /// Packed destination of the processed Q ([rows][heads * head_dim]); null
   /// rewrites q in place.
   float* q_out;
@@ -64,14 +67,27 @@ struct QkvPostArgs {
 void QkvPost(const QkvPostArgs& args, hipStream_t stream);
 
 /// Query-only post-processing (MTP draft layers): Q = rope(rms(q) * q_norm)
-/// at one shared position for every row; with `rotated_pairs` > 0 the
-/// unrotated dims are multiplied by `key_weight` as QkvPost does.
+/// at `position` (or `position + row` when `!shared_position`); with
+/// `rotated_pairs` > 0 the unrotated dims are multiplied by `key_weight` as
+/// QkvPost does.
 void QueryPost(float* q, const float* q_norm, float theta_scale,
                const float* freq_factors, std::uint32_t rows,
                std::uint32_t heads, std::uint32_t head_dim,
                std::uint32_t position, bool shared_position, float eps,
                const float* key_weight, std::uint32_t rotated_pairs,
                hipStream_t stream);
+
+/// Fused MTP drafter input staging: for each row r < rows,
+/// out[2 r] = embed[r] * scale and out[2 r + 1] = hidden[r] (width `dim`).
+struct DraftConcatArgs {
+  const float* embed;
+  const float* hidden[8];
+  float* out;
+  float scale;
+  std::uint32_t rows;
+  std::uint32_t dim;
+};
+void DraftConcat(const DraftConcatArgs& args, hipStream_t stream);
 
 /// Scale-1 attention of FP32 queries over binary16 K/V caches.
 /// Row r queries position `first_position + r` (or `first_position` for all
@@ -123,6 +139,10 @@ struct AttentionArgs {
   void* out_half;
   std::uint32_t siblings;
   std::uint32_t spare_key;
+  /// Decode widths: the output rows also fill this WMMA activation pack
+  /// (width heads * head_dim) as its rows pack_row0 + r.
+  WmmaPackOut pack;
+  std::uint32_t pack_row0;
 };
 inline constexpr std::uint32_t kSplitRows = 16;
 /// Derived keys: rope_pairs must be a multiple of 16 and at most this.
@@ -141,23 +161,25 @@ void Attention(const AttentionArgs& args, hipStream_t stream);
 /// h2[r] = rms(x[r]) * second_norm (the expert input of a MoE layer).
 /// `h_half` / `h2_half` receive binary16 copies of h / h2 (round to
 /// nearest, as NarrowActivations) for the binary16 prefill GEMMs; a null
-/// h / h2 then skips the FP32 row.
+/// h / h2 then skips the FP32 row. With `pack` (decode widths), the h rows
+/// also fill that WMMA activation pack, sparing the projection a PackKernel.
 void PostAttentionNorm(const float* o, const float* post_norm, float* x,
                        const float* next_norm, float* h, std::uint32_t rows,
                        std::uint32_t dim, float eps, hipStream_t stream,
                        void* q8 = nullptr, const float* second_norm = nullptr,
                        float* h2 = nullptr, void* h_half = nullptr,
-                       void* h2_half = nullptr);
+                       void* h2_half = nullptr, const WmmaPackOut& pack = {});
 
 /// x[r] = (x[r] + rms(f[r]) * post_norm) * scale;
 /// h[r] = rms(x[r]) * next_norm (next_norm null skips h); with `q8`, h is
 /// written as the Q8_1 prefill activation instead, and `h_half` receives a
 /// binary16 copy (a null h then skips the FP32 row; see PostAttentionNorm).
+/// `pack` as in PostAttentionNorm.
 void PostFeedForwardNorm(const float* f, const float* post_norm, float scale,
                          float* x, const float* next_norm, float* h,
                          std::uint32_t rows, std::uint32_t dim, float eps,
                          hipStream_t stream, void* q8 = nullptr,
-                         void* h_half = nullptr);
+                         void* h_half = nullptr, const WmmaPackOut& pack = {});
 
 /// out = gelu_tanh(gate) * up, elementwise over `count` values.
 void GeGlu(const float* gate, const float* up, float* out, std::size_t count,
@@ -171,10 +193,11 @@ void GeGluQuantize(const float* gate, const float* up, void* q8,
 /// out[s][i] = gelu_tanh(gu[s][i]) * gu[s][width + i] over [slots][2 * width]
 /// fused gate/up rows, rounding like GeGlu; `out_half` receives a binary16
 /// copy (round to nearest, as NarrowActivations), and a null `out` then
-/// skips the FP32 rows.
+/// skips the FP32 rows. With `pack`, the FP32 rows also fill that WMMA
+/// activation pack (width a multiple of 32).
 void GeGluPacked(const float* gu, float* out, std::uint32_t slots,
                  std::uint32_t width, hipStream_t stream,
-                 void* out_half = nullptr);
+                 void* out_half = nullptr, const WmmaPackOut& pack = {});
 /// GeGluPacked over binary16 rows (the prefill expert route); results
 /// saturate at the binary16 range.
 void GeGluPackedHalf(const void* gu, void* out, std::uint32_t slots,

@@ -38,8 +38,8 @@ struct Layout {
       moe_weights, moe_groups, moe_gu, moe_act, moe_out, moe_counts, moe_bounds,
       moe_cursors, moe_rows_token, moe_rows_slot, moe_tiles;
   std::size_t draft_tokens, draft_embed, draft_concat, draft_x, draft_h,
-      draft_q, draft_attn, draft_o, draft_gate, draft_up, draft_logits,
-      draft_next, draft_candidates, draft_candidate_scratch;
+      draft_q, draft_attn, draft_o, draft_gate, draft_up, draft_act,
+      draft_logits, draft_next, draft_candidates, draft_candidate_scratch;
   std::size_t total;
 };
 
@@ -66,7 +66,7 @@ constexpr std::uint32_t kRoutedDownRows = 64;
 /// The Gemma K-quant gate/up GEMM skips a tile's empty 16-row parts, so
 /// wide tiles cost no padding work: Q6_K 96 rows 4.3 ms per 2048-row layer,
 /// 48 rows 6.3, 128 rows 4.7 (one block per WGP).
-constexpr std::uint32_t kRoutedKQuantTileRows = 96;
+constexpr std::uint32_t kRoutedKQuantTileRows = kRoutedHalfTileRows;
 
 /// Whether layer l's experts take the binary16 prefill route (the formats
 /// PrefillExperts covers).
@@ -161,8 +161,9 @@ Layout Plan(const Config& c, const Config* draft, std::uint32_t vocab,
     l.draft_q = take(n * MaxQDim(*draft) * f);
     l.draft_attn = take(n * MaxQDim(*draft) * f);
     l.draft_o = take(n * draft->hidden_size * f);
-    l.draft_gate = take(n * draft->ffn_size * f);
-    l.draft_up = take(n * draft->ffn_size * f);
+    l.draft_gate = take(n * 2 * draft->ffn_size * f);
+    l.draft_up = l.draft_gate + n * draft->ffn_size * f;
+    l.draft_act = take(n * draft->ffn_size * f);
     l.draft_logits = take(n * vocab * f);
     l.draft_next = take(n * draft->target_hidden_size * f);
     // Top-64 proposal candidates for sampled drafting: ids, then scores.
@@ -202,6 +203,7 @@ std::size_t Executor::ScratchBytes(const Config& config, const Config* draft,
 std::size_t Executor::CacheBytes(const Config& c, std::uint32_t max_context,
                                  std::uint32_t ring,
                                  const std::vector<std::uint32_t>& key_widths,
+                                 std::uint32_t vocab,
                                  std::size_t draft_table_bytes) {
   std::size_t bytes = 0;
   for (std::uint32_t l = 0; l < c.num_layers; ++l) {
@@ -211,6 +213,7 @@ std::size_t Executor::CacheBytes(const Config& c, std::uint32_t max_context,
              AlignUp(slots * c.KvDim(l) * sizeof(std::uint16_t));
   }
   return bytes + 2 * AlignUp(std::size_t{c.hidden_size} * sizeof(float)) +
+         AlignUp(std::size_t{vocab} * sizeof(float)) +
          AlignUp(draft_table_bytes);
 }
 
@@ -319,6 +322,7 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
     draft_o_ = reinterpret_cast<float*>(base + l.draft_o);
     draft_gate_ = reinterpret_cast<float*>(base + l.draft_gate);
     draft_up_ = reinterpret_cast<float*>(base + l.draft_up);
+    draft_act_ = reinterpret_cast<float*>(base + l.draft_act);
     draft_logits_ = reinterpret_cast<float*>(base + l.draft_logits);
     draft_next_ = reinterpret_cast<float*>(base + l.draft_next);
     draft_candidates_ =
@@ -329,9 +333,22 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
         &draft_candidates_host_,
         kMaxDraftSessions * sizeof(qwen38_flash_next::MtpCandidateLogits)));
   }
+  HIP_CHECK(hipHostMalloc(&argmax_host_, kSplitRows * sizeof(std::uint32_t)));
+  logits_host_.resize(std::size_t{max_logit_rows} * model.vocab_size());
+  if (!logits_host_.empty()) {
+    HIP_CHECK(hipHostRegister(logits_host_.data(),
+                              logits_host_.size() * sizeof(float),
+                              hipHostRegisterDefault));
+  }
 }
 
 Executor::~Executor() {
+  if (!logits_host_.empty()) {
+    hip::LogCleanupError(hipHostUnregister(logits_host_.data()));
+  }
+  if (argmax_host_ != nullptr) {
+    hip::LogCleanupError(hipHostFree(argmax_host_));
+  }
   if (copy_runs_ != nullptr) {
     hip::LogCleanupError(hipFree(copy_runs_));
   }
@@ -370,8 +387,8 @@ std::unique_ptr<KvCache> Executor::CreateCache(std::uint32_t max_context,
   auto cache = std::make_unique<KvCache>();
   cache->max_context = max_context;
   cache->ring = ring_;
-  cache->bytes =
-      CacheBytes(c, max_context, ring_, key_widths_, draft_table_bytes());
+  cache->bytes = CacheBytes(c, max_context, ring_, key_widths_,
+                            model_.vocab_size(), draft_table_bytes());
   if (hip::AllocateDevice(&cache->allocation, cache->bytes) != hipSuccess) {
     if (error_msg != nullptr) {
       *error_msg = "KV cache allocation failed (" +
@@ -391,12 +408,15 @@ std::unique_ptr<KvCache> Executor::CreateCache(std::uint32_t max_context,
     cache->v.push_back(reinterpret_cast<std::uint16_t*>(at));
     at += bytes;
   }
+  const std::size_t hidden_bytes =
+      AlignUp(std::size_t{c.hidden_size} * sizeof(float));
   cache->hidden = reinterpret_cast<float*>(at);
-  cache->ahead_hidden = reinterpret_cast<float*>(
-      at + AlignUp(std::size_t{c.hidden_size} * sizeof(float)));
+  cache->ahead_hidden = reinterpret_cast<float*>(at + hidden_bytes);
+  at += 2 * hidden_bytes;
+  cache->logits = reinterpret_cast<float*>(at);
+  at += AlignUp(std::size_t{model_.vocab_size()} * sizeof(float));
   if (draft_table_bytes() != 0) {
-    cache->draft_table =
-        at + 2 * AlignUp(std::size_t{c.hidden_size} * sizeof(float));
+    cache->draft_table = at;
   }
   return cache;
 }
@@ -486,8 +506,19 @@ std::optional<ExpertFormat> DenseGemvFormat(core::GgmlType type,
 
 }  // namespace
 
+bool Executor::WmmaProjection(const DeviceTensor& w, std::uint32_t rows) const {
+  return w.type != core::GgmlType::kF16 && rows >= 1 && rows <= kSplitRows &&
+         rows <= kWmmaGemvRows && !DenseGemvFormat(w.type, w.cols) &&
+         w.cols >= 2048 && (model_.has_draft() || rows >= 6) &&
+         WmmaGemvSupports(w.type, w.rows, w.cols);
+}
+
+WmmaPackOut Executor::PackFor(const DeviceTensor& w, std::uint32_t rows) const {
+  return WmmaProjection(w, rows) ? WmmaPackOf(wmma_, w.cols) : WmmaPackOut{};
+}
+
 void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
-                       std::uint32_t rows, float* y) {
+                       std::uint32_t rows, float* y, bool packed) {
   if (w.type == core::GgmlType::kF16) {
     ProjectHalf(w, x, xq, rows, y);
     return;
@@ -525,9 +556,9 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
   // Target projections take the WMMA kernel at every width when the drafter
   // is loaded (verification rows round like single tokens), and batched
   // autoregressive rows from six on, where it is faster.
-  if (w.cols >= 2048 && (model_.has_draft() || rows >= 6) &&
-      LaunchWmmaGemv(w.type, w.data, x, y, rows, w.rows, w.cols, wmma_,
-                     stream_)) {
+  if (WmmaProjection(w, rows) &&
+      LaunchWmmaGemv(w.type, w.data, x, y, rows, w.rows, w.cols, wmma_, stream_,
+                     packed)) {
     return;
   }
   if (rows > 1) {
@@ -587,6 +618,23 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
     return;
   }
   hip::LaunchGEMV(w.data, w.type, x, y, w.rows, w.cols, stream_);
+}
+
+void Executor::ProjectDraft(const DeviceTensor& w, const float* x,
+                            std::uint32_t rows, float* y) {
+  // Drafter projections have no decode twin to match (as the head): a lone
+  // chain reads the shapes the WMMA kernel would take with the Gemma GEMV,
+  // which spreads the drafter's 1024 outputs over every WGP. Cold weights,
+  // Q4_0: 1024 x 10752 33.7 us (shared small-batch 40.3), 1024 x 8192 27.1
+  // (35.2).
+  if (rows == 1 && w.cols >= 2048 && WmmaGemvSupports(w.type, w.rows, w.cols)) {
+    if (const auto format = GemvFormatOf(w.type);
+        format &&
+        LaunchKQuantGemv(*format, w.data, x, y, w.rows, w.cols, stream_)) {
+      return;
+    }
+  }
+  Project(w, x, nullptr, rows, y);
 }
 
 static_assert(
@@ -721,6 +769,8 @@ void Executor::Forward(std::span<const Segment> segments,
                 "writes past the grouped width");
   // Whether the previous layer's mixture wrote this layer's binary16 input.
   bool half_ready = false;
+  // Whether h_ (the current layer's input) already holds its WMMA pack.
+  bool h_packed = false;
   // A binary16 input whose every consumer is a Q8_0 or binary16 projection
   // (the binary16 GEMMs) needs no FP32 row.
   const auto half_only = [&](std::initializer_list<const DeviceTensor*> ws) {
@@ -729,7 +779,7 @@ void Executor::Forward(std::span<const Segment> segments,
            });
   };
   const auto qkv_half_only = [&](const DeviceLayer& L) {
-    return !L.attn_qkv.empty() ? half_only({&L.attn_qkv})
+    return !L.attn_qkv.empty() ? half_only({&L.attn_qkv, &L.attn_v})
                                : half_only({&L.attn_q, &L.attn_k, &L.attn_v});
   };
   // A W8A8 prefill input that a binary16 projection reads keeps its FP32
@@ -754,35 +804,61 @@ void Executor::Forward(std::span<const Segment> segments,
                      : half_ready              ? x_half_
                      : prefill && !qkv_fp32(L) ? q8_
                                                : Quantize(h_, n, d);
-    // A fused projection leaves [q | k | v] rows in k_; QkvPost reads them
-    // strided and writes packed queries to q_.
-    const std::uint32_t qkv_stride = L.attn_qkv.empty() ? 0 : L.attn_qkv.rows;
+    // A fused projection leaves [q | k | v] or [q | k] rows in k_; QkvPost
+    // reads them strided and writes packed queries to q_. At WMMA decode
+    // widths [q | k] stays split (64 and 32 blocks fit one wave of blocks
+    // each; 96 spills into a second).
+    const bool wmma_qkv =
+        n <= kSplitRows && (model_.has_draft() || n >= 6) &&
+        WmmaGemvSupports(L.attn_qkv.type, L.attn_qkv.rows, L.attn_qkv.cols);
+    const bool separate_v =
+        !L.attn_v.empty() && L.attn_qkv.rows == c.QDim(l) + c.KvDim(l);
+    const std::uint32_t qkv_stride =
+        L.attn_qkv.empty() || (separate_v && wmma_qkv) ? 0 : L.attn_qkv.rows;
     float* q_source = q_;
     float* k_source = k_;
     float* v_source = k_;
+    // h_packed: the previous layer's norm left h_'s pack (width d); the
+    // first WMMA projection over h_ packs it otherwise, for the rest.
     if (qkv_stride != 0) {
-      Project(L.attn_qkv, h_, hq, n, k_);
+      Project(L.attn_qkv, h_, hq, n, k_, h_packed);
       q_source = k_;
       k_source = k_ + c.QDim(l);
-      v_source = L.attn_v.empty() ? k_source : k_source + c.KvDim(l);
+      if (separate_v) {
+        v_source = k_ + std::size_t{n} * qkv_stride;
+        Project(L.attn_v, h_, hq, n, v_source,
+                h_packed || WmmaProjection(L.attn_qkv, n));
+      } else {
+        v_source = L.attn_v.empty() ? k_source : k_source + c.KvDim(l);
+      }
     } else {
-      Project(L.attn_q, h_, hq, n, q_);
-      Project(L.attn_k, h_, hq, n, k_);
+      Project(L.attn_q, h_, hq, n, q_, h_packed);
+      const bool q_packed = h_packed || WmmaProjection(L.attn_q, n);
+      Project(L.attn_k, h_, hq, n, k_, q_packed);
       if (!L.attn_v.empty()) {
-        Project(L.attn_v, h_, hq, n, v_);
+        Project(L.attn_v, h_, hq, n, v_,
+                q_packed || WmmaProjection(L.attn_k, n));
         v_source = v_;
       }
     }
     const std::size_t q_row = qkv_stride != 0 ? qkv_stride : c.QDim(l);
     const std::size_t kv_row = qkv_stride != 0 ? qkv_stride : c.KvDim(l);
+    const std::size_t v_row =
+        qkv_stride != 0 && !separate_v ? qkv_stride : c.KvDim(l);
+    // At decode widths the attention merge packs its FP32 rows for a WMMA
+    // output projection.
+    const WmmaPackOut attn_pack = prefill || half_only({&L.attn_output})
+                                      ? WmmaPackOut{}
+                                      : PackFor(L.attn_output, n);
     std::uint32_t row0 = 0;
     for (const Segment& seg : segments) {
       KvCache& cache = *seg.cache;
       QkvPostArgs post{};
       post.q = q_source + row0 * q_row;
       post.k = k_source + row0 * kv_row;
-      post.v = v_source + row0 * kv_row;
+      post.v = v_source + row0 * v_row;
       post.row_stride = qkv_stride;
+      post.v_stride = separate_v ? 0 : qkv_stride;
       post.q_out =
           qkv_stride != 0 ? q_ + std::size_t{row0} * c.QDim(l) : nullptr;
       post.q_norm = L.attn_q_norm.f32();
@@ -827,13 +903,16 @@ void Executor::Forward(std::span<const Segment> segments,
                : nullptr;
       att.siblings = post.siblings;
       att.spare_key = post.spare_key;
+      att.pack = attn_pack;
+      att.pack_row0 = row0;
       DeriveKeys(att, l);
       Attention(att, stream_);
       row0 += seg.rows;
     }
 
     Project(L.attn_output, attn_,
-            half ? x_half_ : Quantize(attn_, n, c.QDim(l)), n, o_);
+            half ? x_half_ : Quantize(attn_, n, c.QDim(l)), n, o_,
+            attn_pack.hi != nullptr);
     // Expert layers also normalize the attention residual for the experts.
     const bool moe = !L.gate_up_exps.empty();
     const bool dense_half_only = !L.ffn_gate_up.empty()
@@ -842,13 +921,19 @@ void Executor::Forward(std::span<const Segment> segments,
     const bool experts_half_only = half && moe && HalfExperts(L, c);
     const bool dense_fp32 =
         fp32_input({&L.ffn_gate_up, &L.ffn_gate, &L.ffn_up});
+    // At decode widths the norm packs h_ for a WMMA [gate | up] (or gate).
+    const WmmaPackOut ffn_pack =
+        prefill || dense_half_only
+            ? WmmaPackOut{}
+            : PackFor(!L.ffn_gate_up.empty() ? L.ffn_gate_up : L.ffn_gate, n);
     PostAttentionNorm(o_, L.post_attn_norm.f32(), x_, L.ffn_norm.f32(),
                       dense_half_only ? nullptr : h_, n, d, eps, stream_,
                       prefill && !dense_fp32 ? q8_ : nullptr,
                       moe ? L.pre_ffn_norm_2.f32() : nullptr,
                       moe && !experts_half_only ? moe_h_ : nullptr,
                       half ? x_half_ : nullptr,
-                      half && moe ? moe_x_half_ : nullptr);
+                      half && moe ? moe_x_half_ : nullptr, ffn_pack);
+    const bool ffn_packed = ffn_pack.hi != nullptr;
     const void* fq = prefill && !dense_fp32 ? q8_
                      : half                 ? x_half_
                                             : Quantize(h_, n, d);
@@ -863,6 +948,7 @@ void Executor::Forward(std::span<const Segment> segments,
     }
     const void* gq = nullptr;
     const float* down_in = gate_;
+    WmmaPackOut down_pack{};
     const auto gate_up_half = DenseHalfFormat(L.ffn_gate_up.type);
     if (!L.ffn_gate_up.empty() && half && gate_up_half &&
         half_only({&L.ffn_down}) &&
@@ -873,15 +959,19 @@ void Executor::Forward(std::span<const Segment> segments,
       // (free) gate rows as the down projection's binary16 input.
       gq = gate_;
     } else if (!L.ffn_gate_up.empty() && !prefill) {
-      // One projection writes [gate | up] rows.
-      Project(L.ffn_gate_up, h_, fq, n, gate_);
-      GeGluPacked(gate_, half_only({&L.ffn_down}) ? nullptr : act_, n,
-                  c.ffn_size, stream_, half ? x_half_ : nullptr);
+      // One projection writes [gate | up] rows; GeGLU packs its rows for a
+      // WMMA down projection.
+      Project(L.ffn_gate_up, h_, fq, n, gate_, ffn_packed);
+      const bool act_fp32 = !half_only({&L.ffn_down});
+      down_pack = act_fp32 ? PackFor(L.ffn_down, n) : WmmaPackOut{};
+      GeGluPacked(gate_, act_fp32 ? act_ : nullptr, n, c.ffn_size, stream_,
+                  half ? x_half_ : nullptr, down_pack);
       down_in = act_;
       gq = half ? x_half_ : Quantize(act_, n, c.ffn_size);
     } else {
-      Project(L.ffn_gate, h_, fq, n, gate_);
-      Project(L.ffn_up, h_, fq, n, up_);
+      Project(L.ffn_gate, h_, fq, n, gate_, ffn_packed);
+      Project(L.ffn_up, h_, fq, n, up_,
+              ffn_packed || WmmaProjection(L.ffn_gate, n));
       // A binary16 down projection narrows the FP32 GeGLU rows itself.
       if (prefill && L.ffn_down.type != core::GgmlType::kF16) {
         GeGluQuantize(gate_, up_, q8_, n, c.ffn_size, stream_);
@@ -891,8 +981,20 @@ void Executor::Forward(std::span<const Segment> segments,
         gq = Quantize(gate_, n, c.ffn_size);
       }
     }
-    Project(L.ffn_down, down_in, gq, n, o_);
+    Project(L.ffn_down, down_in, gq, n, o_, down_pack.hi != nullptr);
     const bool last = l + 1 == c.num_layers;
+    // At decode widths the layer's last norm packs the next layer's input for
+    // its WMMA Q/K/V projections (the vocabulary head after the last layer
+    // packs its gathered rows itself).
+    WmmaPackOut next_pack{};
+    if (!last && !prefill) {
+      const DeviceLayer& N = layers[l + 1];
+      if (WmmaProjection(N.attn_q, n) ||
+          (!N.attn_qkv.empty() && WmmaProjection(N.attn_qkv, n))) {
+        next_pack = WmmaPackOf(wmma_, d);
+      }
+    }
+    bool next_h_packed = false;
     const float* next =
         !last ? layers[l + 1].attn_norm.f32() : model_.output_norm().f32();
     // The output-normed rows of the last layer feed the vocabulary head and
@@ -919,8 +1021,10 @@ void Executor::Forward(std::span<const Segment> segments,
       finish.used = c.experts_used;
       finish.eps = eps;
       finish.h_half = half && !last ? x_half_ : nullptr;
+      finish.pack = next_pack;
       MoeFinish(finish, stream_);
       half_ready = finish.h_half != nullptr;
+      next_h_packed = next_pack.hi != nullptr;
     } else {
       // Binary16 prefill: the norm also writes the next layer's binary16
       // input (and only that when every consumer reads binary16).
@@ -929,9 +1033,11 @@ void Executor::Forward(std::span<const Segment> segments,
           o_, L.post_ffn_norm.f32(), L.output_scale, x_, next,
           next_half && qkv_half_only(layers[l + 1]) ? nullptr : h_, n, d, eps,
           stream_, prefill && !last && !qkv_fp32(layers[l + 1]) ? q8_ : nullptr,
-          next_half ? x_half_ : nullptr);
+          next_half ? x_half_ : nullptr, next_pack);
       half_ready = next_half;
+      next_h_packed = next_pack.hi != nullptr;
     }
+    h_packed = next_h_packed;
     if (tap_sink_) {
       tap_sink_(l, x_, n, stream_);
     }
@@ -941,11 +1047,19 @@ void Executor::Forward(std::span<const Segment> segments,
   if (m == 0) {
     return;
   }
-  HIP_CHECK(hipMemcpyAsync(logit_index_, logit_rows.data(),
-                           m * sizeof(std::uint32_t), hipMemcpyHostToDevice,
-                           stream_));
-  GatherRows(h_, logit_index_, hsel_, m, d, stream_);
-  Project(model_.output(), hsel_, Quantize(hsel_, m, d), m, logits_);
+  bool contiguous = true;
+  for (std::uint32_t i = 1; i < m; ++i) {
+    contiguous = contiguous && logit_rows[i] == logit_rows[0] + i;
+  }
+  const float* h_logits = h_ + std::size_t{logit_rows[0]} * d;
+  if (!contiguous) {
+    HIP_CHECK(hipMemcpyAsync(logit_index_, logit_rows.data(),
+                             m * sizeof(std::uint32_t), hipMemcpyHostToDevice,
+                             stream_));
+    GatherRows(h_, logit_index_, hsel_, m, d, stream_);
+    h_logits = hsel_;
+  }
+  Project(model_.output(), h_logits, Quantize(h_logits, m, d), m, logits_);
   if (c.final_logit_softcap > 0.0F) {
     Softcap(logits_, std::size_t{m} * model_.vocab_size(),
             c.final_logit_softcap, stream_);
@@ -1320,23 +1434,18 @@ void Executor::DraftChains(std::span<DraftJob> jobs) {
     hip::LaunchBatchedEmbeddingLookup(model_.token_embd().data,
                                       model_.token_embd().type, draft_tokens_,
                                       draft_embed_, n, target_hidden, stream_);
-    Scale(draft_embed_, embed_scale, draft_embed_, n * target_hidden, stream_);
-    const std::size_t row_bytes = target_hidden * sizeof(float);
-    HIP_CHECK(hipMemcpy2DAsync(draft_concat_, 2 * row_bytes, draft_embed_,
-                               row_bytes, row_bytes, n, hipMemcpyDeviceToDevice,
-                               stream_));
-    if (step == 0) {
-      for (std::uint32_t j = 0; j < n; ++j) {
-        HIP_CHECK(hipMemcpyAsync(draft_concat_ + (2 * j + 1) * target_hidden,
-                                 jobs[j].cache->hidden, row_bytes,
-                                 hipMemcpyDeviceToDevice, stream_));
-      }
-    } else {
-      HIP_CHECK(hipMemcpy2DAsync(draft_concat_ + target_hidden, 2 * row_bytes,
-                                 draft_next_, row_bytes, row_bytes, n,
-                                 hipMemcpyDeviceToDevice, stream_));
+    DraftConcatArgs concat{};
+    concat.embed = draft_embed_;
+    concat.out = draft_concat_;
+    concat.scale = embed_scale;
+    concat.rows = n;
+    concat.dim = static_cast<std::uint32_t>(target_hidden);
+    for (std::uint32_t j = 0; j < n; ++j) {
+      concat.hidden[j] =
+          step == 0 ? jobs[j].cache->hidden : draft_next_ + j * target_hidden;
     }
-    Project(dm.pre_projection, draft_concat_, nullptr, n, draft_x_);
+    DraftConcat(concat, stream_);
+    ProjectDraft(dm.pre_projection, draft_concat_, n, draft_x_);
     RmsNorm(draft_x_, dm.layers[0].attn_norm.f32(), draft_h_, n, hidden, eps,
             stream_);
     for (std::uint32_t l = 0; l < c.num_layers; ++l) {
@@ -1345,7 +1454,7 @@ void Executor::DraftChains(std::span<DraftJob> jobs) {
       const std::uint32_t dim = c.HeadDim(l);
       const std::uint32_t q_dim = c.QDim(l);
       const std::uint32_t source = c.SharedKvSource(l, tc);
-      Project(L.attn_q, draft_h_, nullptr, n, draft_q_);
+      ProjectDraft(L.attn_q, draft_h_, n, draft_q_);
       for (std::uint32_t j = 0; j < n; ++j) {
         if (active[j] == 0) {
           continue;
@@ -1377,14 +1486,20 @@ void Executor::DraftChains(std::span<DraftJob> jobs) {
         DeriveKeys(att, source);
         Attention(att, stream_);
       }
-      Project(L.attn_output, draft_attn_, nullptr, n, draft_o_);
+      ProjectDraft(L.attn_output, draft_attn_, n, draft_o_);
       PostAttentionNorm(draft_o_, L.post_attn_norm.f32(), draft_x_,
                         L.ffn_norm.f32(), draft_h_, n, hidden, eps, stream_);
-      Project(L.ffn_gate, draft_h_, nullptr, n, draft_gate_);
-      Project(L.ffn_up, draft_h_, nullptr, n, draft_up_);
-      GeGlu(draft_gate_, draft_up_, draft_gate_, std::size_t{n} * c.ffn_size,
-            stream_);
-      Project(L.ffn_down, draft_gate_, nullptr, n, draft_o_);
+      if (!L.ffn_gate_up.empty()) {
+        ProjectDraft(L.ffn_gate_up, draft_h_, n, draft_gate_);
+        GeGluPacked(draft_gate_, draft_act_, n, c.ffn_size, stream_);
+        ProjectDraft(L.ffn_down, draft_act_, n, draft_o_);
+      } else {
+        ProjectDraft(L.ffn_gate, draft_h_, n, draft_gate_);
+        ProjectDraft(L.ffn_up, draft_h_, n, draft_up_);
+        GeGlu(draft_gate_, draft_up_, draft_gate_, std::size_t{n} * c.ffn_size,
+              stream_);
+        ProjectDraft(L.ffn_down, draft_gate_, n, draft_o_);
+      }
       const float* next = l + 1 < c.num_layers
                               ? dm.layers[l + 1].attn_norm.f32()
                               : dm.output_norm.f32();
@@ -1471,15 +1586,61 @@ void Executor::DraftChains(std::span<DraftJob> jobs) {
     HIP_CHECK(hipMemcpyAsync(draft_tokens_, tokens.data(),
                              n * sizeof(std::int32_t), hipMemcpyHostToDevice,
                              stream_));
-    Project(dm.post_projection, draft_h_, nullptr, n, draft_next_);
+    ProjectDraft(dm.post_projection, draft_h_, n, draft_next_);
   }
 }
 
-void Executor::CopyLogits(std::size_t rows, std::vector<float>* out) const {
-  out->resize(rows * model_.vocab_size());
-  HIP_CHECK(hipMemcpyAsync(out->data(), logits_, out->size() * sizeof(float),
-                           hipMemcpyDeviceToHost, stream_));
+std::span<const std::uint32_t> Executor::ReadArgmax(std::size_t rows) const {
+  if (rows == 0 || rows > kSplitRows) {
+    throw std::invalid_argument("gemma4 argmax rows exceed capacity");
+  }
+  const std::size_t vocab = model_.vocab_size();
+  const std::size_t scratch_floats =
+      std::size_t{2} * kSplitRows * ((vocab + 1023) / 1024);
+  hip::LaunchBatchedGPUArgmax(logits_, logit_index_, rows, vocab,
+                              {gate_, scratch_floats}, stream_);
+  HIP_CHECK(hipMemcpyAsync(argmax_host_, logit_index_,
+                           rows * sizeof(std::uint32_t), hipMemcpyDeviceToHost,
+                           stream_));
   HIP_CHECK(hipStreamSynchronize(stream_));
+  return std::span<const std::uint32_t>(argmax_host_, rows);
+}
+
+void Executor::CommitLogits(KvCache& cache, std::uint32_t row) {
+  const std::size_t vocab = model_.vocab_size();
+  HIP_CHECK(hipMemcpyAsync(cache.logits, logits_ + std::size_t{row} * vocab,
+                           vocab * sizeof(float), hipMemcpyDeviceToDevice,
+                           stream_));
+}
+
+void Executor::CopyCacheLogits(const KvCache& cache,
+                               std::vector<float>* out) const {
+  const std::size_t vocab = model_.vocab_size();
+  HIP_CHECK(hipMemcpyAsync(logits_host_.data(), cache.logits,
+                           vocab * sizeof(float), hipMemcpyDeviceToHost,
+                           stream_));
+  HIP_CHECK(hipStreamSynchronize(stream_));
+  out->assign(logits_host_.begin(),
+              logits_host_.begin() + static_cast<std::ptrdiff_t>(vocab));
+}
+
+std::span<const float> Executor::ReadLogits(std::size_t rows) const {
+  const std::size_t count = rows * model_.vocab_size();
+  if (count > logits_host_.size()) {
+    throw std::invalid_argument("gemma4 logit read exceeds capacity");
+  }
+  if (count != 0) {
+    HIP_CHECK(hipMemcpyAsync(logits_host_.data(), logits_,
+                             count * sizeof(float), hipMemcpyDeviceToHost,
+                             stream_));
+  }
+  HIP_CHECK(hipStreamSynchronize(stream_));
+  return std::span<const float>(logits_host_.data(), count);
+}
+
+void Executor::CopyLogits(std::size_t rows, std::vector<float>* out) const {
+  const auto span = ReadLogits(rows);
+  out->assign(span.begin(), span.end());
 }
 
 }  // namespace gufo::models::gemma4::rocm
