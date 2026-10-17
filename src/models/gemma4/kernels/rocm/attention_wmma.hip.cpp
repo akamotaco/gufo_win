@@ -338,21 +338,40 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
   };
   const auto store_values = [&] {
     if constexpr (kGlobal) {
-      // Keys 2 m and 2 m + 1 of dims d8 .. d8 + 7: one 32-bit key pair per
-      // dim, built by byte permutes.
-      const std::uint32_t m = tid % 8;
+      // Lane pair p (lanes 2 p, 2 p + 1) holds keys 4 p .. 4 p + 3 of dims
+      // d8 .. d8 + 7; after swapping halves the even lane has dims 0..3 and
+      // the odd lane dims 4..7 of all four keys, written as one 64-bit row
+      // of four keys per dim.
       const std::uint32_t d8 = chunk_d8(0);
+      const bool even = (tid & 1U) == 0;
       const uint4 a = v_next[0];
       const uint4 b = v_next[1];
-      const std::uint32_t aw[4] = {a.x, a.y, a.z, a.w};
-      const std::uint32_t bw[4] = {b.x, b.y, b.z, b.w};
-      auto* rows = reinterpret_cast<std::uint32_t*>(vt_lds);
+      // Words of dims {0, 1} and {2, 3} (even) or {4, 5} and {6, 7} (odd).
+      const std::uint32_t keep[4] = {even ? a.x : a.z, even ? a.y : a.w,
+                                     even ? b.x : b.z, even ? b.y : b.w};
+      const std::uint32_t send[4] = {even ? a.z : a.x, even ? a.w : a.y,
+                                     even ? b.z : b.x, even ? b.w : b.y};
+      std::uint32_t recv[4];
 #pragma unroll
-      for (std::uint32_t w = 0; w < 4; ++w) {
-        rows[(d8 + 2 * w) * (kVtStride / 2) + m] =
-            __builtin_amdgcn_perm(bw[w], aw[w], 0x05040100U);
-        rows[(d8 + 2 * w + 1) * (kVtStride / 2) + m] =
-            __builtin_amdgcn_perm(bw[w], aw[w], 0x07060302U);
+      for (std::uint32_t i = 0; i < 4; ++i) {
+        recv[i] = static_cast<std::uint32_t>(__builtin_amdgcn_mov_dpp(
+            static_cast<int>(send[i]), 0xB1, 0xF, 0xF, true));
+      }
+      // Keys in order: the even lane's pair, then the odd lane's.
+      const std::uint32_t* first = even ? keep : recv;
+      const std::uint32_t* second = even ? recv : keep;
+      const std::uint32_t dim = d8 + (even ? 0U : 4U);
+      auto* rows = reinterpret_cast<uint2*>(vt_lds);
+      const std::uint32_t pair = (tid % 8) / 2;
+#pragma unroll
+      for (std::uint32_t w = 0; w < 2; ++w) {
+#pragma unroll
+        for (std::uint32_t h = 0; h < 2; ++h) {
+          const std::uint32_t sel = h == 0 ? 0x05040100U : 0x07060302U;
+          rows[(dim + 2 * w + h) * (kVtStride / 4) + pair] =
+              make_uint2(__builtin_amdgcn_perm(first[2 + w], first[w], sel),
+                         __builtin_amdgcn_perm(second[2 + w], second[w], sel));
+        }
       }
       return;
     }
