@@ -13,20 +13,22 @@ namespace {
 // median of seven) remeasured 2026-10-05 on UD-Q4_K_XL after its
 // projections moved to the WMMA kernels, whose cost barely grows with rows (a
 // row never costs less than a narrower forward: the medians differ by noise
-// there). Only cost ratios steer the decision.
+// there); two to four rows from 4K on lowered 2026-10-17 by the measured
+// global split-attention saving of one wave per head (ten layers). Only cost
+// ratios steer the decision.
 constexpr std::array<std::uint32_t, 5> kDepths = {0, 4096, 16384, 32768, 65536};
 constexpr std::array<float, 5> kDraftStepMs = {1.95F, 2.05F, 2.40F, 2.82F,
                                                3.66F};
 constexpr std::array<std::array<float, 16>, 5> kVerifyMs = {{
     {99.5F, 99.8F, 100.6F, 101.4F, 102.0F, 102.8F, 103.3F, 103.9F, 109.0F,
      109.6F, 110.1F, 111.1F, 111.7F, 112.3F, 112.7F, 113.1F},
-    {104.1F, 105.8F, 107.0F, 108.0F, 108.7F, 110.6F, 111.9F, 113.3F, 122.7F,
+    {104.1F, 105.2F, 106.5F, 108.0F, 108.7F, 110.6F, 111.9F, 113.3F, 122.7F,
      123.5F, 124.4F, 125.0F, 126.1F, 127.6F, 127.6F, 130.7F},
-    {108.2F, 112.2F, 114.0F, 115.3F, 117.3F, 120.3F, 123.2F, 125.7F, 138.9F,
+    {108.2F, 109.8F, 111.6F, 114.4F, 117.3F, 120.3F, 123.2F, 125.7F, 138.9F,
      140.0F, 142.2F, 144.4F, 146.8F, 149.1F, 150.0F, 153.2F},
-    {112.5F, 119.1F, 121.7F, 123.1F, 126.3F, 130.6F, 136.0F, 140.0F, 158.3F,
+    {112.5F, 115.2F, 117.7F, 121.4F, 126.3F, 130.6F, 136.0F, 140.0F, 158.3F,
      160.4F, 163.8F, 167.0F, 170.3F, 173.5F, 175.2F, 180.1F},
-    {121.0F, 132.0F, 136.1F, 137.9F, 143.6F, 149.7F, 159.8F, 166.7F, 195.9F,
+    {121.0F, 125.1F, 129.7F, 135.6F, 143.6F, 149.7F, 159.8F, 166.7F, 195.9F,
      199.8F, 206.1F, 213.5F, 218.0F, 223.6F, 228.0F, 235.5F},
 }};
 

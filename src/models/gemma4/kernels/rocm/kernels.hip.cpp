@@ -1407,10 +1407,20 @@ void LaunchSplitAttention(const AttentionArgs& a, hipStream_t stream) {
         <<<dim3(1, a.kv_heads, chunk_blocks), kBlock, 0, stream>>>(
             a, first_split, splits);
   } else if constexpr (G == kWaves) {
-    // hd512: two waves per head, three rows each, keep a block's rows within
-    // the register file; seven or eight rows take four waves of two, so one
-    // block still streams each key once.
-    if (a.rows > 6) {
+    // hd512 keeps a block's rows within the register file, so one block
+    // still streams each key once: up to four rows take one wave per head
+    // (a second row group would only stage the tiles and wait at the
+    // barriers), five or six two waves of three rows, seven or eight two
+    // waves of four.
+    if (a.rows <= 3) {
+      RowSplitAttentionKernel<D, G, 3, 1, CW>
+          <<<dim3(1, a.kv_heads, chunk_blocks), kThreads, 0, stream>>>(
+              a, first_split, splits);
+    } else if (a.rows == 4) {
+      RowSplitAttentionKernel<D, G, 4, 1, CW>
+          <<<dim3(1, a.kv_heads, chunk_blocks), kThreads, 0, stream>>>(
+              a, first_split, splits);
+    } else if (a.rows > 6) {
       constexpr std::uint32_t kRows = 4 * 2;
       RowSplitAttentionKernel<D, G, 4, 2, CW>
           <<<dim3((a.rows + kRows - 1) / kRows, a.kv_heads, chunk_blocks),
