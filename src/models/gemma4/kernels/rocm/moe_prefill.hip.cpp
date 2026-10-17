@@ -1141,8 +1141,11 @@ bool LaunchDenseHalfGemm(ExpertFormat format, const void* w, const void* x,
       (blockwise && out_half != nullptr && !geglu)) {
     return false;
   }
-  constexpr int kTile = 96;
-  // Token tiles per row-block sweep (cold 2048-row Gemma 31B shapes: 2 or 4
+  // Seven 16-token tiles: each decoded weight fragment feeds seven products
+  // instead of six, and the 30 KB of staged activations still let four blocks
+  // share a WGP (128 tokens take 35 KB and three).
+  constexpr int kTile = 112;
+  // Token tiles per row-block sweep (cold 2048-row Gemma 31B shapes: 2 or 3
   // beat both one and every tile).
   constexpr std::uint32_t kGroup = 2;
   const std::uint32_t token_tiles = (rows + kTile - 1) / kTile;
