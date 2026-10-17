@@ -55,7 +55,15 @@ ran alone, so a seeded sampled request replays exactly, batched or not.
 When the recent context repeats an earlier
 passage of at least 12 tokens (a rewritten file, a quoted log), the tokens that
 followed it fill the remaining draft slots and are verified like drafts (prompt
-lookup, shared with gufo-org/gufo#295). `--sessions N` serves up to N concurrent requests; up to eight
+lookup, shared with gufo-org/gufo#295 and #613); with at least three of them
+the drafter does not run that cycle. Where other earlier occurrences match at
+least half as far back but continue differently (repeated log timestamps or
+declarations), only the tokens they all share are copied. After a copy that
+kept at least half of its tokens, five matching tokens near where it left off
+resume it, so output that edits a copied line rejoins it. A request's first
+cycle copies nothing, matches do not reach back past the request's start, and
+copies stop at a stop token. Requests report proposed and accepted copies as
+`lookup_n` / `lookup_n_accepted`. `--sessions N` serves up to N concurrent requests; up to eight
 decode in one forward. The drafter attends to the target's own KV cache,
 so it adds no per-session cache.
 Greedy speculative output equals single-token decoding of the same
