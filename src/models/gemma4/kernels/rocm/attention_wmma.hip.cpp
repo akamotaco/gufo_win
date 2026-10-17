@@ -127,7 +127,10 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
 
   __shared__ __align__(16) __half k_lds[kKeys * kKStride];
   __shared__ __align__(16) __half vt_lds[D * kVtStride];
-  __shared__ float s_lds[kRowBlocks][kWavesPerRow][16][17];
+  // Unpadded score rows: the column writes and the softmax's reads of four
+  // rows are both free of bank conflicts (17-float rows made the reads
+  // conflict two ways).
+  __shared__ __align__(16) float s_lds[kRowBlocks][kWavesPerRow][16][16];
   __shared__ __align__(16) __half p_lds[kRowBlocks][16][kKeys + 8];
   __shared__ float row_scale[kRowBlocks][16];
   __shared__ float row_sum[kRowBlocks][16];
