@@ -77,12 +77,23 @@ constexpr std::uint32_t kPrefillThreads =
 /// Rotated pairs of the production global layers' derived keys.
 constexpr std::uint32_t kGlobalPairs = 64;
 
-/// v from lane (lane ^ kMask) within its row of 16 (DPP row_xmask).
+/// e^x as the hardware exp2 of x log2(e): expf's result from e^-87.3 up,
+/// without its rescaling of smaller results into FP32 denormals. Softmax
+/// weights may use it: a binary16 probability rounds those to zero, and a
+/// row's running sum (at least its maximum's weight of one) absorbs them. The
+/// accumulator rescale may not: a denormal factor leaves a remainder that
+/// breaks rounding ties of the next products.
+__device__ __forceinline__ float ExpNoDenorm(float x) {
+  return __builtin_amdgcn_exp2f(x * 1.44269504F);
+}
+
+/// v from lane (lane ^ kMask) within its row of 16 (DPP row_xmask). Every
+/// source lane exists, so bound_ctrl changes nothing but lets the compiler
+/// fold the exchange into the consuming add.
 template<int kMask>
 __device__ __forceinline__ float XorLane(float v) {
-  const int bits = __float_as_int(v);
-  return __int_as_float(
-      __builtin_amdgcn_update_dpp(bits, bits, 0x160 | kMask, 0xF, 0xF, false));
+  return __int_as_float(__builtin_amdgcn_mov_dpp(
+      __float_as_int(v), 0x160 | kMask, 0xF, 0xF, true));
 }
 
 /// Reduces v over aligned groups of kLanes (at most 8) neighbouring lanes;
@@ -466,7 +477,8 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
       float tile_sum = 0.0F;
 #pragma unroll
       for (std::uint32_t m = 0; m < kSegKeys; ++m) {
-        const float w = vals[m] == -INFINITY ? 0.0F : expf(vals[m] - next_max);
+        const float w =
+            vals[m] == -INFINITY ? 0.0F : ExpNoDenorm(vals[m] - next_max);
         tile_sum += w;
         p_lds[rb][sm_row][sm_seg * kSegKeys + m] = __float2half(w);
       }
