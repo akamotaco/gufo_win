@@ -212,6 +212,9 @@ public:
 
   [[nodiscard]] bool Sync(std::span<const TokenId> prompt,
                           std::string* error_msg = nullptr);
+  /// Starts a request on the current context (Sync does this too): prompt
+  /// lookup forgets the previous request's copy and skips its first step.
+  void BeginRequest();
   /// Sync with images: `images` (ordered, each followed by a text token)
   /// take their rows from `embed`. Reuse stops at the first image whose
   /// identity or placement changed, and an image is always evaluated whole.
@@ -371,6 +374,7 @@ private:
     bool sampled{false};
     std::vector<qwen38_flash_next::MtpProposal> proposals;
     std::size_t copied{0};
+    std::size_t copy_start{0};  ///< committed index the copies came from
     /// The drafter chain scored the small head (PrepareDraftHead).
     bool small_head{false};
     /// The drafter's next choice beside MTP drafts 1..siblings.size(),

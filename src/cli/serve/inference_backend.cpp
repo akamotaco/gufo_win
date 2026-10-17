@@ -3504,9 +3504,12 @@ public:
   void PreparePrefixReuse(
       TextRunnerState& state,
       std::span<const TextRunnerToken> prefix) const override {
-    if (RequireGemma4State(state).session().Position() != prefix.size()) {
+    auto& session = RequireGemma4State(state).session();
+    if (session.Position() != prefix.size()) {
       throw std::logic_error("Gemma 4 reused prefix does not match checkpoint");
     }
+    // A fully reused prompt decodes without a Sync; it still starts a request.
+    session.BeginRequest();
   }
 
   void SetPromptLookahead(

@@ -153,9 +153,16 @@ public:
   /// Best match for the context `committed` + `tail` among the indexed
   /// committed tokens, or a zero-length match. `tail` holds the uncommitted
   /// chain (anchor and drafts); `committed` must extend the indexed prefix.
+  /// With `agreed`, also reports how many tokens of the best match's
+  /// continuation every competing occurrence (any other candidate matching
+  /// at least half as long, gated or not) proposes too; without competitors
+  /// that is the rest of the indexed source. Repeated syntax (a log line's
+  /// timestamp, a declaration's type) matches several occurrences about as
+  /// well, and their continuations show how much of the copy is ambiguous.
   [[nodiscard]] Match Find(std::span<const std::int32_t> committed,
                            std::span<const std::int32_t> tail,
-                           std::size_t minimum = kMinMatch) const {
+                           std::size_t minimum = kMinMatch,
+                           std::size_t* agreed = nullptr) const {
     const std::size_t context = committed.size() + tail.size();
     const std::size_t available =
         request_start_ == kNoResume
@@ -173,6 +180,8 @@ public:
       key_tokens[i] = at(context - kKeyTokens + i);
     }
     Match best{};
+    Match candidates[kMaxCandidates];
+    std::size_t candidate_count = 0;
     std::uint32_t end = head_.Find(Key(key_tokens));
     for (std::size_t n = 0; n < kMaxCandidates && end != kNone; ++n) {
       // An occurrence ending at `end` proposes committed[end...]. The key
@@ -185,11 +194,30 @@ public:
       const bool resumes = resume_ != kNoResume &&
                            end + kResumeBack >= resume_ &&
                            end <= resume_ + kResumeWindow;
-      if (end < prev_.size() && length > best.length &&
-          (length >= minimum || (resumes && length >= kResumeMinMatch))) {
-        best = {end, length};
+      if (end < prev_.size()) {
+        candidates[candidate_count++] = {end, length};
+        if (length > best.length &&
+            (length >= minimum || (resumes && length >= kResumeMinMatch))) {
+          best = {end, length};
+        }
       }
       end = prev_[end];
+    }
+    if (agreed != nullptr && best.length != 0) {
+      std::size_t same = prev_.size() - best.start;
+      for (std::size_t i = 0; i < candidate_count; ++i) {
+        const Match& other = candidates[i];
+        if (other.start == best.start || 2 * other.length < best.length) {
+          continue;
+        }
+        std::size_t k = 0;
+        while (k < same && other.start + k < prev_.size() &&
+               committed[other.start + k] == committed[best.start + k]) {
+          ++k;
+        }
+        same = k;
+      }
+      *agreed = same;
     }
     return best;
   }
