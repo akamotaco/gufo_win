@@ -1408,7 +1408,9 @@ int RunGemma4Benchmark(const BenchOptions& options,
           std::cerr << "Gemma 4 tg depth=" << depth
                     << " cycles=" << stats.cycles
                     << " drafted=" << stats.drafted
-                    << " accepted=" << stats.accepted << " text="
+                    << " accepted=" << stats.accepted
+                    << " lookup_proposed=" << stats.copied
+                    << " lookup_accepted=" << stats.copied_accepted << " text="
                     << model->Decode(std::span(generated).first(
                            std::min<std::size_t>(generated.size(), 48)))
                     << '\n';
