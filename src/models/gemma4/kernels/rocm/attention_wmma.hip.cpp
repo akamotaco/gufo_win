@@ -211,6 +211,21 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
   const std::uint32_t sm_query = row0 + sm_row;
   const std::uint32_t sm_clamped = min(sm_query, a.rows - 1);
   const Bounds sm_keys = KeyBounds(a, sm_clamped, position_of(sm_clamped));
+  // Tiles inside [interior_lo, interior_hi) lie within the key range of all
+  // of this wave's softmax rows, which then need no masks (wave-uniform).
+  std::uint32_t interior_lo = 0;
+  std::uint32_t interior_hi = ~0U;
+#pragma unroll
+  for (std::uint32_t r = 0; r < kRowsPerPart; ++r) {
+    const std::uint32_t row = row0 + part * kRowsPerPart + r;
+    if (row >= a.rows) {
+      interior_hi = 0;
+    } else {
+      const Bounds keys = KeyBounds(a, row, position_of(row));
+      interior_lo = max(interior_lo, keys.lo);
+      interior_hi = min(interior_hi, keys.hi);
+    }
+  }
 
   const std::size_t kv_stride = static_cast<std::size_t>(a.kv_heads) * D;
   const auto* k_cache = reinterpret_cast<const __half*>(a.k_cache);
@@ -451,7 +466,8 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
     }
     __syncthreads();
 
-    {
+    // kInterior: every key of the tile is valid for every row.
+    const auto softmax = [&]<bool kInterior>() {
       const std::uint32_t position_row = sm_query;
       float vals[kSegKeys];
       float tile_max = -INFINITY;
@@ -464,21 +480,23 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
         for (std::uint32_t p = 0; p < kWavesPerRow; ++p) {
           s += s_lds[rb][p][sm_row][col];
         }
-        const bool valid =
-            position_row < a.rows && key >= sm_keys.lo && key < sm_keys.hi;
+        const bool valid = kInterior || (position_row < a.rows &&
+                                         key >= sm_keys.lo && key < sm_keys.hi);
         vals[m] = valid ? s : -INFINITY;
         tile_max = fmaxf(tile_max, vals[m]);
       }
       tile_max = SegmentReduce<kSegLanes>(
           tile_max, [](float x, float y) { return fmaxf(x, y); });
       const float next_max = fmaxf(running_max, tile_max);
-      const float scale =
-          next_max == -INFINITY ? 1.0F : expf(running_max - next_max);
+      const float scale = !kInterior && next_max == -INFINITY
+                              ? 1.0F
+                              : expf(running_max - next_max);
       float tile_sum = 0.0F;
 #pragma unroll
       for (std::uint32_t m = 0; m < kSegKeys; ++m) {
-        const float w =
-            vals[m] == -INFINITY ? 0.0F : ExpNoDenorm(vals[m] - next_max);
+        const float w = !kInterior && vals[m] == -INFINITY
+                            ? 0.0F
+                            : ExpNoDenorm(vals[m] - next_max);
         tile_sum += w;
         p_lds[rb][sm_row][sm_seg * kSegKeys + m] = __float2half(w);
       }
@@ -491,6 +509,11 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
       if (sm_seg == 0) {
         row_scale[rb][sm_row] = scale;
       }
+    };
+    if (key0 >= interior_lo && key0 + kKeys <= interior_hi) {
+      softmax.template operator()<true>();
+    } else {
+      softmax.template operator()<false>();
     }
     // The scores are done with this tile's keys: stage the next ones.
     if (more) {
