@@ -218,6 +218,14 @@ void CheckGrammar() {
     Require(!Accepts(*required, invalid), "rejected: " + invalid);
   }
   Require(!Accepts(*required, call + call), "one call without parallel calls");
+  // A required call admits llama.cpp's bounded space before its marker,
+  // never a stream of whitespace in place of the call.
+  Require(Accepts(*required, "\n" + call) &&
+              Accepts(*required, "\n\n" + std::string(20, ' ') + call),
+          "bounded space before a required call");
+  Require(!Accepts(*required, std::string(21, '\n') + call) &&
+              !Accepts(*required, std::string(100, ' ') + call),
+          "unbounded whitespace before a required call");
   const auto automatic = JsonConstraint::WithTools(
       nullptr, {{"edit", parameters}}, false, true, Format::kGemma4);
   Require(Accepts(*automatic, "Let me fix it. " + call + call) &&
