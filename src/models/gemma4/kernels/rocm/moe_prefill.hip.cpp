@@ -327,7 +327,26 @@ __global__ void __launch_bounds__(kThreads)
       dst[3 * f_part + 1] = f_code1;
       dst[3 * f_part + 2] = f_code2;
     }
-    if (f_part == 1) {
+    if constexpr (kQ4) {
+      // Q4_K: the row's two threads convert two of its four scale words
+      // each (Q5_K and Q6_K keep one thread: the split cost them registers).
+      const __half2 dm = __builtin_bit_cast(__half2, f_header.x);
+      std::uint32_t packed[2];
+#pragma unroll
+      for (int p = 0; p < 2; ++p) {
+        std::uint32_t sc = 0;
+        std::uint32_t mn = 0;
+        ScaleMinK4(f_header, 4 * f_half + 2 * f_part + p, &sc, &mn);
+        const float scale =
+            f_live ? __low2float(dm) * static_cast<float>(sc) : 0.0F;
+        const float offset =
+            f_live ? __high2float(dm) * static_cast<float>(mn) : 0.0F;
+        packed[p] = __builtin_bit_cast(std::uint32_t,
+                                       __floats2half2_rn(scale, -offset));
+      }
+      reinterpret_cast<uint2*>(dst + kScaleChunk)[f_part] =
+          make_uint2(packed[0], packed[1]);
+    } else if (f_part == 1) {
       std::uint32_t packed[4];
       if constexpr (kQ6) {
         const float d = f_live ? f_d : 0.0F;
