@@ -22,8 +22,10 @@
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 
 #include "src/models/gemma4/kernels/rocm/half_store.hpp"
 
@@ -75,6 +77,31 @@ constexpr std::uint32_t kPrefillThreads =
 /// Rotated pairs of the production global layers' derived keys.
 constexpr std::uint32_t kGlobalPairs = 64;
 
+/// v from lane (lane ^ kMask) within its row of 16 (DPP row_xmask).
+template<int kMask>
+__device__ __forceinline__ float XorLane(float v) {
+  const int bits = __float_as_int(v);
+  return __int_as_float(
+      __builtin_amdgcn_update_dpp(bits, bits, 0x160 | kMask, 0xF, 0xF, false));
+}
+
+/// Reduces v over aligned groups of kLanes (at most 8) neighbouring lanes;
+/// DPP exchanges need no address registers, unlike `__shfl_xor`.
+template<std::uint32_t kLanes, class Op>
+__device__ __forceinline__ float SegmentReduce(float v, Op op) {
+  static_assert(kLanes <= 8, "row_xmask exchanges stay within 16 lanes");
+  if constexpr (kLanes >= 2) {
+    v = op(v, XorLane<1>(v));
+  }
+  if constexpr (kLanes >= 4) {
+    v = op(v, XorLane<2>(v));
+  }
+  if constexpr (kLanes >= 8) {
+    v = op(v, XorLane<4>(v));
+  }
+  return v;
+}
+
 /// kGlobal: a production global layer (hd512 derived keys with
 /// kGlobalPairs pairs, no window, ring or image ranges). Its non-rotated key
 /// dims are staged from the value registers and only the rotated dims come
@@ -115,8 +142,10 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
   const std::uint32_t part = wave % kWavesPerRow;
   const std::uint32_t dim0 = part * kSlice;
 
-  const std::uint32_t query_start = blockIdx.x * kQueries;
-  const std::uint32_t head_base = blockIdx.y * kHeads;
+  // Head groups vary fastest across the grid, so the blocks in flight read
+  // the same key positions of every KV head.
+  const std::uint32_t head_base = blockIdx.x * kHeads;
+  const std::uint32_t query_start = blockIdx.y * kQueries;
   const std::uint32_t gqa = a.heads / a.kv_heads;
   const std::uint32_t kv_head = head_base / gqa;
   const std::uint32_t head = head_base + rb % kHeads;
@@ -133,11 +162,7 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
       KeyBounds(a, last_row, position_of(last_row)).hi;
 
   // Q slice fragments: row `sub` of this row block, dims [dim0, dim0 + 128).
-  // kGlobal keeps only its half-wave's half of each fragment (the halves are
-  // duplicates) and rebuilds the fragment with a cross-half swap before its
-  // product: 32 registers fewer.
-  v16h q_frag[kGlobal ? 1 : kSliceSteps];
-  uint4 q_half[kGlobal ? kSliceSteps : 1];
+  v16h q_frag[kSliceSteps];
   {
     const std::uint32_t row = row0 + sub;
     const bool live = row < a.rows;
@@ -145,50 +170,18 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
         a.q + (static_cast<std::size_t>(row) * a.heads + head) * D + dim0;
 #pragma unroll
     for (std::uint32_t ks = 0; ks < kSliceSteps; ++ks) {
-      if constexpr (kGlobal) {
-        const float* src = q + ks * 16 + half_id * 8;
-        const float4 f0 = live ? *reinterpret_cast<const float4*>(src)
-                               : make_float4(0.0F, 0.0F, 0.0F, 0.0F);
-        const float4 f1 = live ? *reinterpret_cast<const float4*>(src + 4)
-                               : make_float4(0.0F, 0.0F, 0.0F, 0.0F);
-        const __half2 h[4] = {
-            __floats2half2_rn(f0.x, f0.y), __floats2half2_rn(f0.z, f0.w),
-            __floats2half2_rn(f1.x, f1.y), __floats2half2_rn(f1.z, f1.w)};
-        __builtin_memcpy(&q_half[ks], h, 16);
-      } else {
 #pragma unroll
-        for (std::uint32_t v = 0; v < 16; v += 4) {
-          const float4 f =
-              live ? *reinterpret_cast<const float4*>(q + ks * 16 + v)
-                   : make_float4(0.0F, 0.0F, 0.0F, 0.0F);
-          q_frag[ks][v + 0] = static_cast<_Float16>(f.x);
-          q_frag[ks][v + 1] = static_cast<_Float16>(f.y);
-          q_frag[ks][v + 2] = static_cast<_Float16>(f.z);
-          q_frag[ks][v + 3] = static_cast<_Float16>(f.w);
-        }
+      for (std::uint32_t v = 0; v < 16; v += 4) {
+        const float4 f = live
+                             ? *reinterpret_cast<const float4*>(q + ks * 16 + v)
+                             : make_float4(0.0F, 0.0F, 0.0F, 0.0F);
+        q_frag[ks][v + 0] = static_cast<_Float16>(f.x);
+        q_frag[ks][v + 1] = static_cast<_Float16>(f.y);
+        q_frag[ks][v + 2] = static_cast<_Float16>(f.z);
+        q_frag[ks][v + 3] = static_cast<_Float16>(f.w);
       }
     }
   }
-  const auto q_fragment = [&](std::uint32_t ks) -> v16h {
-    if constexpr (kGlobal) {
-      const uint4 own = q_half[ks];
-      const auto swap = [](std::uint32_t v) {
-        return static_cast<std::uint32_t>(__builtin_amdgcn_permlanex16(
-            v, v, 0x76543210U, 0xFEDCBA98U, false, false));
-      };
-      const uint4 other =
-          make_uint4(swap(own.x), swap(own.y), swap(own.z), swap(own.w));
-      union {
-        v16h f;
-        uint4 u[2];
-      } cvt;
-      cvt.u[0] = half_id == 0 ? own : other;
-      cvt.u[1] = half_id == 0 ? other : own;
-      return cvt.f;
-    } else {
-      return q_frag[ks];
-    }
-  };
   v8f o_acc[kSliceSteps] = {};
 
   // Online softmax state, spread over the row block's waves: wave `part`
@@ -256,8 +249,34 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
   // kGlobal: rotated chunk r = tid < 256 is dims 8 (r / 16) of the rotated
   // K row of key r % 16 (dims [0, 64) then [D / 2, D / 2 + 64)).
   constexpr std::uint32_t kRotChunks = kKeys * 2 * kGlobalPairs / 8;
+  const bool rot_wave = wave < kRotChunks / 32;
+  // kGlobal tiles of 16 keys inside block_hi load from the uniform head bases
+  // plus 32-bit byte offsets (the launcher checks the range): a lane keeps
+  // two offset registers instead of 64-bit pointers.
+  const auto at = [](const __half* base, std::uint32_t byte_offset) {
+    return reinterpret_cast<const uint4*>(reinterpret_cast<const char*>(base) +
+                                          byte_offset);
+  };
+  const __half* v_head = v_cache + static_cast<std::size_t>(kv_head) * D;
+  const __half* rot_head = k_cache + kv_head * 2 * kGlobalPairs;
+  const auto v_row_bytes = static_cast<std::uint32_t>(kv_stride * 2);
+  const std::uint32_t rot_row_bytes = a.kv_heads * 2 * kGlobalPairs * 2;
+  const std::uint32_t v_offset = chunk_key(0) * v_row_bytes + chunk_d8(0) * 2;
+  const std::uint32_t rot_offset =
+      (tid % kKeys) * rot_row_bytes + (tid / kKeys) * 8 * 2;
   uint4 k_rot;
   const auto fetch = [&](std::uint32_t key0) {
+    if constexpr (kGlobal) {
+      if (key0 + kKeys <= block_hi) {
+        const std::uint32_t v_at = v_offset + key0 * v_row_bytes;
+        v_next[0] = *at(v_head, v_at);
+        v_next[1] = *at(v_head, v_at + v_row_bytes);
+        if (rot_wave) {
+          k_rot = *at(rot_head, rot_offset + key0 * rot_row_bytes);
+        }
+        return;
+      }
+    }
 #pragma unroll
     for (std::uint32_t j = 0; j < kStage; ++j) {
       const std::uint32_t position = key0 + chunk_key(j);
@@ -280,7 +299,7 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
     if constexpr (kGlobal) {
       const std::uint32_t position = key0 + tid % kKeys;
       k_rot = make_uint4(0U, 0U, 0U, 0U);
-      if (tid < kRotChunks && position < block_hi) {
+      if (rot_wave && position < block_hi) {
         k_rot = *reinterpret_cast<const uint4*>(
             k_cache +
             (static_cast<std::size_t>(position) * a.kv_heads + kv_head) * 2 *
@@ -390,7 +409,7 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
 #pragma unroll
       for (std::uint32_t ks = 0; ks < kSliceSteps; ++ks) {
         const v16h k_frag = LoadFrag(&k_lds[sub * kKStride + dim0 + ks * 16]);
-        s_acc = Wmma(q_fragment(ks), k_frag, s_acc);
+        s_acc = Wmma(q_frag[ks], k_frag, s_acc);
       }
 #pragma unroll
       for (std::uint32_t i = 0; i < 8; ++i) {
@@ -417,10 +436,8 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
         vals[m] = valid ? s : -INFINITY;
         tile_max = fmaxf(tile_max, vals[m]);
       }
-#pragma unroll
-      for (std::uint32_t offset = 1; offset < kSegLanes; offset <<= 1) {
-        tile_max = fmaxf(tile_max, __shfl_xor(tile_max, offset, 32));
-      }
+      tile_max = SegmentReduce<kSegLanes>(
+          tile_max, [](float x, float y) { return fmaxf(x, y); });
       const float next_max = fmaxf(running_max, tile_max);
       const float scale =
           next_max == -INFINITY ? 1.0F : expf(running_max - next_max);
@@ -431,12 +448,12 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
         tile_sum += w;
         p_lds[rb][sm_row][sm_seg * kSegKeys + m] = __float2half(w);
       }
-#pragma unroll
-      for (std::uint32_t offset = 1; offset < kSegLanes; offset <<= 1) {
-        tile_sum += __shfl_xor(tile_sum, offset, 32);
-      }
+      tile_sum = SegmentReduce<kSegLanes>(
+          tile_sum, [](float x, float y) { return x + y; });
       running_max = next_max;
-      running_sum = running_sum * scale + tile_sum;
+      // Explicitly fused, as fast-math contracted it before: the rounding
+      // must not depend on how the compiler schedules this.
+      running_sum = __builtin_fmaf(running_sum, scale, tile_sum);
       if (sm_seg == 0) {
         row_scale[rb][sm_row] = scale;
       }
@@ -470,10 +487,20 @@ __global__ void __launch_bounds__((kPrefillThreads<D, kHeads, kQueryBlocks>))
         }
       }
     }
+    // The next V fragment is read before each product; the empty asm pins
+    // the read there (the scheduler otherwise waits for every read right
+    // before its product).
+    v16h v_cur = LoadFrag(&vt_lds[(dim0 + sub) * kVtStride]);
 #pragma unroll
     for (std::uint32_t t = 0; t < kSliceSteps; ++t) {
-      const v16h v_frag = LoadFrag(&vt_lds[(dim0 + t * 16 + sub) * kVtStride]);
-      o_acc[t] = Wmma(p_frag, v_frag, o_acc[t]);
+      v16h v_following;
+      if (t + 1 < kSliceSteps) {
+        v_following =
+            LoadFrag(&vt_lds[(dim0 + (t + 1) * 16 + sub) * kVtStride]);
+        asm volatile("" : "+v"(v_following));
+      }
+      o_acc[t] = Wmma(p_frag, v_cur, o_acc[t]);
+      v_cur = v_following;
     }
     // Every wave is done with this tile's values and probabilities before the
     // next values replace them.
@@ -518,11 +545,16 @@ bool Launch(const AttentionArgs& a, hipStream_t stream) {
     return false;
   }
   constexpr std::uint32_t kQueries = 16 * kQueryBlocks;
-  const dim3 grid((a.rows + kQueries - 1) / kQueries, a.heads / kHeads);
+  const dim3 grid(a.heads / kHeads, (a.rows + kQueries - 1) / kQueries);
   constexpr std::uint32_t kThreads = kPrefillThreads<D, kHeads, kQueryBlocks>;
   if constexpr (D == 512) {
+    // The global variant addresses cache rows by 32-bit byte offsets.
+    const std::uint64_t keys = std::min<std::uint64_t>(
+        std::uint64_t{a.first_position} + a.rows, a.key_limit);
     if (a.rope_pairs == kGlobalPairs && a.window == 0 && a.ring == 0 &&
-        a.key_ends == nullptr) {
+        a.key_ends == nullptr &&
+        keys * a.kv_heads * D * sizeof(__half) <=
+            std::numeric_limits<std::uint32_t>::max()) {
       WmmaPrefillAttentionKernel<D, kHeads, kQueryBlocks, true>
           <<<grid, kThreads, 0, stream>>>(a);
       return true;
