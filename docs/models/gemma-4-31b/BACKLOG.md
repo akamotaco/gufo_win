@@ -265,9 +265,6 @@ an NPU load.
 - Model card refresh: BENCHMARKS.md is from 2026-10-07 and holds none of the
   2026-10-17 gains; one full sweep (the `benchmark-model` skill) at the end of
   the round.
-- `gemma4.target` on 26B QAT fails "shared sampled MTP verified or accepted no
-  siblings" with output identical to 2026-10-16's head: pre-existing,
-  uninvestigated.
 - The branch is pushed to the `fork` remote (franzmoca/gufo) with no pull
   request yet; its title follows [the release policy](../../RELEASING.md).
 
