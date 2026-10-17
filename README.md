@@ -38,7 +38,8 @@ maintained here on the default branch, `feat/gemma`. Upstream
 Benchmarks against llama.cpp and quality reports are in each model card:
 [26B-A4B](docs/models/gemma-4-26b-a4b/README.md),
 [31B](docs/models/gemma-4-31b/README.md) and
-[31B QAT](docs/models/gemma-4-31b-qat/README.md).
+[31B QAT](docs/models/gemma-4-31b-qat/README.md). The fork's own changes are
+listed in the [Gemma changelog](CHANGELOG_GEMMA.md).
 
 ### Status
 
