@@ -105,13 +105,17 @@ void MoeRoute(const MoeRouteArgs& args, hipStream_t stream);
                                    std::uint32_t m, std::uint32_t k,
                                    hipStream_t stream);
 
+/// Bucket rows per tile of LaunchRoutedHalfGemm's tile maps.
+inline constexpr std::uint32_t kRoutedHalfTileRows = 112;
+
 /// Routed prefill projection over binary16 activation rows `x` ([rows][k])
 /// in Flash-Next's routing layout (RoutedCompact buckets and a tile map of
 /// expert | tile << 16 entries built for `tile_rows` bucket rows per tile):
 /// row rows_out[i] of `out` (FP32) or `out_half` (binary16, saturated)
 /// receives W[expert] x[rows_in[i]]. Covers the formats the Flash-Next
 /// routed GEMM lacks or runs slower (Q4_K, Q5_K, Q6_K, and Q4_0 / Q5_0 /
-/// Q5_1 / Q8_0 / binary16 with FP32 outputs; 96-row tiles); returns false
+/// Q5_1 / Q8_0 / binary16 with FP32 outputs; kRoutedHalfTileRows-row
+/// tiles); returns false
 /// for others. With `geglu` (a K-quant, Q4_0, Q8_0 or binary16 fused
 /// [gate | up] W, binary16 output) row r of `out_half` holds the m / 2 values
 /// GeGluPackedHalf would make of the binary16 pair.

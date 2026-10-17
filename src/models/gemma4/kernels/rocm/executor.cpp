@@ -66,7 +66,7 @@ constexpr std::uint32_t kRoutedDownRows = 64;
 /// The Gemma K-quant gate/up GEMM skips a tile's empty 16-row parts, so
 /// wide tiles cost no padding work: Q6_K 96 rows 4.3 ms per 2048-row layer,
 /// 48 rows 6.3, 128 rows 4.7 (one block per WGP).
-constexpr std::uint32_t kRoutedKQuantTileRows = 96;
+constexpr std::uint32_t kRoutedKQuantTileRows = kRoutedHalfTileRows;
 
 /// Whether layer l's experts take the binary16 prefill route (the formats
 /// PrefillExperts covers).

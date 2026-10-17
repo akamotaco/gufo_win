@@ -1227,7 +1227,7 @@ bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
                           const std::int32_t* rows_out, float* out,
                           void* out_half, std::uint32_t m, std::uint32_t k,
                           hipStream_t stream, bool geglu) {
-  if (tile_rows != 96 || n_tiles == 0 ||
+  if (tile_rows != kRoutedHalfTileRows || n_tiles == 0 ||
       (out == nullptr) == (out_half == nullptr) ||
       (format != ExpertFormat::kQ5_1 && format != ExpertFormat::kQ8_0 &&
        format != ExpertFormat::kF16 && format != ExpertFormat::kQ4_0 &&
@@ -1248,33 +1248,33 @@ bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
   switch (format) {
     case ExpertFormat::kQ4_K:
       if (geglu) {
-        RoutedHalfKQuantKernel<ExpertFormat::kQ4_K, 96, true>
+        RoutedHalfKQuantKernel<ExpertFormat::kQ4_K, kRoutedHalfTileRows, true>
             <<<geglu_grid, kThreads, 0, stream>>>(
                 wb, xh, tiles, pad_bounds, rows_in, rows_out, out, oh, m, k);
       } else {
-        RoutedHalfKQuantKernel<ExpertFormat::kQ4_K, 96>
+        RoutedHalfKQuantKernel<ExpertFormat::kQ4_K, kRoutedHalfTileRows>
             <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
                                             rows_out, out, oh, m, k);
       }
       return true;
     case ExpertFormat::kQ5_K:
       if (geglu) {
-        RoutedHalfKQuantKernel<ExpertFormat::kQ5_K, 96, true>
+        RoutedHalfKQuantKernel<ExpertFormat::kQ5_K, kRoutedHalfTileRows, true>
             <<<geglu_grid, kThreads, 0, stream>>>(
                 wb, xh, tiles, pad_bounds, rows_in, rows_out, out, oh, m, k);
       } else {
-        RoutedHalfKQuantKernel<ExpertFormat::kQ5_K, 96>
+        RoutedHalfKQuantKernel<ExpertFormat::kQ5_K, kRoutedHalfTileRows>
             <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
                                             rows_out, out, oh, m, k);
       }
       return true;
     case ExpertFormat::kQ6_K:
       if (geglu) {
-        RoutedHalfKQuantKernel<ExpertFormat::kQ6_K, 96, true>
+        RoutedHalfKQuantKernel<ExpertFormat::kQ6_K, kRoutedHalfTileRows, true>
             <<<geglu_grid, kThreads, 0, stream>>>(
                 wb, xh, tiles, pad_bounds, rows_in, rows_out, out, oh, m, k);
       } else {
-        RoutedHalfKQuantKernel<ExpertFormat::kQ6_K, 96>
+        RoutedHalfKQuantKernel<ExpertFormat::kQ6_K, kRoutedHalfTileRows>
             <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
                                             rows_out, out, oh, m, k);
       }
@@ -1283,7 +1283,7 @@ bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
       if (out == nullptr || k % kDownStageK != 0) {
         return false;
       }
-      RoutedHalfDownKernel<ExpertFormat::kQ5_1, 96>
+      RoutedHalfDownKernel<ExpertFormat::kQ5_1, kRoutedHalfTileRows>
           <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
                                           rows_out, out, nullptr, m, k);
       return true;
@@ -1292,12 +1292,12 @@ bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
         return false;
       }
       if (geglu) {
-        RoutedHalfDownKernel<ExpertFormat::kQ8_0, 96, true>
+        RoutedHalfDownKernel<ExpertFormat::kQ8_0, kRoutedHalfTileRows, true>
             <<<geglu_grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds,
                                                   rows_in, rows_out, nullptr,
                                                   oh, m, k);
       } else {
-        RoutedHalfDownKernel<ExpertFormat::kQ8_0, 96>
+        RoutedHalfDownKernel<ExpertFormat::kQ8_0, kRoutedHalfTileRows>
             <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
                                             rows_out, out, nullptr, m, k);
       }
@@ -1307,12 +1307,12 @@ bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
         return false;
       }
       if (geglu) {
-        RoutedHalfDownKernel<ExpertFormat::kQ4_0, 96, true>
+        RoutedHalfDownKernel<ExpertFormat::kQ4_0, kRoutedHalfTileRows, true>
             <<<geglu_grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds,
                                                   rows_in, rows_out, nullptr,
                                                   oh, m, k);
       } else {
-        RoutedHalfDownKernel<ExpertFormat::kQ4_0, 96>
+        RoutedHalfDownKernel<ExpertFormat::kQ4_0, kRoutedHalfTileRows>
             <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
                                             rows_out, out, nullptr, m, k);
       }
@@ -1321,7 +1321,7 @@ bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
       if (out == nullptr || k % kDownStageK != 0) {
         return false;
       }
-      RoutedHalfDownKernel<ExpertFormat::kQ5_0, 96>
+      RoutedHalfDownKernel<ExpertFormat::kQ5_0, kRoutedHalfTileRows>
           <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
                                           rows_out, out, nullptr, m, k);
       return true;
@@ -1330,12 +1330,12 @@ bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
         return false;
       }
       if (geglu) {
-        RoutedHalfDownKernel<ExpertFormat::kF16, 96, true>
+        RoutedHalfDownKernel<ExpertFormat::kF16, kRoutedHalfTileRows, true>
             <<<geglu_grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds,
                                                   rows_in, rows_out, nullptr,
                                                   oh, m, k);
       } else {
-        RoutedHalfDownKernel<ExpertFormat::kF16, 96>
+        RoutedHalfDownKernel<ExpertFormat::kF16, kRoutedHalfTileRows>
             <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
                                             rows_out, out, nullptr, m, k);
       }
