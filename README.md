@@ -12,6 +12,10 @@ verification on Strix Halo. Gemma 4 isn't on upstream's roadmap, so it is
 maintained here on the default branch, `feat/gemma`. Upstream
 [PR #426](https://github.com/gufo-org/gufo/pull/426) stays open for feedback.
 
+> [!NOTE]
+> **What's new:** the [Gemma changelog](CHANGELOG_GEMMA.md) lists the fork's
+> changes, newest first, with a link to each pull request.
+
 ### What it runs
 
 - **Gemma 4 26B-A4B** (mixture of experts): Unsloth UD-Q4_K_XL, UD-Q6_K_XL,
@@ -38,18 +42,21 @@ maintained here on the default branch, `feat/gemma`. Upstream
 Benchmarks against llama.cpp and quality reports are in each model card:
 [26B-A4B](docs/models/gemma-4-26b-a4b/README.md),
 [31B](docs/models/gemma-4-31b/README.md) and
-[31B QAT](docs/models/gemma-4-31b-qat/README.md). The fork's own changes are
-listed in the [Gemma changelog](CHANGELOG_GEMMA.md).
+[31B QAT](docs/models/gemma-4-31b-qat/README.md).
 
 ### Status
 
 The fork merges upstream `main` periodically and is currently synced with
-v0.15.0. Like upstream, it is Strix Halo only (`gfx1151`, Linux).
-Everything below this section is upstream's README; its build steps apply
+v0.17.0. Like upstream, it is Strix Halo only (`gfx1151`, Linux).
+Everything below the line is upstream's README; its build steps apply
 unchanged ([Build from source](#build-from-source)). If a Gemma 4 GGUF doesn't
 load, open an issue on this fork with the file name. Bug reports, benchmark
 numbers from other setups, feature requests and PRs are welcome here.
 Thanks to the Gufo maintainers for the engine this builds on.
+
+---
+
+## Upstream Gufo README
 
 Gufo is a vertical local inference engine specifically built and optimized for the AMD Strix Halo hardware:
 Ryzen AI MAX+ 395 systems with Radeon 8060S (`gfx1151`), up to 128 GiB of unified memory.
