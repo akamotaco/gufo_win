@@ -11,6 +11,7 @@
 #include <utility>
 
 #include "src/core/hip/managed_alloc.hpp"
+#include "src/core/quant/ggml_dequant.hpp"
 #include "src/core/hip/weight_upload.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
@@ -186,6 +187,41 @@ struct Uploader {
     return d;
   }
 
+  /// A small Q8_0 tensor dequantized on the host and uploaded as F32.
+  DeviceTensor CopyQ8_0AsF32(const TensorRef& t) {
+    DeviceTensor d;
+    const std::size_t count = t.cols * t.rows;
+    const std::size_t size = count * sizeof(float);
+    void* ptr = nullptr;
+    if (!ok) {
+      return d;
+    }
+    if (Allocate(&ptr, size + kTailMargin) != hipSuccess) {
+      Fail("device allocation failed for F32 copy");
+      return d;
+    }
+    if (Measuring()) {
+      return d;
+    }
+    allocations.push_back(ptr);
+    bytes += size + kTailMargin;
+    std::vector<float> values(count);
+    gufo::quant::DequantizeQ8_0(t.data, values.data(), count);
+    if (hipMemcpy(ptr, values.data(), size, hipMemcpyHostToDevice) !=
+        hipSuccess) {
+      Fail("F32 copy upload failed");
+      return d;
+    }
+    (void)hipMemsetAsync(static_cast<std::uint8_t*>(ptr) + size, 0, kTailMargin,
+                         nullptr);
+    d.data = ptr;
+    d.type = core::GgmlType::kF32;
+    d.cols = static_cast<std::uint32_t>(t.cols);
+    d.rows = static_cast<std::uint32_t>(t.rows);
+    d.experts = 1;
+    return d;
+  }
+
   DeviceTensor CopyPleConv(const TensorRef& t) {
     if (t.type != core::GgmlType::kBF16) {
       return Copy(t);
@@ -351,7 +387,13 @@ struct Uploader {
   }
 
   DeviceMixer Mixer(const HcMixer& m) {
-    return {Copy(m.norm), Copy(m.down), Copy(m.up), Copy(m.inject)};
+    // Only an F32 inject projection is fused into the mixer and its combine;
+    // the separate quantized route is the draft block's and drifts the
+    // residual stream when a quantized file (AtomicChat's Q8_0) puts it in
+    // every layer, so its 160 KB per mixer are expanded once.
+    return {Copy(m.norm), Copy(m.down), Copy(m.up),
+            m.inject.type == core::GgmlType::kQ8_0 ? CopyQ8_0AsF32(m.inject)
+                                                   : Copy(m.inject)};
   }
 
   DeviceLayer Layer(const LayerWeights& l) {
