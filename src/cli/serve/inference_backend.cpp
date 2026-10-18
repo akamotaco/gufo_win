@@ -2703,6 +2703,12 @@ public:
                                       ? model_->PrefillThroughCapacity()
                                       : model_->PrefillCapacity()})));
     std::string error;
+    // Diagnostic for "activation quantization failed": a HIP error already
+    // pending here was left by earlier work, not by this chunk. Logged only.
+    if (const hipError_t pending = hipPeekAtLastError(); pending != hipSuccess)
+      Logger::Warn("chat", std::string("event=hip_error_pending stage=before_prefill_chunk offset=") +
+                               std::to_string(offset) + " tokens=" + std::to_string(prompt.size()) +
+                               " error=" + hipGetErrorName(pending));
     if (!qfn.session().Sync(prefix, &error, next)) {
       qfn.set_position(0);
       throw std::runtime_error("Qwen3.8-Flash-Next prefill failed: " + error);
