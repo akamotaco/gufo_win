@@ -1,9 +1,10 @@
 # Gemma 4 continuation adapter (design)
 
-**Status:** design and prototyping on `feat/gemma-cache`. Step 1 (window rows
-in the shared layer) is done; nothing is wired into Gemma serving yet. Gemma 4
-serves through the legacy `ContinuationCache` with its own device-resident
-`SessionSnapshot`. Upstream's switch-over
+**Status:** prototype on `feat/gemma-cache`. Steps 1 and 2 are done: window
+rows in the shared layer, and Gemma serving through the component cache
+(results below); in-place restore and batched transfers are next. Before
+this, Gemma 4 served through the legacy `ContinuationCache` with its own
+device-resident `SessionSnapshot`. Upstream's switch-over
 ([card 19](../../cache-redesign/cards/19-switch-over.md)) deletes that cache
 and the runner snapshot hooks, so Gemma needs a `cache::Adapter` for the
 component cache before that change merges. The component cache also brings
@@ -197,3 +198,27 @@ had cost 3.4% before).
 4. In-pass checkpoints and the disk tier.
 5. Functional cache, continuation and image suites on 26B and 31B, AR and
    MTP, against the legacy path; then remove Gemma's legacy snapshot hooks.
+
+## Results so far
+
+- **Native:** `gemma4.continuation` restores a 1,980-token checkpoint (ring
+  1,280 slots, so its window has wrapped) into another slot and into its own
+  slot after the session moved a whole ring further. A capture of the
+  restored slot equals the original checkpoint byte for byte, and greedy
+  decoding reproduces the original logits and tokens; with the MTP drafter,
+  each fixed-length cycle drafts and accepts as before the restore. Passes on
+  26B-A4B and 31B UD-Q4_K_XL. A window row misplaced only on load, or a
+  corrupted hidden state, fails it.
+- **Functional, 26B-A4B MTP (`--sessions 2 --context 32768`):** `cache`,
+  `cache-edits`, `cache-growth`, `cache-depth`, `cache-rotation`,
+  `cache-concurrency`, `cache-shared-prefix`, `long-context` and
+  `state-edges` pass.
+- **Against the legacy cache** (the production build of `1b7b154e` as the
+  control, one run each): 2,479 of 2,952 timing measures pass. The other 473
+  are mostly restores, queueing and first tokens 5–8 ms slower per request
+  (the prefix is copied where the legacy cache skipped blocks the session
+  still held) and shared-prefix captures about 8 ms slower (window chunks are
+  copied at capture). Three requests re-prefill 3–7 tokens the legacy cache
+  served: under a full 32 GiB budget (both caches ran full in this run) the
+  component cache evicted their full-prompt retry copies first.
+
