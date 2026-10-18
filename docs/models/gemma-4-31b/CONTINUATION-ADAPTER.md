@@ -1,9 +1,9 @@
 # Gemma 4 continuation adapter (design)
 
 **Status:** prototype on `feat/gemma-cache`. Steps 1–3 are done: window
-rows in the shared layer, Gemma serving through the component cache, and
-in-place restore, and batched gather transfers (results below); the
-reply-end checkpoint is next. Before
+rows in the shared layer, Gemma serving through the component cache,
+in-place restore, batched gather transfers and the capture and restore
+timing fixes (results below); the reply-end checkpoint is next. Before
 this, Gemma 4 served through the legacy `ContinuationCache` with its own
 device-resident `SessionSnapshot`. Upstream's switch-over
 ([card 19](../../cache-redesign/cards/19-switch-over.md)) deletes that cache
@@ -43,7 +43,7 @@ window rows; consecutive checkpoints of one history share all but their new
 chunks and tails.
 
 Components are per layer (31B: 120 KV components; 26B: 60) because KV is
-layer-major and a borrowed range must be one contiguous span. Not captured:
+layer-major and each component's rows must be one contiguous span. Not captured:
 the prompt-lookup index and draft-vocabulary table (rebuilt from tokens), the
 draft-policy calibration (model or request owned), lookahead rows, sibling
 spare keys and the pending token (request owned or past the frontier). The
@@ -150,10 +150,21 @@ had cost 3.4% before).
   restore, reset and destruction. A write of positions [a, b) also guards
   [a − ring, b − ring) of every window component (the rows it evicts). Guards
   run under the model mutex, so preservation copies must not take it.
-- **Capture ordering:** record an event on the executor stream after the
-  session's last write and make the transfer stream wait on it; borrowed views
-  need the same before `copy_observed_rows`. Logits come from the device buffer
-  while `logits_on_device_` is set.
+- **Capture ordering:** the executor reports every call that writes a
+  session's rows, hidden state or logits (`ContinuationFences`). Before it
+  queues one, the adapter records an event for each other session written
+  since its last event; a copy of that session waits for the event, not for
+  the work queued after it (another session's prefill). Copies of the session
+  that wrote last wait for everything queued. Logits come from the device
+  buffer while `logits_on_device_` is set.
+- **Copy stream:** the adapter gathers on its own high-priority stream and
+  completes transfers with events on it. The cache's pooled streams carry no
+  work: some share a hardware queue with the executor stream, and a
+  completion recorded there waited behind a whole queued prefill chunk.
+- **Rows are copied, not lent:** a lent row is copied anyway before the slot
+  is reassigned or restored in place, one chunk per wait (8–12 ms for a
+  22K-token prompt's global rows), while a capture gathers it at about
+  100 GB/s.
 - **Prefill planning:** `PlanPrefill` mirrors `Session::Extend` (2,048-row
   chunks, remainders of 16 rows or fewer absorbed) and never places a boundary
   inside an image span. In-pass checkpoints generalize today's prompt
@@ -243,6 +254,37 @@ had cost 3.4% before).
   before). Still open: queueing on shared-prefix requests (+4.7 ms), decode
   beside concurrent captures in `cache-concurrency` (+9.5 ms, unchanged by
   batching), and `long_json_stop`'s retry copy.
+- **Capture and restore timing:** three changes, against the same legacy
+  control. Rows are copied at capture (above), which removes the 8–12 ms of
+  one-chunk-per-wait preservation from slot reuse and in-place restores:
+  `cache-shared-prefix` restores of 200 MB take 3.2–3.6 ms (9.5–16.7 ms
+  before; legacy 2.4–2.9 ms) and cold queueing 0.9–2.4 ms (up to 14.6 ms).
+  Copies order after their own session's writes on the adapter's stream: a
+  capture during another session's prefill (`cache-concurrency`
+  `unrelated`) takes 4–5 ms instead of 270–480 ms (legacy 430 ms), and both
+  requests reach their first token about 42 ms sooner than legacy. Without
+  the per-session events the copy stream alone still waited 612 ms. A
+  restore picks the slot it would have picked anyway, and keeps that slot's
+  rows when its live frontier extends the checkpoint's tokens and inputs.
+  26B AR decode stays at 55.64–55.66 tok/s. Against the legacy control,
+  2,804 of 2,952 timing measures pass (2,709 before). The remaining flags:
+  - Prefills split once more where a prompt shares more with a stored prompt
+    than with its restored checkpoint (`cache-edits` edits, two
+    `cache-concurrency` requests: 1,187 + 4 + 7 tokens instead of
+    1,191 + 7, +37–44 ms on 26B). Upstream's shared-prefix checkpoint stops
+    the pass at the divergence point; Gemma has no in-pass capture.
+  - Decode order: when two requests become ready together they decode
+    batched (45 ms per step for both) instead of one after the other
+    (35 ms each); which happens varies between runs on both paths.
+  - Legacy restores report 0.3 ms for 263 MB, less than the copy takes; its
+    time to first token for those requests is within 1% of the component
+    path.
+  - Under a full 32 GiB budget a capture spends about 2.4 ms per eviction in
+    retention (up to five per capture); the same capture took 11.8 ms in one
+    run and 33 ms in another (legacy 13 ms).
+  - Acquisition runs three to four prefix-index lookups, 0.4–1.4 ms more
+    queueing than legacy on cold requests.
+  - `long_json_stop` still loses its retry copy under the full budget.
 - **Images (26B MTP with its sidecar):** `image-inputs`, `tool-images`,
   `conversation` and the image cancellation history pass. The component
   path had placed a grid checkpoint inside an image span, which Gemma
