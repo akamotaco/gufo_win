@@ -3183,26 +3183,11 @@ std::int32_t Gemma4EngineToken(TextRunnerToken token) {
 
 class Gemma4TextRunnerState final : public TextRunnerState {
 public:
-  Gemma4TextRunnerState(const std::shared_ptr<Gemma4Model>& model,
-                        std::uint32_t max_context) {
-    std::string error;
-    owned_ = model->CreateSession(max_context, &error);
-    if (owned_ == nullptr) {
-      throw std::runtime_error("Failed to create Gemma 4 session: " + error);
-    }
-    session_ = owned_.get();
-  }
   /// The session of a component-cache slot, owned by the adapter.
   Gemma4TextRunnerState(Gemma4Session& session, cache::Adapter& adapter,
                         cache::Slot& slot)
       : session_(&session), adapter_(&adapter), slot_(&slot) {}
-  void Invalidate() noexcept override {
-    if (adapter_ != nullptr) {
-      (void)adapter_->Invalidate(*slot_);
-    } else {
-      session_->Reset();
-    }
-  }
+  void Invalidate() noexcept override { (void)adapter_->Invalidate(*slot_); }
   void SetCancellationCheck(const CancellationCheck&) override {}
   [[nodiscard]] TextRunnerMeasuredResources MeasuredResources()
       const noexcept override {
@@ -3234,7 +3219,6 @@ public:
   std::vector<std::size_t>& lookahead_stops() { return lookahead_stops_; }
 
 private:
-  std::unique_ptr<Gemma4Session> owned_;
   Gemma4Session* session_{};
   cache::Adapter* adapter_{};
   cache::Slot* slot_{};
@@ -3262,25 +3246,6 @@ struct Gemma4ImageContext final : TextPromptContext {
     }
     return position;
   }
-};
-
-class Gemma4TextRunnerSnapshot final : public TextRunnerSnapshot {
-public:
-  Gemma4TextRunnerSnapshot(
-      std::shared_ptr<Gemma4Model> model,
-      std::unique_ptr<models::gemma4::SessionSnapshot> snapshot,
-      std::size_t position)
-      : model(std::move(model)),
-        snapshot(std::move(snapshot)),
-        position(position) {}
-  [[nodiscard]] std::size_t PayloadBytes() const noexcept override {
-    return snapshot == nullptr
-               ? 0
-               : static_cast<std::size_t>(snapshot->SizeBytes());
-  }
-  std::shared_ptr<Gemma4Model> model;
-  std::unique_ptr<models::gemma4::SessionSnapshot> snapshot;
-  std::size_t position;
 };
 
 Gemma4TextRunnerState& RequireGemma4State(TextRunnerState& state) {
@@ -3724,8 +3689,9 @@ public:
     return model_->Decode(converted);
   }
 
+  // Sessions belong to component-cache slots (BindComponentState).
   [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
-    return std::make_unique<Gemma4TextRunnerState>(model_, max_context_);
+    throw std::logic_error("Gemma 4 serves through the component cache");
   }
 
   void PreparePrefixReuse(
@@ -3991,83 +3957,7 @@ public:
     return RequireGemma4State(state).session().Position();
   }
 
-  [[nodiscard]] std::size_t SnapshotPayloadBytes(
-      const TextRunnerState& state) const override {
-    return static_cast<std::size_t>(
-        RequireGemma4State(state).session().SnapshotBytes());
-  }
-
-  [[nodiscard]] std::unique_ptr<TextRunnerSnapshot> Snapshot(
-      const TextRunnerState& state) const override {
-    const auto& session = RequireGemma4State(state).session();
-    std::string error;
-    auto snapshot = session.SaveSnapshot(&error);
-    if (snapshot == nullptr) {
-      throw std::runtime_error("Gemma 4 snapshot failed: " + error);
-    }
-    return std::make_unique<Gemma4TextRunnerSnapshot>(
-        model_, std::move(snapshot), session.Position());
-  }
-
-  void RestoreOrFork(TextRunnerState& state,
-                     const TextRunnerSnapshot& snapshot) const override {
-    const auto& owned = Owned(snapshot);
-    auto& restored = RequireGemma4State(state);
-    std::string error;
-    if (!restored.session().RestoreSnapshot(*owned.snapshot, &error)) {
-      restored.Invalidate();
-      throw std::runtime_error("Gemma 4 snapshot restore failed: " + error);
-    }
-  }
-
-  [[nodiscard]] std::size_t PersistentSnapshotPayloadBytes(
-      const TextRunnerSnapshot& snapshot) const override {
-    return Owned(snapshot).PayloadBytes();
-  }
-
-  [[nodiscard]] std::size_t SerializePersistentSnapshot(
-      const TextRunnerSnapshot& snapshot,
-      std::span<std::uint8_t> destination) const override {
-    const auto& owned = Owned(snapshot);
-    if (destination.size() != owned.PayloadBytes() ||
-        !owned.snapshot->CopyTo(destination)) {
-      throw std::invalid_argument(
-          "Gemma 4 persistent snapshot serialization failed");
-    }
-    return destination.size();
-  }
-
-  void StreamPersistentSnapshot(const TextRunnerSnapshot& snapshot,
-                                const SnapshotSink& sink) const override {
-    if (!Owned(snapshot).snapshot->Stream(sink)) {
-      throw std::runtime_error("Gemma 4 persistent snapshot copy failed");
-    }
-  }
-
-  void RestorePersistentSnapshot(
-      TextRunnerState& state,
-      std::span<const std::uint8_t> payload) const override {
-    auto& restored = RequireGemma4State(state);
-    std::string error;
-    if (!restored.session().RestoreSnapshot(payload, &error)) {
-      restored.Invalidate();
-      throw std::runtime_error("Gemma 4 persistent snapshot restore failed: " +
-                               error);
-    }
-  }
-
 private:
-  [[nodiscard]] const Gemma4TextRunnerSnapshot& Owned(
-      const TextRunnerSnapshot& snapshot) const {
-    const auto* owned =
-        dynamic_cast<const Gemma4TextRunnerSnapshot*>(&snapshot);
-    if (owned == nullptr || owned->model.get() != model_.get() ||
-        owned->snapshot == nullptr) {
-      throw std::invalid_argument(
-          "Gemma 4 snapshot does not belong to this model");
-    }
-    return *owned;
-  }
   static std::span<const tokenization::ChatTool> Tools(
       const ChatRequest& request) {
     return request.tool_choice == ChatRequest::ToolChoice::kNone
