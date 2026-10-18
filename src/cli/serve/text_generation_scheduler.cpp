@@ -31,8 +31,10 @@ namespace gufo::server {
 namespace {
 
 constexpr std::size_t kDecodeProgressInterval = 50;
-// How long a decode step waits for a finishing prompt capture to join it.
+// How long a decode step waits for a finishing prompt capture to join it,
+// and the most prefill (the assistant framing) the joining peer may have left.
 constexpr auto kCaptureJoinWait = std::chrono::milliseconds(10);
+constexpr std::size_t kCaptureJoinTokens = 16;
 constexpr std::size_t kNoSession = std::numeric_limits<std::size_t>::max();
 
 struct OutputBudget {
@@ -1940,9 +1942,10 @@ struct TextGenerationScheduler::Impl {
 
       progress.fetch_add(1, std::memory_order_relaxed);
       // Before the first decode of a new batch, a peer that waits only for
-      // its prompt capture (a few milliseconds) and has little prefill left
-      // gets to join, as one still prefilling does below; otherwise its first
-      // token waits a whole decode step.
+      // its prompt capture (a few milliseconds) and then the assistant
+      // framing gets to join; otherwise its first token waits a whole decode
+      // step. A peer with more prefill left would delay the ready decoders
+      // by that prefill instead.
       if (!decoding.empty() && !capturing.empty() &&
           std::all_of(decoding.begin(), decoding.end(),
                       [](const auto& request) {
@@ -1955,7 +1958,7 @@ struct TextGenerationScheduler::Impl {
         for (auto it = capturing.begin(); it != capturing.end();) {
           const auto& peer = (*it)->runner_request;
           if (peer.prompt_tokens() - peer.prefill_position() >
-                  prefill_policy.decode_active_tokens ||
+                  kCaptureJoinTokens ||
               !peer.AwaitSnapshot(
                   std::max(deadline - Clock::now(), Clock::duration::zero()))) {
             ++it;
