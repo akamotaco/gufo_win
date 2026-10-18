@@ -3,7 +3,7 @@
 **Status:** prototype on `feat/gemma-cache`. Steps 1–3 are done: window
 rows in the shared layer, Gemma serving through the component cache,
 in-place restore, batched gather transfers and the capture and restore
-timing fixes (results below); the reply-end checkpoint is next. Before
+timing fixes (results below). Before
 this, Gemma 4 served through the legacy `ContinuationCache` with its own
 device-resident `SessionSnapshot`. Upstream's switch-over
 ([card 19](../../cache-redesign/cards/19-switch-over.md)) deletes that cache
@@ -178,15 +178,15 @@ had cost 3.4% before).
 ## Decisions
 
 - **Swiped-away replies:** a same-conversation retry restores in place and
-  discards the reply the slot holds. Before discarding it, the slot captures a
-  checkpoint at the reply's end, unless the reply contained reasoning: Gemma's
-  template drops thoughts from history, so the next request cannot reuse past
-  the reply's start. The capture copies the reply's rows out (31B 870 KB per
-  token, 26B 218 KB; about 4.4 / 1.1 ms for 500 tokens) and makes continuing
-  from an earlier swipe free instead of re-prefilling it (500 tokens: about
-  0.15 s on 26B, 1.1–1.3 s on 31B at 16–32K). With `--sessions 2` the legacy
-  path keeps the latest reply live by restoring into the other session, at the
-  cost of copying the whole prefix there once.
+  discards the reply the slot holds; no checkpoint keeps that reply. Gemma's
+  template never lets a later chat turn reuse a reply: history drops the
+  reasoning before the last user message, and with thinking off the
+  generation prompt's empty reasoning block is not rendered in history. On
+  26B, a second chat turn reused 20 of the first turn's 27 prompt tokens
+  (thinking off; the reply ended at 96) and 30 of 30 (thinking on). Only a
+  tool-call step with thinking on continues past its reply (158 of 158), and
+  a retry of that step replaces the reply. A reply-end checkpoint would copy
+  1–8 ms per retry and never be restored.
 - **Window chunks of 64 rows**, global chunks of 256. Persistence time with
   four times as many chunk files is measured before it is kept.
 - **Window bytes count as fixed per-checkpoint state** in retention's "cheap
