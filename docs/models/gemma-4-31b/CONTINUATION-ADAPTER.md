@@ -302,6 +302,31 @@ had cost 3.4% before).
   long prompts (7,004.7 / 7,008.5 ms, then 7,233.1 / 7,249.4 ms: the host
   drifts 3–4% between pairs, so long-prefill flags against an older legacy
   run are not from this). 26B AR decode stays at 55.63 tok/s.
+- **Evictions and first-batch decode:** sizing a removed checkpoint's
+  unique payload no longer rescans every peer's components (0.91 to 0.16 ms
+  per removal on average; a byte-pressure eviction's removal 2.1 to 0.6 ms).
+  Two requests that finish prefill together decode as one batch again: a
+  peer whose prompt capture is still running and has only the assistant
+  framing left gets up to 10 ms to join, instead of waiting out the other's
+  first decode step (`depth_branches`: second first token at 124–128 ms in
+  every run, 177–184 ms in two of three before; legacy 123 ms). A wider
+  join (any peer with up to 512 tokens left) made a ready request wait for
+  the peer's prefill (`long_tasks` second request +165 ms) and was narrowed.
+- **After merging upstream #477, #636 and the smaller #649 workloads:** the
+  128-record limit now binds before the byte budget. The component cache
+  then refuses an unchanged retry's full-prompt copy rather than displace
+  another conversation's last checkpoint, as upstream intends; it now logs
+  that refusal as a refused capture, as the functional checks expect. Legacy
+  keeps those copies, so four retries prefill 7–22 tokens more (about 35 ms
+  each). Against a legacy control recorded right before, every functional
+  check passes and 2,830 of 2,937 timing measures pass. The two arms restart
+  their servers at different points (each on its own cache pressure), so
+  `cache-shared-prefix` and `state-edges` compare different histories there;
+  run alone, `long_tasks_2` restores in 3.1–3.3 ms (legacy 2.4) and the
+  first requests after a start cost the same on both. A follower's prefill
+  splits once more while the leader's capture is pending (the scheduler
+  bounds prefill steps while a peer waits; legacy's capture blocks instead),
+  within 1.3% of legacy's first-token times alone.
 - **Images (26B MTP with its sidecar):** `image-inputs`, `tool-images`,
   `conversation` and the image cancellation history pass. The component
   path had placed a grid checkpoint inside an image span, which Gemma
