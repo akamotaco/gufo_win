@@ -113,6 +113,13 @@ grep -rn 'syscall(SYS_\|/proc/\|/sys/\|io_uring' src                           #
   `--prompt-lookup` 부분은 버리고 `tuning.hpp` 스위치(copy_kernels, recorded_rollback, keep_rollback_rows, flush_before_wait,
   flag_waits, fast_sampling, verify_graph_candidates, fused_hc_down, hot_first_upload)만 옮기는 방향을 권한다.
   검증: `bench --logit-eval`로 스위치 on/off bit-identical 확인(WINDOWS.md "Windows-validated switches").
+- [ ] **GPU 메모리 넘침 방지**: `src/core/platform/device_memory.cpp`의 Windows `DeviceMemoryInfo`는 여유 공간을
+  "전용(LOCAL) 여유 + 공유(NON_LOCAL) 여유"로 돌려준다. 그래서 gufo는 공유 메모리(시스템 RAM)까지 용량으로 보고
+  carve-out을 넘겨 할당한다. 2026-10-18 측정: Flash-Next 2세션×262K + MTP + 비전이 전용 95.3GB(한계)에 붙었고,
+  요청이 시작되자 페이지 파일에 약 20MB를 썼다(Pages Output 1,396/s). 1세션×262K는 91.4GB에서 쓰기 0.
+  Rulith는 `manager.py` `host_expert_layers()`에서 "carve×0.96 − 다른 프로그램 사용량"을 넘는 부분을 고정 호스트
+  메모리로 직접 옮겨 이 문제를 피했다. 지금은 `..	ool\gufo_select.py`의 사전 점검(합계 93.4GB)으로만 막는다.
+  후보: LOCAL 여유만 보고하도록 바꾸기(체크포인트 용량·세션 판단에 미치는 영향 확인 필요).
 - [ ] Qwen3.8-27B Windows 튜닝 14커밋, Qwen3.6-A3B 4커밋 (목록은 `..\gufo-windows.md`).
 - [ ] 테스트 미포팅: `BUILD_TESTING=OFF`로만 빌드했다. 본가가 새로 쓴 테스트 코드(`tests/cli/http_server_test.cpp` 2170행 이후 등)에
   생 `::close`/`timeval` 소켓 호출이 남아 있어 `gpu-test` 프리셋은 아직 빌드되지 않을 것이다.
