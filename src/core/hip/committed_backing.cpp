@@ -11,6 +11,8 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <mutex>
 #include <stdexcept>
@@ -66,19 +68,46 @@ void UnpinPages(int ring) {
   }
 }
 
+// GPU registration tracks host memory in 2 MiB blocks. Unmapping another
+// mapping that shares a block with a registered range, such as a thread
+// stack glibc frees next to a segment, evicts the process's GPU queues until
+// the range is revalidated: 8-26 ms for 1 GiB. Each segment's mapping
+// therefore covers whole blocks; only `bytes` of it are registered.
+constexpr std::size_t kRegistrationBlock = 2ULL << 20;
+std::size_t MappedBytes(std::size_t bytes) {
+  return (bytes + kRegistrationBlock - 1) / kRegistrationBlock *
+         kRegistrationBlock;
+}
+void* MapBlocks(std::size_t bytes) {
+  const auto mapped = MappedBytes(bytes);
+  void* raw = mmap(nullptr, mapped + kRegistrationBlock, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (raw == MAP_FAILED)
+    return nullptr;
+  auto* begin = static_cast<std::byte*>(raw);
+  const auto head =
+      (kRegistrationBlock -
+       reinterpret_cast<std::uintptr_t>(raw) % kRegistrationBlock) %
+      kRegistrationBlock;
+  if (head)
+    munmap(begin, head);
+  munmap(begin + head + mapped, kRegistrationBlock - head);
+  return begin + head;
+}
+
 // Ordinary anonymous pages, then registered with the GPU. Opt out of THP
 // before population: later huge-page promotion can invalidate GPU mappings.
 CommittedPages CommitPages(std::size_t bytes) {
   constexpr std::size_t page = 4096;
   const auto workers = std::min<std::size_t>(4, bytes / (32ULL << 20));
-  void* data = mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
-                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  if (data == MAP_FAILED)
+  void* data = MapBlocks(bytes);
+  if (!data)
     return {};
   // Kernels built without THP reject this advice with EINVAL; their pages
   // cannot be promoted. All other failures must release the mapping.
-  if (madvise(data, bytes, MADV_NOHUGEPAGE) != 0 && errno != EINVAL) {
-    munmap(data, bytes);
+  if (madvise(data, MappedBytes(bytes), MADV_NOHUGEPAGE) != 0 &&
+      errno != EINVAL) {
+    munmap(data, MappedBytes(bytes));
     return {};
   }
   std::atomic<bool> populated{true};
@@ -108,13 +137,13 @@ CommittedPages CommitPages(std::size_t bytes) {
   } else
     populate(0, bytes);
   if (!populated.load(std::memory_order_relaxed)) {
-    munmap(data, bytes);
+    munmap(data, MappedBytes(bytes));
     return {};
   }
   const int pin = PinPages(data, bytes);
   if (hipHostRegister(data, bytes, hipHostRegisterDefault) != hipSuccess) {
     UnpinPages(pin);
-    munmap(data, bytes);
+    munmap(data, MappedBytes(bytes));
     return {};
   }
   return {data, pin};
@@ -122,7 +151,7 @@ CommittedPages CommitPages(std::size_t bytes) {
 void ReleasePages(CommittedPages pages, std::size_t bytes) {
   (void)hipHostUnregister(pages.data);
   UnpinPages(pages.pin);
-  munmap(pages.data, bytes);
+  munmap(pages.data, MappedBytes(bytes));
 }
 }  // namespace
 struct BackingState {
