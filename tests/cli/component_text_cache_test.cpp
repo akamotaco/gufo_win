@@ -38,6 +38,10 @@ public:
   // token also depends on the window rows, so a wrong restore changes it.
   cache::Rows window_rows{}, ring_rows{};
   bool in_place{};
+  // Transfers share one stream per batch; `streams` counts the leases.
+  bool share_streams{};
+  std::size_t transfer_batch{4};
+  mutable std::atomic<std::size_t> streams{};
   mutable std::size_t through_calls{};
   bool UsesComponentCache() const override { return true; }
   TextRunnerDescriptor Descriptor() const override {
@@ -110,9 +114,11 @@ public:
         -> std::unique_ptr<cache::Stream> {
       if (defer_idle && std::this_thread::get_id() != foreground)
         return {};
+      ++streams;
       return std::make_unique<FakeStream>(true);
     };
-    resources->transfer_batch_size = 4;
+    resources->transfer_batch_size = transfer_batch;
+    resources->transfers_share_stream = share_streams;
     resources->allocate = [this, blocks,
                            data](const cache::PayloadRequest& request) {
       for (const auto& block : *blocks) {
@@ -1419,6 +1425,34 @@ std::shared_ptr<Runner> WindowRunner() {
   runner->ring_rows = 16;
   return runner;
 }
+// Transfers that do not run on their stream share one lease across every
+// batch; the restore is otherwise the same.
+void SharedStreamBatchesLeaseOneStream() {
+  std::array<std::size_t, 2> leases{};
+  std::array<TextRunnerToken, 2> tokens{};
+  for (const bool shared : {false, true}) {
+    auto runner = std::make_shared<Runner>();
+    runner->share_streams = shared;
+    runner->transfer_batch = 1;
+    TextRunnerPool pool(runner, 2);
+    std::vector<TextRunnerToken> prompt(40);
+    std::iota(prompt.begin(), prompt.end(), 10);
+    auto initial = pool.Acquire(prompt);
+    Prefill(initial);
+    const auto token = Generate(initial);
+    assert(initial.Commit().snapshot_bytes > 0);
+    const auto before = runner->streams.load();
+    auto retry = pool.Acquire(prompt);
+    leases[shared] = runner->streams - before;
+    assert(retry.cached_prompt_tokens() == prompt.size() &&
+           retry.cache_restore_bytes() > 0);
+    tokens[shared] = Generate(retry);
+    assert(tokens[shared] == token);
+  }
+  // Unshared, each one-transfer batch leases its own stream.
+  assert(leases[false] > 1 && leases[true] == 1 &&
+         tokens[false] == tokens[true]);
+}
 void WindowRowsReuseAndBranches() {
   auto runner = WindowRunner();
   TextRunnerPool pool(runner, 2);
@@ -1649,6 +1683,7 @@ int main() {
   GridDoesNotSuppressFirstDiskPrompt();
   NearTailDiskBranchSurvivesRestart();
   UnbackedDeepRowsSurviveDiskRestart();
+  SharedStreamBatchesLeaseOneStream();
   WindowRowsReuseAndBranches();
   WindowedDeepRowsSurviveDiskRestart();
   SwipeRestoresInPlace();

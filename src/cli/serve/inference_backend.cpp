@@ -3283,7 +3283,11 @@ std::unique_ptr<ComponentCacheResources> CreateGemma4ComponentResources(
   (void)ram;  // Backing sizing follows actual slot allocation below.
   result->adapter = std::move(adapter);
   auto backing = std::make_shared<Backing>();
-  result->transfer_batch_size = 16;
+  // The adapter gathers every transfer on its own copy stream, launching
+  // while the cache queues more: waiting only every 256 transfers keeps that
+  // stream busy when a restore's chunks do not merge into long runs.
+  result->transfer_batch_size = 256;
+  result->transfers_share_stream = true;
   const auto rounded = [](std::size_t bytes) {
     return (bytes + 4095) / 4096 * 4096;
   };

@@ -103,8 +103,10 @@ bool SameOwner(const std::shared_ptr<const void>& a,
 }
 class TransferBatch {
 public:
-  explicit TransferBatch(std::size_t capacity) : capacity_(capacity) {
-    if (!capacity || capacity > jobs_.size())
+  explicit TransferBatch(const ComponentCacheResources& resources)
+      : capacity_(resources.transfer_batch_size),
+        share_stream_(resources.transfers_share_stream) {
+    if (!capacity_ || capacity_ > jobs_.size())
       throw std::invalid_argument("invalid cache transfer batch size");
   }
   // Acquire returns null when the shared pool is momentarily exhausted. Settle
@@ -114,6 +116,15 @@ public:
   void Add(Acquire acquire, Submit submit) {
     if (size_ == capacity_)
       Finish();
+    if (share_stream_) {
+      if (!shared_)
+        shared_ = acquire();
+      if (!shared_)
+        throw std::runtime_error("component cache transfer pool exhausted");
+      auto completion = submit(*shared_);
+      jobs_[size_++].emplace(Job{nullptr, std::move(completion)});
+      return;
+    }
     auto stream = acquire();
     if (!stream && size_) {
       Finish();
@@ -139,8 +150,12 @@ private:
     std::unique_ptr<cache::Stream> stream;
     cache::Completion completion;
   };
-  std::array<std::optional<Job>, 16> jobs_;
+  // Every transfer of a shared-stream batch names this lease; the jobs
+  // settle before it is released.
+  std::unique_ptr<cache::Stream> shared_;
+  std::array<std::optional<Job>, 256> jobs_;
   std::size_t capacity_, size_{};
+  bool share_stream_;
 };
 class Events final : public cache::RetentionEventSink {
 public:
@@ -833,7 +848,7 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
     }
     manifest.components.push_back(std::move(component));
   }
-  TransferBatch transfers(cache->resources->transfer_batch_size);
+  TransferBatch transfers(*cache->resources);
   for (auto& copy : copies) {
     const auto& r = copy.request;
     transfers.Add([&] { return cache->resources->stream(); },
@@ -1079,7 +1094,7 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
             if (c.tail)
               pins.push_back(c.tail->PinRows());
           }
-          TransferBatch transfers(impl_->resources->transfer_batch_size);
+          TransferBatch transfers(*impl_->resources);
           std::size_t base = 0;
           for (const auto& c : checkpoint.Components()) {
             auto load = [&](const cache::RowPin& pin, cache::Rows first,
@@ -1513,7 +1528,7 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
                   throw;
               }
             }
-            TransferBatch transfers(cache.resources->transfer_batch_size);
+            TransferBatch transfers(*cache.resources);
             for (std::size_t i = 0; i < payloads.size();) {
               if (!borrowed[i].empty()) {
                 ++i;
