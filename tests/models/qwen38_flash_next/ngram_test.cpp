@@ -401,9 +401,53 @@ void TestReplacedPath() {
   std::filesystem::remove(name);
 }
 
+void TestQ41Rows() {
+  const auto path = std::filesystem::temp_directory_path() / "qwen38_ngram_q41.bin";
+  constexpr std::uint64_t offset = 4099;
+  constexpr std::uint32_t dim = 160;
+  {
+    std::ofstream file(path, std::ios::binary);
+    file.seekp(offset);
+    for (int row = 0; row < 3; ++row) {
+      for (int b = 0; b < 5; ++b) {
+        const std::uint16_t d = row == 1 ? 0xc000 : 0x3800;
+        const std::uint16_t m = 0xbc00;
+        file.write(reinterpret_cast<const char*>(&d), 2);
+        file.write(reinterpret_cast<const char*>(&m), 2);
+        for (int j = 0; j < 16; ++j) {
+          const unsigned char q = ((15 - j) << 4) | j;
+          file.write(reinterpret_cast<const char*>(&q), 1);
+        }
+      }
+    }
+  }
+  std::string error;
+  auto table = OpenTable(path, offset, 3, dim, gufo::core::GgmlType::kQ4_1, &error);
+  Check(table != nullptr, "Q4_1 open");
+  if (table) {
+    const std::array<std::uint32_t, 4> ids{2, 1, 2, 0};
+    std::array<float, 4 * dim> out{};
+    for (int pass = 0; pass < 2; ++pass) {
+      Check(table->Read(ids, out), "Q4_1 cold and cached gather");
+      for (std::size_t r = 0; r < ids.size(); ++r) {
+        const float d = ids[r] == 1 ? -2.0F : 0.5F;
+        for (std::uint32_t j = 0; j < dim; ++j) {
+          const int q = j % 32 < 16 ? j % 16 : 15 - j % 16;
+          Check(out[r * dim + j] == d * q - 1.0F, "Q4_1 scale minimum nibble order");
+        }
+      }
+    }
+    std::array<std::uint32_t, 1> invalid{3};
+    Check(!table->Read(invalid, std::span(out).first(dim)), "Q4_1 row bounds");
+    table.reset();
+  }
+  std::filesystem::remove(path);
+}
+
 }  // namespace
 
 int main() {
+  TestQ41Rows();
   TestReplacedPath();
   TestHash();
   TestTable();

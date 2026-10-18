@@ -25,10 +25,16 @@ struct Format {
       return {1, 2};
     case GgmlType::kQ8_0:
       return {32, 34};
+    case GgmlType::kQ4_1:
+      return {32, 20};
     case GgmlType::kQ5_1:
       return {32, 24};
     case GgmlType::kIQ4_NL:
       return {32, 18};
+    case GgmlType::kIQ4_XS:
+      return {256, 136};
+    case GgmlType::kIQ3_S:
+      return {256, 110};
     case GgmlType::kQ4_K:
       return {256, 144};
     case GgmlType::kQ5_K:
@@ -140,8 +146,9 @@ struct Binder {
     const std::uint64_t hc_dim = c.HcDim();
     const auto dense = {GgmlType::kQ8_0, GgmlType::kBF16, GgmlType::kF16,
                         GgmlType::kF32};
-    const auto experts = {GgmlType::kQ4_K, GgmlType::kQ5_K, GgmlType::kQ6_K,
-                          GgmlType::kQ5_1, GgmlType::kQ8_0};
+    const auto experts = {GgmlType::kQ4_K,   GgmlType::kQ5_K,  GgmlType::kQ6_K,
+                          GgmlType::kQ5_1,   GgmlType::kQ8_0,  GgmlType::kIQ3_S,
+                          GgmlType::kIQ4_XS, GgmlType::kIQ4_NL};
 
     l.hc_attn = Mixer(p + "hc_attn", c, true);
     l.hc_ffn = Mixer(p + "hc_ffn", c, true);
@@ -195,7 +202,7 @@ struct Binder {
       l.ple_norm_conv =
           Get(p + "ple_norm_conv.weight", hc_dim, 1, 1, {GgmlType::kF32});
       l.ple_conv1d = Get(p + "ple_conv1d.weight", c.ple_conv_kernel, hc_dim, 1,
-                         {GgmlType::kF32});
+                         {GgmlType::kF32, GgmlType::kBF16});
     }
 
     l.router = Get(p + "ffn_gate_inp.weight", hidden, c.num_experts, 1,
@@ -279,7 +286,7 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
       b.Fail("per_layer_token_embd.weight is missing or too short");
     } else {
       w.ple_table = b.Get("per_layer_token_embd.weight", c.ple_head_dim, rows,
-                          1, {GgmlType::kIQ4_NL, GgmlType::kBF16});
+                          1, {GgmlType::kIQ4_NL, GgmlType::kBF16, GgmlType::kQ4_1});
     }
   }
   w.layers.reserve(c.num_layers);

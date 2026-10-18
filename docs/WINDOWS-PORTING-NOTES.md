@@ -137,3 +137,34 @@ grep -rn 'syscall(SYS_\|/proc/\|/sys/\|io_uring' src                           #
 4. `--cache-ram-bytes`를 항상 지정한다. 지정하지 않으면 "남은 RAM의 절반"(이 장비 측정 8.1GB)을 pin한다.
    사용자의 1차 목표는 Windows RAM 100% 사용과 그로 인한 SSD 페이징 쓰기를 막는 것이다.
 5. 모델 로딩 규칙(사용자 합의): Gemma 26B/31B급 하나는 테스트로 올려도 되지만, Qwen3.8-Flash-Next처럼 큰 모델은 먼저 묻는다.
+
+## 7. AtomicChat Flash-Next compatibility (2026-10-18, pending qualification)
+
+Target: pi `local-8080`, `loaded-model (qwen) 262k`, context 262144,
+one session, fixed RAM cache budget, disk checkpoint cache disabled.
+Runtime paging writes must remain zero; the 87 GiB launcher estimate is not a
+measured AtomicChat peak. Do not mark this quant qualified until the checks below pass.
+
+Changes port the IQ3_S/IQ4_XS/IQ4_NL expert kernel and CPU-reference support from
+pixmaate `34bcfddb`. The unrelated lossy Q6_K-to-Q8_0 head conversion is excluded.
+BF16 PLE convolution weights are widened exactly to F32 during upload, including
+the allocation measurement pass. Q4_1 n-gram rows use the existing bounded disk
+reader and 128 MiB row cache, decode on the CPU, and follow the existing F32 GPU
+upload path. No model rewrite or persistent expanded table is created.
+
+Validation still required:
+
+- Build gufo and the `qwen38_flash_next_ngram_test` and
+  `qwen38_flash_next_iq_experts_ops_test` targets with assertions enabled.
+- Run n-gram cold/cache/duplicate-row tests and expert numerical reference tests.
+- Load AtomicChat at 262144 / one session with the configured MTP and vision.
+- Exercise pi tool calls and continuation; replay `tests/functional/pi_agent.py`.
+- Monitor Windows Pages Output/sec, pagefile usage and dedicated GPU allocation
+  through load, a near-limit prompt, decode, continuation and idle. Any paging
+  writes fail qualification. Keep disk checkpoint caching disabled.
+- Retain numerical quality and affected prefill/decode benchmark results.
+
+The Codex sandbox build stopped before compilation: access to the installed ROCm
+`lib/cmake/hip-lang/hip-lang-config-version.cmake` was denied. The currently
+running server was left intact. No AtomicChat runtime or zero-paging result has
+been established by this change.
