@@ -111,10 +111,19 @@ CommittedPages CommitPages(std::size_t bytes) {
     return {};
   }
   std::atomic<bool> populated{true};
+  // Fault 4 MiB at a time. One call holds the process's mmap lock for its
+  // whole range, and every other thread's mmap, mprotect or munmap (a new
+  // thread's stack, a malloc arena) waits behind it, then every page fault
+  // behind those: 35-58 ms per 256 MiB range, including the next worker's
+  // own stack.
   const auto populate = [&](std::size_t begin, std::size_t end) {
-    if (madvise(static_cast<std::byte*>(data) + begin, end - begin,
-                MADV_POPULATE_WRITE) != 0)
-      populated.store(false, std::memory_order_relaxed);
+    constexpr std::size_t piece = 4ULL << 20;
+    for (auto at = begin; at < end; at += piece)
+      if (madvise(static_cast<std::byte*>(data) + at, std::min(piece, end - at),
+                  MADV_POPULATE_WRITE) != 0) {
+        populated.store(false, std::memory_order_relaxed);
+        return;
+      }
   };
   if (workers >= 2) {
     // Large serial page faults can hold up inference even when growth runs
