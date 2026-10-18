@@ -1,10 +1,14 @@
 #include "src/core/hip/committed_backing.hpp"
 
 #include <hip/hip_runtime.h>
+#ifndef _WIN32
 #include <linux/io_uring.h>
+#endif
 #include <sys/mman.h>
+#ifndef _WIN32
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#endif
 #include <unistd.h>
 
 #include <algorithm>
@@ -30,7 +34,12 @@ struct CommittedPages {
 // prevents ordinary compaction from moving them and evicting the process's
 // GPU queues. An io_uring registered buffer supplies that pin without I/O,
 // polling threads or a mapped submission/completion ring.
-int PinPages(void* data, std::size_t bytes) {
+int PinPages([[maybe_unused]] void* data, [[maybe_unused]] std::size_t bytes) {
+#ifdef _WIN32
+  // No io_uring. hipHostRegister pins the pages itself on Windows, so the
+  // registered-page path below is the whole story there.
+  return -1;
+#else
   // Linux caps each registered buffer at 1 GiB. Keep one ring per segment,
   // including models whose private state needs a larger contiguous segment.
   constexpr std::size_t max_buffer = 1ULL << 30;
@@ -55,15 +64,18 @@ int PinPages(void* data, std::size_t bytes) {
   // Restricted io_uring or memlock limits retain the existing registration
   // path and cache capacity; they must not turn cache admission into failure.
   return -1;
+#endif
 }
 
-void UnpinPages(int ring) {
+void UnpinPages([[maybe_unused]] int ring) {
+#ifndef _WIN32
   if (ring >= 0) {
     // Drop pins synchronously before unmapping and releasing ledger charges.
     (void)syscall(SYS_io_uring_register, ring, IORING_UNREGISTER_BUFFERS,
                   nullptr, 0);
     close(ring);
   }
+#endif
 }
 
 // Ordinary anonymous pages, then registered with the GPU. Opt out of THP
