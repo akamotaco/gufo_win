@@ -2,6 +2,7 @@
 #define GUFO_MODELS_GEMMA4_ENGINE_HPP_
 
 #include <array>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -127,6 +128,31 @@ private:
   friend class Session;
 };
 
+/// A mutex that admits waiters in arrival order. A decoding scheduler
+/// relocks the model within microseconds of each step, so with std::mutex a
+/// snapshot worker waiting for it could starve until decoding stopped.
+class FifoMutex {
+public:
+  void lock() {
+    std::unique_lock lock(mutex_);
+    const std::uint64_t ticket = next_++;
+    turn_.wait(lock, [&] { return serving_ == ticket; });
+  }
+  void unlock() {
+    {
+      std::lock_guard lock(mutex_);
+      ++serving_;
+    }
+    turn_.notify_all();
+  }
+
+private:
+  std::mutex mutex_;
+  std::condition_variable turn_;
+  std::uint64_t next_{0};
+  std::uint64_t serving_{0};
+};
+
 /// Gufo-owned API over the Gemma 4 ROCm runtime: one resident model and any
 /// number of sessions with independent context state. Forwards of different
 /// sessions are serialized on the model's executor.
@@ -192,7 +218,7 @@ private:
   std::unique_ptr<Tokenizer> tokenizer_;
   std::unique_ptr<rocm::DeviceModel> device_;
   std::unique_ptr<rocm::Executor> executor_;
-  std::mutex mutex_;
+  FifoMutex mutex_;
   /// Calibrated-policy tables shared by every session ([greedy, sampled]
   /// drafts, then their siblings); guarded by mutex_.
   std::array<DraftCalibration, 4> calibration_;

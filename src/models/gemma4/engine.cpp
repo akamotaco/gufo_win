@@ -1753,7 +1753,7 @@ void AddRun(std::vector<rocm::CopyRun>& runs, const void* from, void* to,
 }
 
 /// Runs `runs` on the executor's stream, holding `mutex`, and waits for them.
-bool CopyOnStream(rocm::Executor& executor, std::mutex& mutex,
+bool CopyOnStream(rocm::Executor& executor, FifoMutex& mutex,
                   std::span<const rocm::CopyRun> runs) {
   std::lock_guard lock(mutex);
   bool queued = true;
@@ -1763,6 +1763,31 @@ bool CopyOnStream(rocm::Executor& executor, std::mutex& mutex,
     queued = false;
   }
   return hipStreamSynchronize(executor.stream()) == hipSuccess && queued;
+}
+
+/// Queues `runs` on the executor's stream holding `mutex` only to enqueue
+/// them, then waits outside it: a decoding scheduler takes the model between
+/// steps, and holding it through the copy kept those steps waiting on this
+/// thread. Later work on the stream runs after the copy.
+bool CopyBehindStream(rocm::Executor& executor, FifoMutex& mutex,
+                      std::span<const rocm::CopyRun> runs) {
+  hipEvent_t done = nullptr;
+  if (hipEventCreateWithFlags(&done, hipEventDisableTiming) != hipSuccess) {
+    return false;
+  }
+  bool queued = true;
+  {
+    std::lock_guard lock(mutex);
+    try {
+      executor.CopyRuns(runs);
+    } catch (const std::exception&) {
+      queued = false;
+    }
+    queued = hipEventRecord(done, executor.stream()) == hipSuccess && queued;
+  }
+  const bool copied = queued && hipEventSynchronize(done) == hipSuccess;
+  (void)hipEventDestroy(done);
+  return copied;
 }
 
 }  // namespace
@@ -1995,7 +2020,7 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
   std::uint8_t* hidden = rest.get() + rest_bytes;
   AddRun(runs, cache_->hidden, hidden, hidden_bytes);
   add_piece(hidden, hidden_bytes);
-  if (!CopyOnStream(executor, model_->mutex_, runs)) {
+  if (!CopyBehindStream(executor, model_->mutex_, runs)) {
     Fail(error_msg, "snapshot copy failed");
     return nullptr;
   }
