@@ -41,7 +41,7 @@ pixmaate 포팅 이후 본가가 추가한 코드가 Windows 호환 계층에 �
 | `src/cli/serve/serve.cpp` | `SIGBUS` (치명 시그널 리포터) | `signal.h`에 `SIGBUS 7` 정의, `sigaction`에서 "전달되지 않는 시그널"로 처리. UCRT `signal()`에 모르는 번호를 넘기면 invalid parameter handler가 돌아 프로세스가 죽을 수 있다 |
 | `src/cli/serve/http_server.cpp` `LoadingResponder` | 생 `::setsockopt`, `::close`, `::recv`, `pollfd{.fd = int}`, `::accept` | `gufo::platform::SetSocketOption / CloseSocket / SocketRecv / CloseConnection`, `static_cast<decltype(pollfd::fd)>(fd)`, `static_cast<int>(::accept(...))` |
 | `src/cli/serve/websocket.cpp` | `getsockopt(SO_RCVTIMEO)`를 `timeval`로 읽음 | `platform::GetSocketTimeout` 추가 (Winsock은 DWORD 밀리초) |
-| `src/core/diagnostics/linux_sysfs.cpp` | `proc_root_`를 `std::filesystem::absolute("/proc")`로 바꿈(본가 `76661e30`) | Windows에선 `C:\proc`가 되어 포팅의 `proc_root_ == "/proc"` 대체 경로가 죽었다 → `gufo diagnose`가 CPU·메모리 0 표시. 5절 참고 |
+| `src/core/diagnostics/linux_sysfs.cpp` | `proc_root_`를 `std::filesystem::absolute("/proc")`로 바꿈(본가 `76661e30`) | Windows에선 `C:\proc`가 되어 포팅의 `proc_root_ == "/proc"` 대체 경로가 죽었다 → `gufo diagnose`가 CPU·메모리 0 표시. 비교 대상을 `std::filesystem::absolute("/proc")`로 바꿔 해결 |
 
 **업데이트 때마다 할 점검** (새 POSIX 헤더가 들어왔는지):
 
@@ -102,7 +102,7 @@ grep -rn 'syscall(SYS_\|/proc/\|/sys/' src                                     #
 
 ## 5. 열린 항목
 
-- [ ] `gufo diagnose`의 CPU·메모리 0 표시 (3.1 마지막 줄). `proc_root_ == std::filesystem::absolute("/proc")`로 비교하면 된다.
+- [x] `gufo diagnose`의 CPU·메모리 0 표시 (3.1 마지막 줄). `proc_root_ == std::filesystem::absolute("/proc")`로 비교하도록 고쳤다(2026-10-18).
   서버 메모리 예산은 `HostAvailableBytes()`(`sysconf(_SC_AVPHYS_PAGES)`)를 쓰므로 영향 없음(로그 `host_available_mib` 정상).
 - [ ] Flash-Next 디코드 Windows 튜닝 이식: `win/main`의 `ae594013`, `b0b5d8a9`, `a8b45a0b`, `aeee89a5`.
   `ae594013`만 56곳 충돌(engine.cpp 14, executor.cpp 13, prompt_lookup.hpp 11, …). `prompt_lookup.hpp`는 본가 #613 구현이 대체하므로
