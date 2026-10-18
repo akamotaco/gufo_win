@@ -38,6 +38,30 @@ cache defeated, one server at a time, October 18, 2026:
 Model load took 8 s natively against 42 s for the same build reading the GGUF
 from `/mnt/c` under WSL2.
 
+The other models on the same machine and build, same prompts and method (Gufo only;
+MTP uses each model's drafter):
+
+| Model | Context | GPU in use | Prompt | Prefill | Decode | Decode, MTP |
+| --- | ---: | ---: | --- | ---: | ---: | ---: |
+| Qwen3.8-Flash-Next UD-Q4_K_XL | 262,144 | 88.4 GiB (92.5 with MTP + vision) | 2.1K | 1,522 | 28.1 | 40.1 |
+| | | | 8.5K | 1,513 | 28.1 | 47.1 |
+| | | | 31.8K | 1,547 | 28.0 | 57.2 |
+| Gemma 4 31B Q4_K_M (MeroMero) | 200,000 | 32.5 GiB | 2.1K | 469–474 | 11.2 | 22.4 |
+| | | | 8.5K | 449–462 | 10.9 | 21.7 |
+| | | | 31.8K | 407–436 | 10.2 | 18.3 |
+
+- Flash-Next MTP uses Unsloth's `MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf`; Gufo
+  rejects the `shared-Q4_K_M` drafter (Q4_K `hc_*` tensors) and the F16 vision
+  projector (use `mmproj-BF16.gguf`). A short prompt with a 512-token reply decodes at
+  28.8 tok/s without MTP and 36.8 with it; the long-prompt MTP rates are high partly
+  because the benchmark prompt repeats itself and prompt lookup copies from it.
+- With MTP and vision at 262K, Flash-Next leaves about 4 GiB of a 96 GB carve-out.
+  Windows also charges GPU allocations to the commit limit, so keep a large page file
+  (it is only reserved, not written: 0.9 GB in use during these runs).
+- Gemma 4 12B (QAT Q4_0 and Q4_K_M fine-tunes) loads but fails its first request with
+  `split attention head grouping unsupported`: the Gemma 4 engine does not cover the
+  12B's head layout yet. This is not specific to Windows.
+
 ### Build on Windows
 
 Prerequisites are in [docs/WINDOWS.md](docs/WINDOWS.md#prerequisites): TheRock ROCm
@@ -62,10 +86,12 @@ build\release\gufo.exe serve --host 127.0.0.1 --port 8093 llm `
 
 ### Status
 
-- Working: build, `gufo diagnose`, Gemma 4 26B-A4B serving with and without MTP.
-- Not yet verified on this build: Qwen3.8-Flash-Next serving, the disk prompt
-  cache (`--cache-disk`), and the test suite (`BUILD_TESTING` is off; some new
-  upstream tests still use raw POSIX sockets).
+- Working: build, `gufo diagnose`, Gemma 4 26B-A4B and 31B with and without MTP,
+  Qwen3.8-Flash-Next UD-Q4_K_XL with and without MTP and vision.
+- Not supported: Gemma 4 12B (see above).
+- Not yet verified on this build: the disk prompt cache (`--cache-disk`), other
+  Flash-Next quants and fine-tunes, and the test suite (`BUILD_TESTING` is off; some
+  new upstream tests still use raw POSIX sockets).
 - Not included yet from the Windows port: the Flash-Next decode tuning
   (`tuning.hpp` switches), the Qwen3.8-27B Windows kernels and Qwen3.6-35B-A3B.
   They conflict with newer upstream code and are listed in the porting notes.
