@@ -23,7 +23,7 @@
 
 | 항목 | 값 | 주의 |
 | --- | --- | --- |
-| ROCm | TheRock **10.2.0** (`rulith-inference\toolchain\rocm-venv\Lib\site-packages\_rocm_sdk_devel`) | pixmaate 검증은 **10.0.0**. 10.2 차이는 3절 |
+| ROCm | TheRock **10.2.0** (`llm\tool\toolchain\rocm-venv\Lib\site-packages\_rocm_sdk_devel`, rulith에서 옮겨 옴) | pixmaate 검증은 **10.0.0**. 10.2 차이는 3절 |
 | C/C++/HIP 컴파일러 | TheRock clang (`lib\llvm\bin\clang++.exe`), 링커 lld | MSVC 컴파일러는 쓰지 않고 STL·SDK만 쓴다 |
 | MSVC | VS 2022 Build Tools 14.44, Windows SDK 10.0.26100 | `compat/win32/hip_include/cmath`는 14.5x용 우회. 14.44에서도 문제없었다 |
 | vcpkg | `..\tool\vcpkg`, triplet x64-windows | icu curl openssl libpng libjpeg-turbo **libwebp pkgconf** (뒤 둘은 본가가 2026-10에 추가한 의존성) |

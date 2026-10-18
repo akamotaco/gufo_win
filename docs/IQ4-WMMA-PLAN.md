@@ -101,8 +101,8 @@ S5 종단 기준:
 $llm = "C:\Users\AMD-MAX395-128G-2T\Desktop\ai\llm"
 powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1 -Preset gpu-test `
   -Target qwen38_flash_next_routed_wmma_ops_test `
-  -Rocm "$llm\rulith-inference\toolchain\rocm-venv\Lib\site-packages\_rocm_sdk_devel" `
-  -Vcpkg "$llm\tool\vcpkg" -Ninja "$llm\rulith-inference\toolchain\ninja.exe" -Jobs 8 `
+  -Rocm "$llm\tool\toolchain\rocm-venv\Lib\site-packages\_rocm_sdk_devel" `
+  -Vcpkg "$llm\tool\vcpkg" -Ninja "$llm\tool\toolchain\ninja.exe" -Jobs 8 `
   -CMakeArgs "-DPython3_EXECUTABLE=C:/ProgramData/miniforge3/python.exe"   # 테스트 설정은 Python3 필요(PATH에 없음)
 build\gpu-test\tests\models\qwen38_flash_next\qwen38_flash_next_routed_wmma_ops_test.exe
 # 서버 빌드·기동: ..\gufo_update.bat nopull, ..\gufo_select.bat (8080: 2=AtomicChat, 1=UD-Q4_K_XL)
