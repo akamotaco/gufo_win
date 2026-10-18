@@ -49,6 +49,9 @@ struct Fixture {
       cache::ResourceLimits{1ULL << 36, 1ULL << 36, 1ULL << 36, 1ULL << 36}};
   g4::ContinuationAdapter& adapter;
   gufo::hip::TransferPool& pool;
+  // Registered host buffers, as serving's backing pool provides: the
+  // adapter gathers their copies in one launch. Pageable ones copy singly.
+  bool pinned{false};
 
   // Each transfer seals its pooled stream; it returns to the pool once the
   // stream and its completion are both released.
@@ -64,7 +67,17 @@ struct Fixture {
         ledger.Reserve(cache::ResourceCategory::kBackingFree, request.bytes)
             .Convert();
     auto assigned = pool.ReserveBacking(request.category);
-    auto buffer = std::make_shared<std::vector<std::byte>>(request.bytes);
+    std::shared_ptr<std::vector<std::byte>> buffer(
+        new std::vector<std::byte>(request.bytes), [](auto* bytes) {
+          if (hipHostUnregister(bytes->data()) != hipSuccess) {
+            // Pageable buffer: nothing was registered.
+          }
+          delete bytes;
+        });
+    if (pinned && !buffer->empty())
+      Require(hipHostRegister(buffer->data(), buffer->size(),
+                              hipHostRegisterDefault) == hipSuccess,
+              "host registration failed");
     Settle([&](cache::Stream& stream) {
       return request.category == cache::ResourceCategory::kPrivateState
                  ? adapter.CapturePrivate(slot, request.component, *buffer,
@@ -295,7 +308,7 @@ int main() {
     const auto ring = model->SessionRingSlots();
     g4::ContinuationAdapter adapter(model, options.max_context, {'t'});
     gufo::hip::TransferPool pool(2);
-    Fixture f{.adapter = adapter, .pool = pool};
+    Fixture f{.adapter = adapter, .pool = pool, .pinned = true};
     RecordingGuard guard_a, guard_b;
     auto slot_a = adapter.CreateSlot(guard_a);
     auto slot_b = adapter.CreateSlot(guard_b);

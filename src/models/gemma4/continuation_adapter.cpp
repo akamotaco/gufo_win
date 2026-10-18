@@ -38,6 +38,22 @@ struct Metadata {
 static_assert(std::is_trivially_copyable_v<Metadata>);
 using Coverage = std::vector<std::pair<std::size_t, std::size_t>>;
 // Loaded byte ranges cover [begin, end) without a gap.
+// Copies a gather launch can serve: 16-byte aligned memory the device reads
+// and writes in place (device or registered host memory, not pageable).
+bool Accessible(const void* pointer) {
+  hipPointerAttribute_t attributes{};
+  return hipPointerGetAttributes(&attributes, pointer) == hipSuccess &&
+         attributes.type != hipMemoryTypeUnregistered;
+}
+bool Gatherable(const rocm::CopyRun& run) {
+  return (reinterpret_cast<std::uintptr_t>(run.from) |
+          reinterpret_cast<std::uintptr_t>(run.to) | run.bytes) %
+                 16 ==
+             0 &&
+         Accessible(run.from) && Accessible(run.to);
+}
+// Device copies one gather launch takes; a fuller batch launches early.
+constexpr std::size_t kBatchRuns = 1024;
 bool Covered(Coverage ranges, std::size_t begin, std::size_t end) {
   std::ranges::sort(ranges);
   std::size_t frontier = begin;
@@ -56,11 +72,16 @@ public:
   State(ContinuationAdapter& adapter, cache::MutationGuard& guard,
         std::unique_ptr<Session> session)
       : adapter(adapter), guard(guard), session(std::move(session)) {
+    // Pinned once: allocating pinned memory later waits for queued forwards.
+    Check(hipHostMalloc(&descriptors, kBatchRuns * sizeof(rocm::CopyRun)));
+    Check(hipEventCreateWithFlags(&flushed, hipEventDisableTiming));
     this->session->cache_->hooks = this;
   }
   struct Job {
     State* owner;
     bool load;
+    // Set while the job's device copies wait in the batch.
+    gufo::hip::TransferStream* stream{};
     std::optional<cache::Completion> completion;
     std::optional<TransferResult> result;
     mutable std::mutex mutex;
@@ -68,14 +89,16 @@ public:
       const std::lock_guard lock(mutex);
       return result.has_value();
     }
+    // A batched job is not ready before a wait launches its batch.
     bool Ready() const noexcept {
       const std::lock_guard lock(mutex);
-      return result || completion->Ready();
+      return result || (completion && completion->Ready());
     }
     TransferResult Wait() noexcept {
+      owner->Flush();
       const std::lock_guard lock(mutex);
       if (!result) {
-        result = completion->Wait();
+        result = completion ? completion->Wait() : TransferResult::kFailed;
         completion.reset();
         if (load && *result == TransferResult::kFailed)
           owner->failed = true;
@@ -84,6 +107,46 @@ public:
       return *result;
     }
   };
+  // Launches the batched device copies as one gather on the first batched
+  // job's stream; every batched job's stream waits for it, then completes.
+  void Flush() noexcept {
+    const std::lock_guard lock(jobs_mutex);
+    FlushLocked();
+  }
+  void FlushLocked() noexcept {
+    if (batch.empty())
+      return;
+    try {
+      const auto native = batch.front()->stream->Native();
+      adapter.AfterExecution(native);
+      if (descriptors_busy)
+        Check(hipEventSynchronize(flushed));
+      std::uint64_t longest = 0;
+      for (const auto& run : batch_runs)
+        longest = std::max(longest, run.bytes);
+      std::ranges::copy(batch_runs, descriptors);
+      rocm::CopyRuns(descriptors, static_cast<std::uint32_t>(batch_runs.size()),
+                     longest, native);
+      Check(hipEventRecord(flushed, native));
+      descriptors_busy = true;
+      for (const auto& job : batch) {
+        const auto stream = job->stream->Native();
+        if (stream != native)
+          Check(hipStreamWaitEvent(stream, flushed, 0));
+        auto completion = job->stream->Complete();
+        const std::lock_guard job_lock(job->mutex);
+        job->completion.emplace(std::move(completion));
+      }
+    } catch (...) {
+      // Jobs left without a completion report failure when waited on.
+      for (const auto& job : batch)
+        (void)job->stream->Synchronize();
+    }
+    for (const auto& job : batch)
+      job->stream = nullptr;
+    batch.clear();
+    batch_runs.clear();
+  }
   class Signal final : public cache::CompletionSignal {
   public:
     explicit Signal(std::shared_ptr<Job> job) : job_(std::move(job)) {}
@@ -98,6 +161,10 @@ public:
       (void)job->Wait();
     BeforeRelease();
     session->cache_->hooks = nullptr;
+    if (descriptors_busy)
+      (void)hipEventSynchronize(flushed);
+    (void)hipEventDestroy(flushed);
+    (void)hipHostFree(descriptors);
   }
   // An empty session is a valid cold slot; execution clears the session's
   // own flag while it runs, so guards read through `guarding`.
@@ -171,6 +238,12 @@ public:
   std::atomic<std::size_t> pending{0};
   std::mutex jobs_mutex;
   std::vector<std::shared_ptr<Job>> jobs;
+  // Device copies waiting for one gather launch (under jobs_mutex).
+  std::vector<std::shared_ptr<Job>> batch;
+  std::vector<rocm::CopyRun> batch_runs;
+  rocm::CopyRun* descriptors{};
+  hipEvent_t flushed{};
+  bool descriptors_busy{false};
   std::vector<cache::ComponentPosition> expected;
   std::vector<Coverage> coverage;
   Metadata metadata{};
@@ -381,7 +454,7 @@ ContinuationAdapter::Piece ContinuationAdapter::PrivateRegion(
 }
 cache::Completion ContinuationAdapter::Transfer(
     State& state, bool load, cache::Stream& stream,
-    const std::function<void(hipStream_t)>& submit) {
+    const std::function<void(std::vector<rocm::CopyRun>&)>& plan) {
   auto& hip_stream = dynamic_cast<gufo::hip::TransferStream&>(stream);
   auto job = std::make_shared<State::Job>();
   job->owner = &state;
@@ -395,8 +468,27 @@ cache::Completion ContinuationAdapter::Transfer(
   }
   ++state.pending;
   try {
-    submit(hip_stream.Native());
-    job->completion.emplace(hip_stream.Complete());
+    // Host copies run now; device copies join the gather batch when they
+    // can, and otherwise copy at once.
+    std::vector<rocm::CopyRun> runs;
+    plan(runs);
+    if (!runs.empty() && runs.size() <= kBatchRuns &&
+        std::ranges::all_of(runs, Gatherable)) {
+      const std::lock_guard lock(state.jobs_mutex);
+      if (state.batch_runs.size() + runs.size() > kBatchRuns)
+        state.FlushLocked();
+      job->stream = &hip_stream;
+      state.batch.push_back(job);
+      state.batch_runs.insert(state.batch_runs.end(), runs.begin(), runs.end());
+    } else {
+      const auto native = hip_stream.Native();
+      if (!runs.empty())
+        AfterExecution(native);
+      for (const auto& run : runs)
+        Check(hipMemcpyAsync(run.to, run.from, run.bytes, hipMemcpyDefault,
+                             native));
+      job->completion.emplace(hip_stream.Complete());
+    }
   } catch (...) {
     (void)hip_stream.Synchronize();
     job->result = TransferResult::kFailed;
@@ -546,7 +638,7 @@ cache::Completion ContinuationAdapter::CopyRowsOut(
   if (d.kind == cache::ComponentKind::kWindowRows &&
       first + ring_ < n + rocm::kSplitRows)
     throw std::invalid_argument("Gemma 4 window rows left the ring");
-  return Transfer(state, false, stream, [&](hipStream_t native) {
+  return Transfer(state, false, stream, [&](auto& runs) {
     if (bytes.empty())
       return;
     if (component.part == ContinuationPart::kTokens) {
@@ -554,11 +646,9 @@ cache::Completion ContinuationAdapter::CopyRowsOut(
                   bytes.size());
       return;
     }
-    AfterExecution(native);
     std::size_t done = 0;
     for (const auto& piece : RowPieces(state, component, first, end)) {
-      Check(hipMemcpyAsync(bytes.data() + done, piece.pointer, piece.bytes,
-                           hipMemcpyDefault, native));
+      runs.push_back({piece.pointer, bytes.data() + done, piece.bytes});
       done += piece.bytes;
     }
   });
@@ -597,7 +687,7 @@ cache::Completion ContinuationAdapter::CopyRowsIn(
       state.coverage[id.value - 1].emplace_back(first * d.row_bytes,
                                                 end * d.row_bytes);
     }
-    return Transfer(state, true, stream, [&](hipStream_t native) {
+    return Transfer(state, true, stream, [&](auto& runs) {
       if (bytes.empty())
         return;
       if (component.part == ContinuationPart::kTokens) {
@@ -605,12 +695,9 @@ cache::Completion ContinuationAdapter::CopyRowsIn(
                     bytes.size());
         return;
       }
-      // A source borrowed from another slot was written by its forwards.
-      AfterExecution(native);
       std::size_t done = 0;
       for (const auto& piece : RowPieces(state, component, first, end)) {
-        Check(hipMemcpyAsync(piece.pointer, bytes.data() + done, piece.bytes,
-                             hipMemcpyDefault, native));
+        runs.push_back({bytes.data() + done, piece.pointer, piece.bytes});
         done += piece.bytes;
       }
       if (d.kind == cache::ComponentKind::kWindowRows)
@@ -651,7 +738,7 @@ cache::Completion ContinuationAdapter::CapturePrivatePiece(
     std::copy_n(session.images_.begin(), metadata.images,
                 metadata.image.begin());
   }
-  return Transfer(state, false, stream, [&](hipStream_t native) {
+  return Transfer(state, false, stream, [&](auto& runs) {
     if (bytes.empty())
       return;
     if (component.part == ContinuationPart::kMetadata) {
@@ -666,9 +753,7 @@ cache::Completion ContinuationAdapter::CapturePrivatePiece(
       std::memcpy(bytes.data(), region.pointer + offset, bytes.size());
       return;
     }
-    AfterExecution(native);
-    Check(hipMemcpyAsync(bytes.data(), region.pointer + offset, bytes.size(),
-                         hipMemcpyDefault, native));
+    runs.push_back({region.pointer + offset, bytes.data(), bytes.size()});
   });
 }
 cache::Completion ContinuationAdapter::LoadPrivate(
@@ -704,14 +789,13 @@ cache::Completion ContinuationAdapter::LoadPrivatePiece(
       const std::lock_guard lock(state.jobs_mutex);
       state.coverage[id.value - 1].emplace_back(offset, offset + bytes.size());
     }
-    return Transfer(state, true, stream, [&](hipStream_t native) {
+    return Transfer(state, true, stream, [&](auto& runs) {
       if (bytes.empty())
         return;
       if (host)
         std::memcpy(region.pointer + offset, bytes.data(), bytes.size());
       else
-        Check(hipMemcpyAsync(region.pointer + offset, bytes.data(),
-                             bytes.size(), hipMemcpyDefault, native));
+        runs.push_back({bytes.data(), region.pointer + offset, bytes.size()});
     });
   } catch (...) {
     state.failed = true;

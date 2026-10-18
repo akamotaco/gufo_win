@@ -11,6 +11,7 @@
 
 #include "src/cache/adapter.hpp"
 #include "src/models/gemma4/engine.hpp"
+#include "src/models/gemma4/kernels/rocm/kernels.hpp"
 
 namespace gufo::models::gemma4 {
 
@@ -120,9 +121,10 @@ private:
   // memory (`host`) the adapter copies on the calling thread.
   [[nodiscard]] Piece PrivateRegion(State&, const ContinuationComponent&,
                                     bool loading, bool* host) const;
+  // `plan` runs host copies and lists device copies (Transfer batches them).
   [[nodiscard]] cache::Completion Transfer(
       State&, bool load, cache::Stream&,
-      const std::function<void(hipStream_t)>&);
+      const std::function<void(std::vector<rocm::CopyRun>&)>& plan);
   std::shared_ptr<Model> model_;
   std::uint32_t context_;
   std::uint32_t ring_;
