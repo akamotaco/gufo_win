@@ -1218,6 +1218,12 @@ bool TextRunnerPool::Request::SnapshotPending() const {
              std::future_status::ready;
 }
 
+bool TextRunnerPool::Request::AwaitSnapshot(
+    std::chrono::steady_clock::duration timeout) const {
+  return !impl_ || !impl_->snapshot_future.valid() ||
+         impl_->snapshot_future.wait_for(timeout) == std::future_status::ready;
+}
+
 std::optional<TextDecodeSelection>
 TextRunnerPool::Request::PreviewFirstToken() {
   if (!impl_ || !impl_->decode_ready || !impl_->generated.empty() ||

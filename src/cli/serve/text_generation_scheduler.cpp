@@ -31,6 +31,8 @@ namespace gufo::server {
 namespace {
 
 constexpr std::size_t kDecodeProgressInterval = 50;
+// How long a decode step waits for a finishing prompt capture to join it.
+constexpr auto kCaptureJoinWait = std::chrono::milliseconds(10);
 constexpr std::size_t kNoSession = std::numeric_limits<std::size_t>::max();
 
 struct OutputBudget {
@@ -1937,6 +1939,43 @@ struct TextGenerationScheduler::Impl {
       }
 
       progress.fetch_add(1, std::memory_order_relaxed);
+      // Before the first decode of a new batch, a peer that waits only for
+      // its prompt capture (a few milliseconds) and has little prefill left
+      // gets to join, as one still prefilling does below; otherwise its first
+      // token waits a whole decode step.
+      if (!decoding.empty() && !capturing.empty() &&
+          std::all_of(decoding.begin(), decoding.end(),
+                      [](const auto& request) {
+                        return request->result.tokens.empty();
+                      }) &&
+          runner_pool->SelectDecodePlan(decoding.size() + 1).kind ==
+              TextExecutionPlanKind::kBatched) {
+        const auto deadline = Clock::now() + kCaptureJoinWait;
+        bool joined = false;
+        for (auto it = capturing.begin(); it != capturing.end();) {
+          const auto& peer = (*it)->runner_request;
+          if (peer.prompt_tokens() - peer.prefill_position() >
+                  prefill_policy.decode_active_tokens ||
+              !peer.AwaitSnapshot(
+                  std::max(deadline - Clock::now(), Clock::duration::zero()))) {
+            ++it;
+            continue;
+          }
+          auto request = std::move(*it);
+          it = capturing.erase(it);
+          joined = true;
+          if (CompleteIfStopped(request))
+            continue;
+          if (request->runner_request.prefill_complete()) {
+            request->decode_due = true;
+            decoding.push_back(std::move(request));
+          } else {
+            prefilling.push_back(std::move(request));
+          }
+        }
+        if (joined)
+          continue;
+      }
       const bool due_decoder = HasDueDecoder(decoding);
       const std::size_t resident_count = prefilling.size() + decoding.size();
       const bool preparing_multi_token_batch =

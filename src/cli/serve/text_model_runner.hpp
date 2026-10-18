@@ -1,6 +1,7 @@
 #ifndef GUFO_SERVER_TEXT_MODEL_RUNNER_HPP_
 #define GUFO_SERVER_TEXT_MODEL_RUNNER_HPP_
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -558,6 +559,9 @@ public:
     /// Starts capture and polls completion without blocking other sessions.
     [[nodiscard]] bool PreparePromptSnapshot();
     [[nodiscard]] bool SnapshotPending() const;
+    /// Waits up to `timeout` for a pending snapshot; true once none is.
+    [[nodiscard]] bool AwaitSnapshot(
+        std::chrono::steady_clock::duration timeout) const;
     void Invalidate() noexcept;
 
   private:
