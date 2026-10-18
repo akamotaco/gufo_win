@@ -111,10 +111,17 @@ build\release\gufo.exe serve --host 127.0.0.1 --port 8093 llm `
 ### Status
 
 - Working: build, `gufo diagnose`, Gemma 4 26B-A4B and 31B with and without MTP,
-  Qwen3.8-Flash-Next UD-Q4_K_XL with and without MTP and vision.
+  Qwen3.8-Flash-Next UD-Q4_K_XL with and without MTP and vision, and the
+  [AtomicChat abliterated](https://huggingface.co/AtomicChat/Qwen3.8-Flash-Next-Abliterated-Uncensored-GGUF)
+  `AD-4.85bpw-Q5_K_M` mix (IQ4_XS/IQ4_NL/Q5_0 experts, Q4_1 n-gram table, BF16
+  `ple_conv1d`). Its IQ4 experts expand to Q8_0's form while the routed F16 WMMA
+  prefill GEMM fetches them ([docs/IQ4-WMMA-PLAN.md](docs/IQ4-WMMA-PLAN.md)), so it
+  prefills faster than llama.cpp on the same file: 1,327 / 1,316 / 1,338 / 1,241 tok/s
+  at 2.1K / 8.5K / 31.8K / 160K tokens, against 1,048 / 1,151 / 1,222 / 1,166 for a
+  ROCm llama.cpp build (thinking off, one server at a time).
 - Not supported: Gemma 4 12B (see above).
 - Not yet verified on this build: the disk prompt cache (`--cache-disk`), other
-  Flash-Next quants and fine-tunes, and the test suite (`BUILD_TESTING` is off; some
+  Flash-Next quants, and the full test suite (`BUILD_TESTING` is off; some
   new upstream tests still use raw POSIX sockets).
 - Not included yet from the Windows port: the Flash-Next decode tuning
   (`tuning.hpp` switches), the Qwen3.8-27B Windows kernels and Qwen3.6-35B-A3B.
