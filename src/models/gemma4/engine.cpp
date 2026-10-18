@@ -501,6 +501,10 @@ bool Session::Sync(std::span<const TokenId> prompt, std::string* error_msg) {
   return Sync(prompt, {}, {}, error_msg);
 }
 
+void Session::BeginRequest() {
+  lookup_.BeginRequest();
+}
+
 bool Session::Sync(std::span<const TokenId> prompt,
                    std::span<const ImageSpan> images,
                    const ImageEmbeddings& embed, std::string* error_msg,
@@ -509,6 +513,7 @@ bool Session::Sync(std::span<const TokenId> prompt,
     Reset();
     return Fail(error_msg, "prompt is empty");
   }
+  BeginRequest();
   if (model_->options_.draft_calibration == DraftCalibrationScope::kRequest) {
     for (auto& calibration : calibration_) {
       calibration.Reset();
@@ -557,6 +562,8 @@ bool Session::Sync(std::span<const TokenId> prompt,
   while (common < limit && prompt[common] == tokens_[common]) {
     ++common;
   }
+  // The lookup index stays valid while the prompt extends the tokens.
+  const bool extends = common == tokens_.size();
   // Equal tokens do not mean equal images: stop at the first image that
   // differs, and never resume inside an image of the new prompt.
   for (std::size_t i = 0; i < std::max(images.size(), images_.size()); ++i) {
@@ -590,7 +597,9 @@ bool Session::Sync(std::span<const TokenId> prompt,
   }
   tokens_.assign(prompt.begin(), prompt.end());
   images_.assign(images.begin(), images.end());
-  lookup_.Clear();
+  if (!extends) {
+    lookup_.Clear();
+  }
   draft_vocab_.Reset();
   const bool ahead = lookahead.size() <= rocm::kSplitRows &&
                      prompt.size() + lookahead.size() <= cache_->max_context;
@@ -842,7 +851,11 @@ struct Session::CycleDraft {
                    chain_steps, alone ? DraftBatch{} : others),
         share(batch_share),
         context{*owner.pending_} {
-    session.lookup_.Extend(session.tokens_);
+    // A request's first cycle copies nothing (PromptLookup::Step).
+    lookup = session.lookup_.Step(cycle.position);
+    if (lookup) {
+      session.lookup_.Extend(session.tokens_);
+    }
     if (cycle.sampled) {
       // A cycle-local proposal stream; target draws keep the sampler's.
       draft_rng = sampling::NextRandom(cycle.sampler->mutable_rng_state());
@@ -882,26 +895,46 @@ struct Session::CycleDraft {
   }
 
   /// Fills the remaining slots with the tokens that followed an earlier
-  /// occurrence of the context (at least 12 tokens); they end the chain.
-  bool Copy() {
-    const auto match = session.lookup_.Find(session.tokens_, context);
+  /// occurrence of the context (PromptLookup's gates), as far as the other
+  /// occurrences matching about as well agree; they end the chain, and a
+  /// stop token ends them. Copies nothing unless at least `minimum` tokens
+  /// qualify.
+  bool Copy(std::size_t minimum = 1) {
+    if (!lookup) {
+      return false;
+    }
+    if (cycle.stop_at_eos && session.model_->IsStopToken(context.back())) {
+      return false;
+    }
     std::size_t room = max_drafts - (context.size() - 1);
     if (SharesSpare()) {
       room = std::min<std::size_t>(room, FreeRows());
     }
-    if (match.length == 0 || room == 0) {
+    if (room < minimum) {
       return false;
     }
-    const std::size_t count =
-        std::min(room, session.tokens_.size() - match.start);
-    copies.assign(
-        session.tokens_.begin() + static_cast<std::ptrdiff_t>(match.start),
-        session.tokens_.begin() +
-            static_cast<std::ptrdiff_t>(match.start + count));
-    for (std::size_t i = 0; i < count; ++i) {
-      TakeRow();
+    std::size_t agreed = 0;
+    const auto match = session.lookup_.Find(
+        session.tokens_, context, qwen38_flash_next::PromptLookup::kMinMatch,
+        &agreed);
+    if (match.length == 0) {
+      return false;
     }
-    return count != 0;
+    const std::size_t available = std::min(room, agreed);
+    if (available < minimum) {
+      return false;
+    }
+    copies.clear();
+    for (std::size_t i = 0; i < available; ++i) {
+      const std::int32_t token = session.tokens_[match.start + i];
+      copies.push_back(token);
+      TakeRow();
+      if (cycle.stop_at_eos && session.model_->IsStopToken(token)) {
+        break;
+      }
+    }
+    cycle.copy_start = match.start;
+    return true;
   }
 
   /// Whether this cycle may go past its even share into the batch's spare
@@ -990,6 +1023,8 @@ struct Session::CycleDraft {
 
   Session& session;
   Cycle& cycle;
+  /// Whether this cycle may copy (not a request's first).
+  bool lookup{false};
   DraftPolicy policy;
   std::uint32_t min_drafts;
   std::uint32_t steps;  ///< drafter steps the chain may run
@@ -1151,9 +1186,10 @@ bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
       cycle.draft.reset();
       return true;
     }
-    if (cycle.draft->Copy()) {
-      // The context continues an earlier passage: verify the copies
-      // without running the drafter.
+    // A context that continues an earlier passage verifies at least three
+    // copies without running the drafter (the drafter reads the target's
+    // cache, so a skipped step costs nothing later).
+    if (cycle.draft->Copy(3)) {
       FinishDraft(cycle);
       return true;
     }
@@ -1370,7 +1406,11 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
       calibration.Observe(cycle.signals[j], j < row || agrees);
     }
   }
-  stats_.copied_accepted += accepted > mtp ? accepted - mtp : 0;
+  const std::size_t copies_kept = accepted > mtp ? accepted - mtp : 0;
+  stats_.copied_accepted += copies_kept;
+  if (cycle.copied != 0) {
+    lookup_.Observe(cycle.copy_start, cycle.copied, copies_kept);
+  }
   if (cycle.small_head) {
     stats_.small_head_cycles += 1;
     stats_.small_head_drafted += mtp;
@@ -1713,7 +1753,7 @@ void AddRun(std::vector<rocm::CopyRun>& runs, const void* from, void* to,
 }
 
 /// Runs `runs` on the executor's stream, holding `mutex`, and waits for them.
-bool CopyOnStream(rocm::Executor& executor, std::mutex& mutex,
+bool CopyOnStream(rocm::Executor& executor, FifoMutex& mutex,
                   std::span<const rocm::CopyRun> runs) {
   std::lock_guard lock(mutex);
   bool queued = true;
@@ -1723,6 +1763,31 @@ bool CopyOnStream(rocm::Executor& executor, std::mutex& mutex,
     queued = false;
   }
   return hipStreamSynchronize(executor.stream()) == hipSuccess && queued;
+}
+
+/// Queues `runs` on the executor's stream holding `mutex` only to enqueue
+/// them, then waits outside it: a decoding scheduler takes the model between
+/// steps, and holding it through the copy kept those steps waiting on this
+/// thread. Later work on the stream runs after the copy.
+bool CopyBehindStream(rocm::Executor& executor, FifoMutex& mutex,
+                      std::span<const rocm::CopyRun> runs) {
+  hipEvent_t done = nullptr;
+  if (hipEventCreateWithFlags(&done, hipEventDisableTiming) != hipSuccess) {
+    return false;
+  }
+  bool queued = true;
+  {
+    std::lock_guard lock(mutex);
+    try {
+      executor.CopyRuns(runs);
+    } catch (const std::exception&) {
+      queued = false;
+    }
+    queued = hipEventRecord(done, executor.stream()) == hipSuccess && queued;
+  }
+  const bool copied = queued && hipEventSynchronize(done) == hipSuccess;
+  (void)hipEventDestroy(done);
+  return copied;
 }
 
 }  // namespace
@@ -1955,7 +2020,7 @@ std::unique_ptr<SessionSnapshot> Session::SaveSnapshot(
   std::uint8_t* hidden = rest.get() + rest_bytes;
   AddRun(runs, cache_->hidden, hidden, hidden_bytes);
   add_piece(hidden, hidden_bytes);
-  if (!CopyOnStream(executor, model_->mutex_, runs)) {
+  if (!CopyBehindStream(executor, model_->mutex_, runs)) {
     Fail(error_msg, "snapshot copy failed");
     return nullptr;
   }

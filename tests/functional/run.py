@@ -314,9 +314,11 @@ def main():
         port = reserve.getsockname()[1]
     command = [command[0], "serve", "--host", "127.0.0.1", "--port", str(port),
                *command[2:]]
+    # The metrics suite sends sessions + 1 requests at once; when they arrive
+    # within the scheduler's first pop, all of them are pending together.
     for flag, default in (("--sessions", "4"), ("--context", "8192"),
                           ("--served-model-name", "functional-test"),
-                          ("--max-pending-per-client", str(max(4, sessions)))):
+                          ("--max-pending-per-client", str(max(4, sessions + 1)))):
         if option(command, flag) is None:
             command += [flag, default]
     if disk_enabled:

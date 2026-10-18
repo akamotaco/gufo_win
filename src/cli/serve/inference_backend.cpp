@@ -3042,6 +3042,9 @@ public:
     step.draft_rounds = stats_after.cycles - stats_before.cycles;
     step.draft_tokens = stats_after.drafted - stats_before.drafted;
     step.draft_accepted_tokens = stats_after.accepted - stats_before.accepted;
+    step.lookup_tokens = stats_after.lookup - stats_before.lookup;
+    step.lookup_accepted_tokens =
+        stats_after.lookup_accepted - stats_before.lookup_accepted;
     return step;
   }
 
@@ -3129,6 +3132,11 @@ public:
       step.draft_rounds = stats.cycles - before[i].cycles;
       step.draft_tokens = stats.drafted - before[i].drafted;
       step.draft_accepted_tokens = stats.accepted - before[i].accepted;
+      // A request whose peers dropped out runs a single-session step,
+      // which can use prompt lookup.
+      step.lookup_tokens = stats.lookup - before[i].lookup;
+      step.lookup_accepted_tokens =
+          stats.lookup_accepted - before[i].lookup_accepted;
     }
     return steps;
   }
@@ -3496,9 +3504,12 @@ public:
   void PreparePrefixReuse(
       TextRunnerState& state,
       std::span<const TextRunnerToken> prefix) const override {
-    if (RequireGemma4State(state).session().Position() != prefix.size()) {
+    auto& session = RequireGemma4State(state).session();
+    if (session.Position() != prefix.size()) {
       throw std::logic_error("Gemma 4 reused prefix does not match checkpoint");
     }
+    // A fully reused prompt decodes without a Sync; it still starts a request.
+    session.BeginRequest();
   }
 
   void SetPromptLookahead(
@@ -3640,6 +3651,9 @@ public:
     step.draft_rounds = after.verified - before.verified;
     step.draft_tokens = after.drafted - before.drafted;
     step.draft_accepted_tokens = after.accepted - before.accepted;
+    step.lookup_tokens = after.copied - before.copied;
+    step.lookup_accepted_tokens =
+        after.copied_accepted - before.copied_accepted;
     return step;
   }
 
@@ -3732,6 +3746,9 @@ public:
       step.draft_rounds = after.verified - before[i].verified;
       step.draft_tokens = after.drafted - before[i].drafted;
       step.draft_accepted_tokens = after.accepted - before[i].accepted;
+      step.lookup_tokens = after.copied - before[i].copied;
+      step.lookup_accepted_tokens =
+          after.copied_accepted - before[i].copied_accepted;
       step.execution_plan = plan;
     }
     return steps;

@@ -1131,7 +1131,10 @@ int RunQwen38FlashNextBenchmark(
           std::cerr << "Qwen3.8-Flash-Next tg depth=" << depth
                     << " cycles=" << stats.cycles
                     << " drafted=" << stats.drafted
-                    << " accepted=" << stats.accepted << " output_sha256="
+                    << " accepted=" << stats.accepted
+                    << " lookup_proposed=" << stats.lookup
+                    << " lookup_accepted=" << stats.lookup_accepted
+                    << " output_sha256="
                     << crypto::Sha256Hex(
                            std::span(reinterpret_cast<const std::uint8_t*>(
                                          generated.data()),
@@ -1405,7 +1408,9 @@ int RunGemma4Benchmark(const BenchOptions& options,
           std::cerr << "Gemma 4 tg depth=" << depth
                     << " cycles=" << stats.cycles
                     << " drafted=" << stats.drafted
-                    << " accepted=" << stats.accepted << " text="
+                    << " accepted=" << stats.accepted
+                    << " lookup_proposed=" << stats.copied
+                    << " lookup_accepted=" << stats.copied_accepted << " text="
                     << model->Decode(std::span(generated).first(
                            std::min<std::size_t>(generated.size(), 48)))
                     << '\n';
