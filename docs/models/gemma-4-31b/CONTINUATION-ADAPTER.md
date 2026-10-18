@@ -1,8 +1,9 @@
 # Gemma 4 continuation adapter (design)
 
-**Status:** design and prototyping on `feat/gemma-cache`; nothing below is
-wired into serving yet. Gemma 4 serves through the legacy `ContinuationCache`
-with its own device-resident `SessionSnapshot`. Upstream's switch-over
+**Status:** design and prototyping on `feat/gemma-cache`. Step 1 (window rows
+in the shared layer) is done; nothing is wired into Gemma serving yet. Gemma 4
+serves through the legacy `ContinuationCache` with its own device-resident
+`SessionSnapshot`. Upstream's switch-over
 ([card 19](../../cache-redesign/cards/19-switch-over.md)) deletes that cache
 and the runner snapshot hooks, so Gemma needs a `cache::Adapter` for the
 component cache before that change merges. The component cache also brings
@@ -161,14 +162,28 @@ had cost 3.4% before).
   input identity (`cache_prefixes`); a restore rebuilds the session's image
   records so `Sync` does not cut reuse at the first image.
 
-## Open decisions
+## Decisions
 
-- Swiping back after an in-place restore: the discarded reply's rows are gone,
-  so continuing from it re-prefills the reply unless a checkpoint covered it.
-  The legacy path behaves the same unless it froze the live frontier.
-- How window bytes count in retention's "cheap checkpoint" rule and in
-  `GridLimit`, which today consider only private-state bytes.
-- Window chunk size (64 or 256 rows).
+- **Swiped-away replies:** a same-conversation retry restores in place and
+  discards the reply the slot holds. Before discarding it, the slot captures a
+  checkpoint at the reply's end, unless the reply contained reasoning: Gemma's
+  template drops thoughts from history, so the next request cannot reuse past
+  the reply's start. The capture copies the reply's rows out (31B 870 KB per
+  token, 26B 218 KB; about 4.4 / 1.1 ms for 500 tokens) and makes continuing
+  from an earlier swipe free instead of re-prefilling it (500 tokens: about
+  0.15 s on 26B, 1.1–1.3 s on 31B at 16–32K). With `--sessions 2` the legacy
+  path keeps the latest reply live by restoring into the other session, at the
+  cost of copying the whole prefix there once.
+- **Window chunks of 64 rows**, global chunks of 256. Persistence time with
+  four times as many chunk files is measured before it is kept.
+- **Window bytes count as fixed per-checkpoint state** in retention's "cheap
+  checkpoint" rule and in `GridLimit`, beside private state. Gemma checkpoints
+  below about 2,050 tokens become cheap (window bytes exceed eight times their
+  row bytes), and the grid limit is 3 for 31B and 4 for 26B at a 32 GiB budget
+  (31B: none at 8 GiB, where each grid checkpoint would take a tenth of it).
+  Counted as rows instead, Gemma checkpoints would never be cheap and every
+  cold prompt would take four grid checkpoints (up to 3.2 GiB of window rows
+  on 31B).
 
 ## Plan
 
