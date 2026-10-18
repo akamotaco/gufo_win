@@ -823,8 +823,17 @@ struct TextRunnerPool::Request::Impl {
           checkpoints.push_back(position);
       }
     }
-    if (lease.component())
-      checkpoints = lease.PlannedCaptures(cache_prefix_tokens);
+    if (lease.component()) {
+      // Planned passes cannot see indivisible inputs such as images: move
+      // each point before the input it would split.
+      for (auto position : lease.PlannedCaptures(cache_prefix_tokens)) {
+        if (context)
+          position = context->PrefillStop(position, false);
+        if (position > prefill_offset &&
+            (checkpoints.empty() || position > checkpoints.back()))
+          checkpoints.push_back(position);
+      }
+    }
   }
 
   ~Impl() {
