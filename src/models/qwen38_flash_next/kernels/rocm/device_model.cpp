@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstring>
 #include <initializer_list>
 #include <utility>
 
@@ -105,6 +106,48 @@ struct Uploader {
     if (t.type == core::GgmlType::kQ8_0 && t.experts == 1) {
       max_q8_cols = std::max<std::size_t>(max_q8_cols, t.cols);
     }
+    return d;
+  }
+
+  DeviceTensor CopyPleConv(const TensorRef& t) {
+    if (t.type != core::GgmlType::kBF16) {
+      return Copy(t);
+    }
+    DeviceTensor d;
+    const std::size_t count = t.cols * t.rows;
+    const std::size_t size = count * sizeof(float);
+    void* ptr = nullptr;
+    if (t.empty() || !ok) {
+      return d;
+    }
+    if (Allocate(&ptr, size + kTailMargin) != hipSuccess) {
+      Fail("device allocation failed for PLE convolution");
+      return d;
+    }
+    if (Measuring()) {
+      return d;
+    }
+    allocations.push_back(ptr);
+    bytes += size + kTailMargin;
+    std::vector<float> values(count);
+    const auto* source = static_cast<const std::uint8_t*>(t.data);
+    for (std::size_t i = 0; i < count; ++i) {
+      std::uint16_t bf16 = 0;
+      std::memcpy(&bf16, source + i * 2, 2);
+      const std::uint32_t bits = static_cast<std::uint32_t>(bf16) << 16;
+      std::memcpy(&values[i], &bits, sizeof(float));
+    }
+    if (hipMemcpy(ptr, values.data(), size, hipMemcpyHostToDevice) != hipSuccess) {
+      Fail("PLE convolution upload failed");
+      return d;
+    }
+    (void)hipMemsetAsync(static_cast<std::uint8_t*>(ptr) + size, 0, kTailMargin,
+                         nullptr);
+    d.data = ptr;
+    d.type = core::GgmlType::kF32;
+    d.cols = static_cast<std::uint32_t>(t.cols);
+    d.rows = static_cast<std::uint32_t>(t.rows);
+    d.experts = 1;
     return d;
   }
 
@@ -283,7 +326,7 @@ struct Uploader {
     d.ple_norm_key = Copy(l.ple_norm_key);
     d.ple_norm_query = Copy(l.ple_norm_query);
     d.ple_norm_conv = Copy(l.ple_norm_conv);
-    d.ple_conv1d = Copy(l.ple_conv1d);
+    d.ple_conv1d = CopyPleConv(l.ple_conv1d);
     d.router = Stack({&l.router, &l.shexp_gate_inp});
     d.ffn_gate_exps = Copy(l.ffn_gate_exps);
     d.ffn_up_exps = Copy(l.ffn_up_exps);
