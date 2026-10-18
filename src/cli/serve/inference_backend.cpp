@@ -42,6 +42,7 @@
 #include "src/models/deepseek_v4_flash/dspark_sampler.hpp"
 #include "src/models/deepseek_v4_flash/engine.hpp"
 #include "src/models/gemma4/chat_template.hpp"
+#include "src/models/gemma4/continuation_adapter.hpp"
 #include "src/models/gemma4/engine.hpp"
 #include "src/models/gemma4/vision/prompt.hpp"
 #if defined(ENGINE_ENABLE_HIP)
@@ -3185,12 +3186,23 @@ public:
   Gemma4TextRunnerState(const std::shared_ptr<Gemma4Model>& model,
                         std::uint32_t max_context) {
     std::string error;
-    session_ = model->CreateSession(max_context, &error);
-    if (session_ == nullptr) {
+    owned_ = model->CreateSession(max_context, &error);
+    if (owned_ == nullptr) {
       throw std::runtime_error("Failed to create Gemma 4 session: " + error);
     }
+    session_ = owned_.get();
   }
-  void Invalidate() noexcept override { session_->Reset(); }
+  /// The session of a component-cache slot, owned by the adapter.
+  Gemma4TextRunnerState(Gemma4Session& session, cache::Adapter& adapter,
+                        cache::Slot& slot)
+      : session_(&session), adapter_(&adapter), slot_(&slot) {}
+  void Invalidate() noexcept override {
+    if (adapter_ != nullptr) {
+      (void)adapter_->Invalidate(*slot_);
+    } else {
+      session_->Reset();
+    }
+  }
   void SetCancellationCheck(const CancellationCheck&) override {}
   [[nodiscard]] TextRunnerMeasuredResources MeasuredResources()
       const noexcept override {
@@ -3221,7 +3233,10 @@ public:
   std::vector<std::int32_t>& lookahead() { return lookahead_; }
 
 private:
-  std::unique_ptr<Gemma4Session> session_;
+  std::unique_ptr<Gemma4Session> owned_;
+  Gemma4Session* session_{};
+  cache::Adapter* adapter_{};
+  cache::Slot* slot_{};
   std::shared_ptr<const models::gemma4::vision::Prompt> images_;
   std::vector<std::int32_t> lookahead_;
   std::map<std::size_t,
@@ -3282,6 +3297,167 @@ const Gemma4TextRunnerState& RequireGemma4State(const TextRunnerState& state) {
   return *gemma;
 }
 
+// Component-cache resources for Gemma 4, as for Flash-Next: checkpoint rows
+// and private states live in committed host pages (registered with the GPU,
+// read by the disk tier), transferred on pooled streams.
+std::unique_ptr<ComponentCacheResources> CreateGemma4ComponentResources(
+    const std::shared_ptr<Gemma4Model>& model, std::uint32_t max_context,
+    const cache::Identity& identity, cache::ResourceLedger& ledger,
+    std::size_t ram) {
+  struct Backing {
+    hip::TransferPool streams{64};
+    std::unique_ptr<hip::CommittedBackingPool> pool;
+    std::map<std::uint32_t, std::size_t> component_classes;
+  };
+  auto result = std::make_unique<ComponentCacheResources>();
+  auto adapter = std::make_unique<models::gemma4::ContinuationAdapter>(
+      model, max_context, identity);
+  auto* gemma = adapter.get();
+  (void)ram;  // Backing sizing follows actual slot allocation below.
+  result->adapter = std::move(adapter);
+  auto backing = std::make_shared<Backing>();
+  result->transfer_batch_size = 16;
+  const auto rounded = [](std::size_t bytes) {
+    return (bytes + 4095) / 4096 * 4096;
+  };
+  for (const auto& d : result->adapter->Components()) {
+    const auto bytes = rounded(d.kind == cache::ComponentKind::kPrivateState
+                                   ? d.state_bytes
+                                   : d.row_bytes * d.rows_per_chunk);
+    backing->component_classes.emplace(d.id.value, bytes);
+  }
+  result->commit_backing = [backing, &ledger, gemma](std::size_t budget) {
+    const auto plan = gemma->BackingPlan(budget);
+    if (plan.size() != 1)
+      throw std::invalid_argument("insufficient component backing budget");
+    const auto& allocation = plan.front();
+    // Equal segments of about 1 GiB that fit two of the largest payloads;
+    // pages commit as captures need them while the host keeps its reserve.
+    std::size_t largest = 0;
+    for (const auto& [id, bytes] : backing->component_classes)
+      largest = std::max(largest, bytes);
+    const auto block = allocation.block_bytes;
+    const auto target =
+        std::max<std::size_t>(std::size_t{1} << 30, 2 * largest) / block;
+    const auto parts =
+        std::max<std::size_t>((allocation.blocks + target - 1) / target, 1);
+    const auto segment = (allocation.blocks + parts - 1) / parts * block;
+    struct Limited {
+      std::mutex mutex;
+      std::chrono::steady_clock::time_point refused;
+      bool active{};
+    };
+    backing->pool = std::make_unique<hip::CommittedBackingPool>(
+        ledger,
+        hip::BackingPoolConfig{
+            allocation.blocks * allocation.block_bytes +
+                allocation.metadata_bytes,
+            allocation.block_bytes, allocation.metadata_bytes, segment,
+            [limited = std::make_shared<Limited>()](std::size_t bytes) {
+              const std::lock_guard lock(limited->mutex);
+              const auto now = std::chrono::steady_clock::now();
+              if (limited->active &&
+                  now - limited->refused < std::chrono::seconds(1))
+                return false;
+              const auto ceiling = HostSnapshotCeilingBytes();
+              std::size_t heap_free = 0, heap_total = 0;
+              const bool heap_fits =
+                  hipMemGetInfo(&heap_free, &heap_total) == hipSuccess &&
+                  hip::HeapFitsAboveReserve(heap_free, bytes);
+              if (ceiling >= bytes && heap_fits) {
+                limited->active = false;
+                return true;
+              }
+              if (!limited->active)
+                Logger::Warn(
+                    "cache",
+                    "schema=component-cache-v1 event=backing_limited reason=" +
+                        std::string(heap_fits ? "host_reserve "
+                                              : "device_heap_reserve ") +
+                        "segment_bytes=" + std::to_string(bytes) +
+                        " host_headroom_bytes=" + std::to_string(ceiling) +
+                        " device_heap_free_bytes=" + std::to_string(heap_free));
+              limited->active = true;
+              limited->refused = now;
+              return false;
+            }});
+    backing->pool->GrowAhead(2);
+    backing->pool->WaitForGrowth();
+    Logger::Info(
+        "cache",
+        "schema=component-cache-v1 event=backing_prepared committed_bytes=" +
+            std::to_string(backing->pool->CommittedBytes()) +
+            " long_term_pinned_bytes=" +
+            std::to_string(backing->pool->LongTermPinnedBytes()));
+  };
+  result->prepare_prefill = [backing] { backing->pool->GrowAhead(2); };
+  result->can_capture = [backing](auto payloads) {
+    return backing->pool->CanFit(payloads);
+  };
+  result->owner = backing;
+  result->stream = [backing]() -> std::unique_ptr<cache::Stream> {
+    return backing->streams.TryAcquire();
+  };
+  result->allocate = [backing](const cache::PayloadRequest& request) {
+    const auto capacity =
+        backing->component_classes.at(request.component.value);
+    if (request.bytes > capacity)
+      throw std::logic_error("component capture exceeds its backing class");
+    const auto segments = backing->pool->PageCommitAllocations();
+    const auto started = std::chrono::steady_clock::now();
+    auto block = backing->pool->TryAcquire(request.category, request.bytes);
+    if (backing->pool->PageCommitAllocations() != segments)
+      Logger::Info(
+          "cache",
+          "schema=component-cache-v1 event=backing_grown committed_bytes=" +
+              std::to_string(backing->pool->CommittedBytes()) + " segments=" +
+              std::to_string(backing->pool->PageCommitAllocations()) +
+              " long_term_pinned_bytes=" +
+              std::to_string(backing->pool->LongTermPinnedBytes()) +
+              " acquire_ms=" +
+              std::to_string(std::chrono::duration<double, std::milli>(
+                                 std::chrono::steady_clock::now() - started)
+                                 .count()));
+    if (!block)
+      throw cache::ResourceExhausted();
+    if (request.category == cache::ResourceCategory::kBackingAssigned)
+      backing->pool->GrowAhead();
+    auto owner = std::make_shared<hip::BackingBlock>(std::move(*block));
+    return ComponentCaptureBuffer{
+        owner->Bytes(),
+        [owner] {
+          owner->Convert();
+          return std::move(*owner).TakePayload();
+        },
+        backing->pool.get(),
+        [owner, request](cache::SlotLease& lease, auto source) {
+          return cache::Payload::Borrowed(
+              std::move(*owner).Borrow(lease, request.component, request.first,
+                                       request.end, request.bytes, source));
+        }};
+  };
+  result->staging = [](std::size_t bytes) {
+    void* data = nullptr;
+    const auto status = hipHostMalloc(&data, bytes, hipHostMallocCoherent);
+    if (status != hipSuccess)
+      throw std::runtime_error(hipGetErrorString(status));
+    auto owner = std::shared_ptr<void>(
+        data, [](void* value) { (void)hipHostFree(value); });
+    std::memset(data, 0, bytes);
+    return cache::StagingAllocation{std::move(owner),
+                                    {static_cast<std::uint8_t*>(data), bytes}};
+  };
+  // Borrowed rows may still be written by forwards queued on the executor.
+  result->copy_observed_rows = [gemma](auto source, auto destination,
+                                       cache::Stream& stream) {
+    auto& transfer = dynamic_cast<hip::TransferStream&>(stream);
+    gemma->AfterExecution(transfer.Native());
+    return transfer.Copy(destination.data(), source.data(), destination.size(),
+                         hip::CopyDirection::kDeviceToHost, destination.size());
+  };
+  return result;
+}
+
 class Gemma4TextRunner final : public TextModelRunner {
 public:
   Gemma4TextRunner(
@@ -3301,6 +3477,37 @@ public:
               max_context_, model_->DraftTokens(), ring),
           .payload_version = Gemma4Session::kSnapshotPayloadVersion,
       };
+      component_identity_ = persistence_->compatibility_identity;
+    } else {
+      // Without artifact fingerprints checkpoints stay in this process.
+      std::ostringstream identity;
+      identity << "schema=gufo-process-text-continuation-v1\n"
+               << "model_instance=" << model_.get() << '\n'
+               << "context_tokens=" << max_context_ << '\n'
+               << "mtp=" << model_->HasMtp() << '\n'
+               << "draft_max_tokens=" << model_->DraftTokens() << '\n';
+      const auto canonical = identity.str();
+      component_identity_.assign(canonical.begin(), canonical.end());
+    }
+  }
+
+  [[nodiscard]] bool UsesComponentCache() const override { return true; }
+  [[nodiscard]] std::unique_ptr<ComponentCacheResources>
+  CreateComponentCacheResources(cache::ResourceLedger& ledger,
+                                std::size_t ram) const override {
+    return CreateGemma4ComponentResources(model_, max_context_,
+                                          component_identity_, ledger, ram);
+  }
+  [[nodiscard]] std::unique_ptr<TextRunnerState> BindComponentState(
+      cache::Adapter& adapter, cache::Slot& slot) const override {
+    auto& gemma = dynamic_cast<models::gemma4::ContinuationAdapter&>(adapter);
+    return std::make_unique<Gemma4TextRunnerState>(gemma.GetSession(slot),
+                                                   adapter, slot);
+  }
+  void ReconcileComponentState(TextRunnerState& state,
+                               std::size_t position) const override {
+    if (RequireGemma4State(state).session().Position() != position) {
+      throw std::logic_error("Gemma 4 component state position differs");
     }
   }
 
@@ -3593,7 +3800,7 @@ public:
     }
     std::string error;
     if (!session.Sync(prefix, spans, embed, &error, lookahead)) {
-      session.Reset();
+      gemma.Invalidate();
       throw std::runtime_error("Gemma 4 prefill failed: " + error);
     }
     return {.consumed_tokens = consumed,
@@ -3868,6 +4075,7 @@ private:
   std::uint32_t image_tokens_;
   std::uint32_t max_context_;
   std::optional<TextRunnerPersistenceDescriptor> persistence_;
+  cache::Identity component_identity_;
 };
 #endif
 
