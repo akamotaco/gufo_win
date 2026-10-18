@@ -398,6 +398,11 @@ void Session::DropLookahead() noexcept {
   ahead_stops_.clear();
 }
 
+namespace {
+// Most prompt lookahead rows one prefill forward evaluates past its frontier.
+constexpr std::size_t kRiddenRows = 64;
+}  // namespace
+
 bool Session::Extend(std::size_t begin, std::string* error_msg,
                      const ImageEmbeddings& embed,
                      std::span<const TokenId> lookahead,
@@ -454,10 +459,13 @@ bool Session::Extend(std::size_t begin, std::string* error_msg,
         // The lookahead rides in the frontier's forward where rows are left,
         // whole or up to a later stop. It keeps the frontier's window and the
         // rest of that window's first 64-row chunk in the ring, as a capture
-        // at the frontier reads them.
+        // at the frontier reads them. Each ridden row also delays that
+        // capture (and requests waiting for it); past kRiddenRows the delay
+        // exceeds the separate forward it saves (26B: one of a few rows costs
+        // about as much as 120 rows of a long one).
         const std::size_t room = std::min<std::size_t>(
-            executor.max_rows() - count,
-            cache_->ring - model_->config().sliding_window - 64);
+            {executor.max_rows() - count,
+             cache_->ring - model_->config().sliding_window - 64, kRiddenRows});
         if (lookahead.size() <= room) {
           ridden = lookahead.size();
         } else {
