@@ -327,6 +327,27 @@ had cost 3.4% before).
   splits once more while the leader's capture is pending (the scheduler
   bounds prefill steps while a peer waits; legacy's capture blocks instead),
   within 1.3% of legacy's first-token times alone.
+- **Disk tier, 64- against 256-row window chunks:** a conversation of seven
+  turns (11K to 19K tokens, about 1,300 new tokens each) with `--cache-disk`,
+  then a restart and an eighth turn restored from disk:
+
+  | Model, chunk | Files | Disk bytes | fsync | Other filesystem | Checksum | Disk restore |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | 26B, 64 rows | 4,351 | 1.12 GB | 2,389 ms | 316 ms | 72 ms | 112 ms |
+  | 26B, 256 rows | 1,951 | 1.20 GB | 1,190 ms | 225 ms | 73 ms | 118 ms |
+  | 31B, 64 rows | 8,601 | 4.47 GB | 6,544 ms | 1,370 ms | 663 ms | 402 ms |
+  | 31B, 256 rows | 3,801 | 4.73 GB | 3,582 ms | 1,037 ms | 689 ms | 397 ms |
+
+  Times are totals over four publications. Each payload file is synced
+  before its rename (about 0.8–0.9 ms per file on this btrfs root), so
+  publication time follows the file count: a 31B publication takes about
+  2.1 s with 64-row chunks and 1.3 s with 256-row ones. Publication runs in
+  the background while the model is idle; turn latencies and disk restores
+  are the same with both. 64-row chunks stay: they save 6–7% of disk and RAM
+  bytes and bound each capture's copied tail to 63 rows instead of 255
+  (26B 39 MB, 31B 157 MB more per capture). Fewer syncs per publication in
+  the shared disk store would remove most of the difference for both chunk
+  sizes.
 - **Images (26B MTP with its sidecar):** `image-inputs`, `tool-images`,
   `conversation` and the image cancellation history pass. The component
   path had placed a grid checkpoint inside an image span, which Gemma
