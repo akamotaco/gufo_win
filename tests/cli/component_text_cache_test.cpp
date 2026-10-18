@@ -1569,6 +1569,56 @@ void SwipeRestoresInPlace() {
     cold.Invalidate();
   }
 }
+// A live slot whose tokens and inputs extend a checkpoint another slot
+// captured keeps its rows when that checkpoint restores into it.
+void SharedPrefixRestoresInPlace() {
+  auto runner = std::make_shared<Runner>();
+  runner->in_place = true;
+  ComponentTextCache cache(runner, 2, 1 << 22, {});
+  const auto append = [&](auto& lease,
+                          std::span<const TextRunnerToken> tokens) {
+    auto& state = dynamic_cast<State&>(lease->state());
+    runner->adapter->Append(state.slot, tokens, tokens);
+  };
+  const auto hash = [&](auto& lease) {
+    return runner->adapter->RecurrentHash(
+        dynamic_cast<State&>(lease->state()).slot);
+  };
+  std::vector<TextRunnerToken> shared(8);
+  std::iota(shared.begin(), shared.end(), 1);
+  const auto suffix = [&](TextRunnerToken token) {
+    auto tokens = shared;
+    tokens.insert(tokens.end(), 4, token);
+    return tokens;
+  };
+  // The first slot captures the shared prefix and stays busy.
+  auto first = cache.Acquire(shared, {}, {}, true, 0, true);
+  append(first, shared);
+  assert(first->TryReserveSnapshot(first->CaptureBytes(), shared.size(), false,
+                                   SnapshotPurpose::kContinuation, {}));
+  assert(first->PublishSnapshot(shared, first->Capture(), false));
+  // The second computes the prefix itself and leaves a frontier past it.
+  const auto other = suffix(50);
+  auto second = cache.Acquire(other, {}, {}, false, 0, true);
+  append(second, other);
+  (void)second->Commit({}, {}, other);
+  // A third conversation takes the second slot, the only idle one.
+  const auto third_tokens = suffix(60);
+  auto third = cache.Acquire(third_tokens, {}, {}, true, 0, true);
+  assert(third->cached_tokens() == shared.size());
+  std::size_t private_bytes = 0;
+  for (const auto& d : runner->adapter->Components())
+    private_bytes += d.state_bytes;
+  assert(third->restored_snapshot_bytes() == private_bytes);
+  append(third, std::span(third_tokens).subspan(shared.size()));
+  const auto restored = hash(third);
+  third->Invalidate();
+  first->Invalidate();
+  auto cold = cache.Acquire(third_tokens, {}, {}, false, 0, true);
+  append(cold, third_tokens);
+  assert(hash(cold) == restored);
+  cold->Invalidate();
+}
 }  // namespace
 int main() {
   PublishedResidentCheckpointKeepsDiskStep();
@@ -1602,4 +1652,5 @@ int main() {
   WindowRowsReuseAndBranches();
   WindowedDeepRowsSurviveDiskRestart();
   SwipeRestoresInPlace();
+  SharedPrefixRestoresInPlace();
 }

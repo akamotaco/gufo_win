@@ -175,6 +175,8 @@ struct ComponentTextCache::Impl {
     // The live frontier's prompt, to tell whether any checkpoint covers it.
     std::vector<cache::Token> live_tokens;
     cache::Identity live_input;
+    // The live frontier's inputs, for any shorter boundary.
+    cache::InputIdentity live_inputs;
     // Acquisition order; cold assignment replaces the oldest live frontier.
     std::uint64_t used{};
     bool busy{};
@@ -955,6 +957,21 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
       for (auto& candidate : impl_->entries)
         if (!candidate->busy && (!entry || rank(*candidate) < rank(*entry)))
           entry = candidate.get();
+      // A live frontier on the checkpoint's tokens and inputs holds its rows
+      // too, as the slot of a conversation sharing the prefix does.
+      if (entry && entry->live && found.selected &&
+          found.selected->checkpoint &&
+          impl_->resources->adapter->GetCapabilities().in_place_restore) {
+        const auto& checkpoint = *found.selected->checkpoint;
+        const auto tokens = checkpoint.Tokens();
+        if (entry->live_tokens.size() >= tokens.size() &&
+            std::equal(tokens.begin(), tokens.end(),
+                       entry->live_tokens.begin()) &&
+            std::ranges::equal(
+                entry->live_inputs.Through(tokens.size()).Complete(),
+                checkpoint.Input()))
+          in_place = found.selected->checkpoint;
+      }
     }
     if (!entry)
       throw cache::SlotBusy();
@@ -1614,6 +1631,7 @@ std::size_t ComponentTextCache::Lease::Commit(
     const std::lock_guard lock(impl_->cache->mutex);
     impl_->entry->live_tokens = live;
     impl_->entry->live_input = At(impl_->input, impl_->prompt.size());
+    impl_->entry->live_inputs = impl_->input;
     impl_->entry->live = impl_->cache->index.Insert(cache::LiveFrontier{
         location, std::move(live), impl_->cache->identity,
         At(impl_->input, impl_->prompt.size()), std::move(positions)});
