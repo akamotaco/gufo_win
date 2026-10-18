@@ -608,7 +608,8 @@ void CheckVectorGrouping(bool down = false) {
   const std::vector<q::WeightType> formats =
       down ? std::vector{q::WeightType::kQ5_1, q::WeightType::kQ8_0}
            : std::vector{q::WeightType::kQ4_K, q::WeightType::kQ5_K,
-                         q::WeightType::kQ5_1, q::WeightType::kQ8_0};
+                         q::WeightType::kQ5_1, q::WeightType::kQ8_0,
+                         q::WeightType::kIQ4_XS};
   std::vector<float> x(tokens * cols);
   std::uint32_t seed = 37;
   // Mix ordinary and small activations: saturated SwiGLU alone misses
@@ -638,10 +639,12 @@ void CheckVectorGrouping(bool down = false) {
     } else {
       weights = {
           MakeQ4K(experts, rows, cols, 11), MakeQ5K(experts, rows, cols, 13),
-          MakeQ5_1(experts, rows, cols, 17), MakeQ8_0(experts, rows, cols, 23)};
+          MakeQ5_1(experts, rows, cols, 17), MakeQ8_0(experts, rows, cols, 23),
+          MakeIQ4XS(experts, rows, cols, 29)};
       paired_weights = {
           MakeQ4K(experts, rows, cols, 71), MakeQ5K(experts, rows, cols, 73),
-          MakeQ5_1(experts, rows, cols, 79), MakeQ8_0(experts, rows, cols, 83)};
+          MakeQ5_1(experts, rows, cols, 79), MakeQ8_0(experts, rows, cols, 83),
+          MakeIQ4XS(experts, rows, cols, 89)};
     }
     const std::size_t count = tokens * used * rows;
     const std::vector<float> dirty(count + 2 * guard, poison);
@@ -733,7 +736,8 @@ void CheckVectorGrouping(bool down = false) {
       }
       if (formats[f] == q::WeightType::kQ4_K ||
           formats[f] == q::WeightType::kQ5_K ||
-          formats[f] == q::WeightType::kQ8_0) {
+          formats[f] == q::WeightType::kQ8_0 ||
+          formats[f] == q::WeightType::kIQ4_XS) {
         // Compare the fused vector path with the original GPU SwiGLU too:
         // inactive experts, nonfinite scales and a ragged last row must
         // retain their exact values and output guards.
