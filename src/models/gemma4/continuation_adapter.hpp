@@ -39,6 +39,11 @@ struct ContinuationBackingClass {
 // MTP drafter's input) and metadata are private. The drafter reads the
 // target's cache, so speculative decoding adds no components. The caller
 // supplies the artifact and template identity; the adapter adds its layout.
+//
+// Captures copy their rows instead of lending the slot's: lent rows are
+// copied anyway before the slot is reassigned or restored in place, one
+// chunk per wait (a 22K-token prompt's global rows took 8-12 ms there),
+// while a capture gathers them in one launch at about 100 GB/s.
 class ContinuationAdapter final : public cache::Adapter {
 public:
   ContinuationAdapter(std::shared_ptr<Model>, std::uint32_t context,
@@ -90,9 +95,6 @@ public:
   [[nodiscard]] cache::Completion CopyRowsOut(
       const cache::Slot&, cache::ComponentId, cache::Rows first,
       cache::Rows end, std::span<std::byte>, cache::Stream&) override;
-  [[nodiscard]] std::span<const std::byte> BorrowRowsView(
-      const cache::Slot&, cache::ComponentId, cache::Rows,
-      cache::Rows) const override;
   [[nodiscard]] cache::Completion CopyRowsIn(cache::Slot&, cache::ComponentId,
                                              cache::Rows first, cache::Rows end,
                                              std::span<const std::byte>,

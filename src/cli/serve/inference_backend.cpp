@@ -3447,7 +3447,8 @@ std::unique_ptr<ComponentCacheResources> CreateGemma4ComponentResources(
     return cache::StagingAllocation{std::move(owner),
                                     {static_cast<std::uint8_t*>(data), bytes}};
   };
-  // Borrowed rows may still be written by forwards queued on the executor.
+  // Durable captures require this hook, but the adapter lends no rows, so
+  // persistence never reads a slot through it.
   result->copy_observed_rows = [gemma](auto source, auto destination,
                                        cache::Stream& stream) {
     auto& transfer = dynamic_cast<hip::TransferStream&>(stream);

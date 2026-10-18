@@ -653,21 +653,6 @@ cache::Completion ContinuationAdapter::CopyRowsOut(
     }
   });
 }
-std::span<const std::byte> ContinuationAdapter::BorrowRowsView(
-    const cache::Slot& slot, cache::ComponentId id, cache::Rows first,
-    cache::Rows end) const {
-  const auto& component = Component(id);
-  // The host token vector can move as it grows. Window rows leave the ring
-  // within a few thousand tokens, so their chunks are copied at capture.
-  if (component.part == ContinuationPart::kTokens ||
-      component.descriptor.kind != cache::ComponentKind::kAppendRows)
-    return {};
-  auto& state = const_cast<State&>(As(slot));
-  if (!state.IsValid() || first >= end || end > state.session->Position())
-    throw std::invalid_argument("invalid Gemma 4 borrowed range");
-  const auto piece = RowPieces(state, component, first, end).front();
-  return {piece.pointer, piece.bytes};
-}
 cache::Completion ContinuationAdapter::CopyRowsIn(
     cache::Slot& slot, cache::ComponentId id, cache::Rows first,
     cache::Rows end, std::span<const std::byte> bytes, cache::Stream& stream) {
