@@ -1,8 +1,9 @@
 # Gemma 4 continuation adapter (design)
 
-**Status:** prototype on `feat/gemma-cache`. Steps 1 and 2 are done: window
-rows in the shared layer, and Gemma serving through the component cache
-(results below); in-place restore and batched transfers are next. Before
+**Status:** prototype on `feat/gemma-cache`. Steps 1–3 are done: window
+rows in the shared layer, Gemma serving through the component cache, and
+in-place restore (results below); the reply-end checkpoint and batched
+transfers are next. Before
 this, Gemma 4 served through the legacy `ContinuationCache` with its own
 device-resident `SessionSnapshot`. Upstream's switch-over
 ([card 19](../../cache-redesign/cards/19-switch-over.md)) deletes that cache
@@ -221,4 +222,17 @@ had cost 3.4% before).
   copied at capture). Three requests re-prefill 3–7 tokens the legacy cache
   served: under a full 32 GiB budget (both caches ran full in this run) the
   component cache evicted their full-prompt retry copies first.
+- **In-place restore:** a branch records the checkpoints it captured or was
+  restored from, and the adapter reports which of their rows the slot still
+  holds (`Adapter::ResidentRows`: global rows below the branch's first
+  rewrite, window rows whose ring slots still hold them). A swipe of a
+  16,159-token 26B prompt loads only the private state (1.06 MB): restore
+  0.64–0.92 ms and first token 1.2–1.4 ms, against 0.19–4.4 ms and 0.6–4.8 ms
+  for the legacy cache. Against the same legacy control, 2,678 of 2,952
+  timing measures pass (2,479 before); the remaining flags are mostly
+  shared-prefix captures (about 8 ms, window chunks copied) and queueing
+  (3–4 ms), and one request (`long_json_stop`) still loses its retry copy to
+  byte pressure. `gemma4.continuation` covers both in-place cases: after a
+  short reply only the private state loads; after a ring wrap the global rows
+  stay and the window reloads.
 
