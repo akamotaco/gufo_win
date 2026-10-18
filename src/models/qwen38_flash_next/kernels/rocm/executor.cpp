@@ -2764,10 +2764,9 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
         : l.ffn_gate_exps.type == GgmlType::kIQ4_XS ? WeightType::kIQ4_XS
                                                     : WeightType::kQ4_K;
     // Wide batches build only the 64-token (down) and 128-token (paired)
-    // tile maps. The paired kernel covers the K-quants only, so IQ4_XS runs
-    // gate and up as two routed GEMMs over the 64-token map.
+    // tile maps; the paired kernel covers Q4_K, Q5_K and IQ4_XS.
     const bool wide_map = routed_64_tiles_ != 0;
-    const bool paired = wide_map && gate_type != WeightType::kIQ4_XS;
+    const bool paired = wide_map;
     const std::uint32_t split_tiles =
         wide_map ? routed_64_tiles_ : routed_n_tiles_;
     const std::uint32_t split_rows = wide_map ? 64 : routed_tile_rows_;
