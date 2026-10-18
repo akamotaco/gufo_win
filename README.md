@@ -4,6 +4,79 @@
   <img src="assets/gufo-logo.jpg" alt="Gufo logo" width="180">
 </p>
 
+## gufo_win: native Windows build with Gemma 4
+
+This repository runs Gufo **natively on Windows 11** (no WSL) on AMD Strix Halo
+(`gfx1151`), and includes the **Gemma 4 engine** from the `feat/gemma` fork.
+It combines three sources:
+
+| Layer | Source | What it brings |
+| --- | --- | --- |
+| Engine | [gufo-org/gufo](https://github.com/gufo-org/gufo) `main` | Gufo itself: Qwen3.8-Flash-Next, Qwen3.8-27B, DeepSeek V4 Flash and more |
+| Gemma 4 | [franzmoca/gufo](https://github.com/franzmoca/gufo) `feat/gemma` | Native Gemma 4 26B-A4B / 31B engine with MTP, vision and tool calls (described in the next section) |
+| Windows port | [pixmaate/gufo](https://github.com/pixmaate/gufo) `main` | POSIX compatibility layer (`compat/win32`), Winsock and WDDM memory handling, build and launch scripts ([docs/WINDOWS.md](docs/WINDOWS.md)) |
+
+On top of those, this branch ports the upstream code that arrived after the
+Windows port was written (the new disk cache, socket and diagnostics code) and
+adapts the build to TheRock 10.2. Every change, conflict decision and open item
+is recorded in [docs/WINDOWS-PORTING-NOTES.md](docs/WINDOWS-PORTING-NOTES.md)
+(Korean).
+
+### Measured on Windows
+
+Gemma 4 26B-A4B Q8_0 on one Strix Halo machine (Windows 11, 96 GB GPU carve-out),
+same GGUF and prompts against a ROCm llama.cpp `llama-server` (b10967, flash
+attention, no speculative decoding). Server-reported rates, temperature 0, prompt
+cache defeated, one server at a time, October 18, 2026:
+
+| Prompt | llama.cpp prefill | Gufo prefill | llama.cpp decode | Gufo decode | Gufo decode, MTP |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 2.1K tokens | 1,624–1,735 | 3,028 | 31.1 | 40.4 | 57.3 |
+| 8.5K tokens | 602–608 | 3,062 | 29.4–29.8 | 39.9 | 54.0 |
+| 31.8K tokens | 959–965 | 2,584 | 29.6 | 37.6 | 51.9 |
+
+Model load took 8 s natively against 42 s for the same build reading the GGUF
+from `/mnt/c` under WSL2.
+
+### Build on Windows
+
+Prerequisites are in [docs/WINDOWS.md](docs/WINDOWS.md#prerequisites): TheRock ROCm
+for gfx1151, Visual Studio Build Tools (C++), CMake, Ninja and vcpkg with
+`icu curl openssl libpng libjpeg-turbo libwebp pkgconf` (`x64-windows`). Then:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\windows\build.ps1 `
+  -Rocm C:\TheRock\build -Vcpkg C:\vcpkg -Ninja C:\tools\ninja\ninja.exe
+build\release\gufo.exe diagnose
+```
+
+This branch is built and tested with TheRock **10.2.0** (the port was validated
+on 10.0.0; `build.ps1` warns about the difference). Serve a model with a fixed
+prompt-cache budget, since the automatic one pins half of the free RAM:
+
+```powershell
+build\release\gufo.exe serve --host 127.0.0.1 --port 8093 llm `
+  --model G4-26B-A4B-Q8_0.gguf --speculative mtp --mtp-model mtp-gemma-4-26B-A4B-it-Q8_0.gguf `
+  --context 65536 --cache-ram-bytes 4294967296
+```
+
+### Status
+
+- Working: build, `gufo diagnose`, Gemma 4 26B-A4B serving with and without MTP.
+- Not yet verified on this build: Qwen3.8-Flash-Next serving, the disk prompt
+  cache (`--cache-disk`), and the test suite (`BUILD_TESTING` is off; some new
+  upstream tests still use raw POSIX sockets).
+- Not included yet from the Windows port: the Flash-Next decode tuning
+  (`tuning.hpp` switches), the Qwen3.8-27B Windows kernels and Qwen3.6-35B-A3B.
+  They conflict with newer upstream code and are listed in the porting notes.
+- Updates: `main` merges `franzmoca/gufo feat/gemma` (which merges upstream
+  periodically), and Windows-port commits are picked by hand.
+
+Gufo is MIT licensed. Thanks to the Gufo maintainers, to franzmoca for the
+Gemma 4 engine and to pixmaate for the Windows port.
+
+---
+
 ## About this fork: Gemma 4 on Gufo
 
 This fork of [gufo-org/gufo](https://github.com/gufo-org/gufo) adds a native
