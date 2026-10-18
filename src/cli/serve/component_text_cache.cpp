@@ -8,6 +8,7 @@
 #include <cstring>
 #include <mutex>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -153,6 +154,7 @@ public:
               " tokens=" + std::to_string(e.boundary) +
               " rank=" + std::to_string(e.rank) +
               " unique_bytes_freed=" + std::to_string(e.unique_bytes_freed) +
+              " records=" + std::to_string(e.retained_records) +
               " ledger_bytes=" + std::to_string(e.ledger_bytes));
       // A capacity refusal at admission refuses the captured copy, as one
       // during capture does.
@@ -966,9 +968,17 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
                           bool(e.live),
                           e.live_tokens.size() >= kUncoveredTokens, e.used};
       };
-      for (auto& candidate : impl_->entries)
-        if (!candidate->busy && (!entry || rank(*candidate) < rank(*entry)))
+      // Each rank looks the frontier up once; compare the computed ranks.
+      std::optional<decltype(rank(*impl_->entries.front()))> best;
+      for (auto& candidate : impl_->entries) {
+        if (candidate->busy)
+          continue;
+        auto ranked = rank(*candidate);
+        if (!best || ranked < *best) {
+          best = std::move(ranked);
           entry = candidate.get();
+        }
+      }
       // A live frontier on the checkpoint's tokens and inputs holds its rows
       // too, as the slot of a conversation sharing the prefix does.
       if (entry && entry->live && found.selected &&

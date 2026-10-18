@@ -9,6 +9,14 @@
 
 namespace gufo::cache {
 namespace {
+// Components, positions and availability follow the descriptor order in
+// practice: try the descriptor's own index before searching the rest.
+template<class Range, class Match>
+auto FindAt(Range& range, std::size_t k, Match match) {
+  if (k < std::size(range) && match(range[k]))
+    return std::begin(range) + static_cast<std::ptrdiff_t>(k);
+  return std::ranges::find_if(range, match);
+}
 std::size_t Add(std::size_t a, std::size_t b) {
   if (b > std::numeric_limits<std::size_t>::max() - a)
     throw std::overflow_error("prefix index size overflow");
@@ -283,13 +291,14 @@ struct PrefixIndex::Impl {
   }
   bool CheckpointCoherent(const Tree& tree,
                           const Checkpoint& checkpoint) const {
-    if (checkpoint.Components().size() != tree.descriptors.size())
+    const auto components = checkpoint.Components();
+    if (components.size() != tree.descriptors.size())
       return false;
-    for (const auto& d : tree.descriptors) {
-      auto c = std::ranges::find_if(
-          checkpoint.Components(),
-          [&](const auto& c) { return Same(d, c.descriptor); });
-      if (c == checkpoint.Components().end() ||
+    for (std::size_t k = 0; k < tree.descriptors.size(); ++k) {
+      const auto& d = tree.descriptors[k];
+      auto c = FindAt(components, k,
+                      [&](const auto& c) { return Same(d, c.descriptor); });
+      if (c == components.end() ||
           (d.kind == ComponentKind::kPrivateState &&
            c->position.valid_rows != checkpoint.Boundary()))
         return false;
@@ -354,9 +363,10 @@ struct PrefixIndex::Impl {
       if (!r.live->available ||
           r.live->positions.size() != tree.descriptors.size())
         return false;
-      for (const auto& d : tree.descriptors) {
-        auto p =
-            std::ranges::find(r.live->positions, d.id, &ComponentPosition::id);
+      for (std::size_t k = 0; k < tree.descriptors.size(); ++k) {
+        const auto& d = tree.descriptors[k];
+        auto p = FindAt(r.live->positions, k,
+                        [&](const auto& p) { return p.id == d.id; });
         if (p == r.live->positions.end() ||
             (d.kind == ComponentKind::kPrivateState &&
              p->valid_rows != r.Boundary()))
@@ -366,9 +376,10 @@ struct PrefixIndex::Impl {
     }
     if (!r.checkpoint || !CheckpointResident(tree, *r.checkpoint))
       return false;
-    for (const auto& d : tree.descriptors) {
-      auto a = std::ranges::find(r.availability->components, d.id,
-                                 &ComponentAvailability::id);
+    for (std::size_t k = 0; k < tree.descriptors.size(); ++k) {
+      const auto& d = tree.descriptors[k];
+      auto a = FindAt(r.availability->components, k,
+                      [&](const auto& a) { return a.id == d.id; });
       if (a == r.availability->components.end() || !a->resident)
         return false;
     }
@@ -389,15 +400,20 @@ struct PrefixIndex::Impl {
       return {};
     const bool ram = r.checkpoint && CheckpointCoherent(tree, *r.checkpoint);
     bool need_disk{}, use_ram{}, resolve_plan{};
-    for (const auto& descriptor : tree.descriptors) {
+    const auto components = ram ? r.checkpoint->Components()
+                                : std::span<const CheckpointComponent>{};
+    for (std::size_t k = 0; k < tree.descriptors.size(); ++k) {
+      const auto& descriptor = tree.descriptors[k];
       auto availability =
-          std::ranges::find(r.availability->components, descriptor.id,
-                            &ComponentAvailability::id);
+          FindAt(r.availability->components, k,
+                 [&](const auto& a) { return a.id == descriptor.id; });
       if (availability == r.availability->components.end())
         return {};
       const auto component =
-          ram ? std::ranges::find(r.checkpoint->Components(), descriptor.id,
-                                  [](const auto& c) { return c.descriptor.id; })
+          ram ? FindAt(components, k,
+                       [&](const auto& c) {
+                         return c.descriptor.id == descriptor.id;
+                       })
               : std::span<const CheckpointComponent>::iterator{};
       if (ram && availability->resident && component->IsValid())
         use_ram = true;
