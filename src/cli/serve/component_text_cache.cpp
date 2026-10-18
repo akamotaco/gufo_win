@@ -154,6 +154,18 @@ public:
               " rank=" + std::to_string(e.rank) +
               " unique_bytes_freed=" + std::to_string(e.unique_bytes_freed) +
               " ledger_bytes=" + std::to_string(e.ledger_bytes));
+      // A capacity refusal at admission refuses the captured copy, as one
+      // during capture does.
+      if (e.action == cache::RetentionAction::kRefused &&
+          (e.reason == cache::RetentionReason::kByteCapacity ||
+           e.reason == cache::RetentionReason::kRecordCapacity))
+        Logger::Info("cache",
+                     std::string("schema=component-cache-v1 "
+                                 "event=capture_refused reason=") +
+                         (e.reason == cache::RetentionReason::kByteCapacity
+                              ? "byte_capacity"
+                              : "entry_capacity") +
+                         " tokens=" + std::to_string(e.boundary));
     } catch (...) {
     }
   }
