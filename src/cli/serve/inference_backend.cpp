@@ -3332,12 +3332,21 @@ public:
     if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
       capacity = free_bytes;
     }
+    // Snapshots are device allocations carved from host RAM on the APU, as
+    // for the Qwen runner: cap both limits by the host and by the device heap.
+    std::size_t snapshot_capacity = HostSnapshotBudgetBytes();
+    std::size_t snapshot_ceiling = HostSnapshotCeilingBytes();
+    if (capacity.has_value()) {
+      snapshot_capacity = std::min(snapshot_capacity, *capacity);
+      snapshot_ceiling = std::min(snapshot_ceiling, *capacity);
+    }
     return {
         .resident_weights_bytes = model_->ResidentBytes(),
         .state_capacity_bytes = capacity,
         .per_request_state_bytes = model_->SessionBytes(max_context_),
         .temporary_scratch_bytes = 0,
-        .retained_snapshot_capacity_bytes = HostSnapshotBudgetBytes(),
+        .retained_snapshot_capacity_bytes = snapshot_capacity,
+        .retained_snapshot_ceiling_bytes = snapshot_ceiling,
         .requires_device_runtime_lock = true,
     };
   }
