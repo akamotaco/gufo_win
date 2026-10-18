@@ -213,7 +213,8 @@ std::size_t Executor::CacheBytes(const Config& c, std::uint32_t max_context,
     bytes += AlignUp(slots * key_widths[l] * sizeof(std::uint16_t)) +
              AlignUp(slots * c.KvDim(l) * sizeof(std::uint16_t));
   }
-  return bytes + 2 * AlignUp(std::size_t{c.hidden_size} * sizeof(float)) +
+  return bytes + AlignUp(std::size_t{c.hidden_size} * sizeof(float)) +
+         AlignUp(std::size_t{kSplitRows} * c.hidden_size * sizeof(float)) +
          AlignUp(std::size_t{vocab} * sizeof(float)) +
          AlignUp(draft_table_bytes);
 }
@@ -412,8 +413,9 @@ std::unique_ptr<KvCache> Executor::CreateCache(std::uint32_t max_context,
   const std::size_t hidden_bytes =
       AlignUp(std::size_t{c.hidden_size} * sizeof(float));
   cache->hidden = reinterpret_cast<float*>(at);
-  cache->ahead_hidden = reinterpret_cast<float*>(at + hidden_bytes);
-  at += 2 * hidden_bytes;
+  at += hidden_bytes;
+  cache->ahead_hidden = reinterpret_cast<float*>(at);
+  at += AlignUp(std::size_t{kSplitRows} * c.hidden_size * sizeof(float));
   cache->logits = reinterpret_cast<float*>(at);
   at += AlignUp(std::size_t{model_.vocab_size()} * sizeof(float));
   if (draft_table_bytes() != 0) {
@@ -1311,17 +1313,26 @@ void Executor::CommitHidden(KvCache& cache, std::uint32_t row) {
                            hipMemcpyDeviceToDevice, stream_));
 }
 
-void Executor::StashHidden(KvCache& cache, std::uint32_t row) {
+void Executor::StashHidden(KvCache& cache, std::uint32_t row,
+                           std::uint32_t slot) {
+  if (slot >= kSplitRows) {
+    throw std::invalid_argument("gemma4 hidden stash slot");
+  }
   const std::size_t d = model_.config().hidden_size;
-  HIP_CHECK(hipMemcpyAsync(cache.ahead_hidden, h_ + row * d, d * sizeof(float),
-                           hipMemcpyDeviceToDevice, stream_));
+  HIP_CHECK(hipMemcpyAsync(cache.ahead_hidden + slot * d, h_ + row * d,
+                           d * sizeof(float), hipMemcpyDeviceToDevice,
+                           stream_));
 }
 
-void Executor::AdoptStashedHidden(KvCache& cache) {
+void Executor::AdoptStashedHidden(KvCache& cache, std::uint32_t slot) {
+  if (slot >= kSplitRows) {
+    throw std::invalid_argument("gemma4 hidden stash slot");
+  }
   BeforeMutation(cache);
   const std::size_t d = model_.config().hidden_size;
-  HIP_CHECK(hipMemcpyAsync(cache.hidden, cache.ahead_hidden, d * sizeof(float),
-                           hipMemcpyDeviceToDevice, stream_));
+  HIP_CHECK(hipMemcpyAsync(cache.hidden, cache.ahead_hidden + slot * d,
+                           d * sizeof(float), hipMemcpyDeviceToDevice,
+                           stream_));
 }
 
 void Executor::MoveKey(KvCache& cache, std::uint32_t from, std::uint32_t to) {

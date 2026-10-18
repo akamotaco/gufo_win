@@ -3231,6 +3231,7 @@ public:
   }
   /// Prompt tokens after the next prefill step's frontier.
   std::vector<std::int32_t>& lookahead() { return lookahead_; }
+  std::vector<std::size_t>& lookahead_stops() { return lookahead_stops_; }
 
 private:
   std::unique_ptr<Gemma4Session> owned_;
@@ -3239,6 +3240,7 @@ private:
   cache::Slot* slot_{};
   std::shared_ptr<const models::gemma4::vision::Prompt> images_;
   std::vector<std::int32_t> lookahead_;
+  std::vector<std::size_t> lookahead_stops_;
   std::map<std::size_t,
            std::shared_ptr<const models::gemma4::vision::Encoder::Embedding>>
       embeddings_;
@@ -3737,14 +3739,16 @@ public:
     session.BeginRequest();
   }
 
-  void SetPromptLookahead(
-      TextRunnerState& state,
-      std::span<const TextRunnerToken> tokens) const override {
-    auto& lookahead = RequireGemma4State(state).lookahead();
+  void SetPromptLookahead(TextRunnerState& state,
+                          std::span<const TextRunnerToken> tokens,
+                          std::span<const std::size_t> stops) const override {
+    auto& gemma = RequireGemma4State(state);
+    auto& lookahead = gemma.lookahead();
     lookahead.clear();
     for (const auto token : tokens) {
       lookahead.push_back(Gemma4EngineToken(token));
     }
+    gemma.lookahead_stops().assign(stops.begin(), stops.end());
   }
 
   [[nodiscard]] TextPrefillStep Prefill(
@@ -3788,19 +3792,22 @@ public:
       }
       return gemma.Embedding(*vision_, index);
     };
-    // A step that ends the model prompt short of the request's (a cache
-    // boundary before the generation prompt) evaluates the rest alongside;
-    // the next step adopts it. Image rows are never looked ahead.
+    // A step that ends the model prompt short of the request's (a checkpoint
+    // or the boundary before the generation prompt) evaluates the tokens
+    // after it alongside; later steps that stop at the given stops adopt
+    // them. Image rows are never looked ahead.
     std::span<const std::int32_t> lookahead;
+    std::span<const std::size_t> stops;
     if (end == prompt.size() &&
         (images == nullptr ||
          std::ranges::none_of(images->images, [&](const auto& image) {
            return image.span.offset >= end;
          }))) {
       lookahead = gemma.lookahead();
+      stops = gemma.lookahead_stops();
     }
     std::string error;
-    if (!session.Sync(prefix, spans, embed, &error, lookahead)) {
+    if (!session.Sync(prefix, spans, embed, &error, lookahead, stops)) {
       gemma.Invalidate();
       throw std::runtime_error("Gemma 4 prefill failed: " + error);
     }

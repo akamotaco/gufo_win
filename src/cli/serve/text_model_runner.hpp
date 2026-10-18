@@ -364,14 +364,17 @@ public:
     (void)state;
   }
   /// The prompt tokens after the next Prefill's frontier, set before every
-  /// prefill step (empty when the frontier ends the prompt). A step that
-  /// stops at a snapshot boundary must still leave the state exactly at that
-  /// boundary; a runner may compute these tokens alongside and adopt the
-  /// result if the following step asks for exactly them.
-  virtual void SetPromptLookahead(
-      TextRunnerState& state, std::span<const TextRunnerToken> tokens) const {
+  /// prefill step (empty when the frontier ends the prompt), and where later
+  /// steps stop inside them (token counts, ascending). A step that stops at a
+  /// snapshot boundary must still leave the state exactly at that boundary;
+  /// a runner may compute these tokens alongside and adopt the result when a
+  /// following step stops at one of `stops` or at their end.
+  virtual void SetPromptLookahead(TextRunnerState& state,
+                                  std::span<const TextRunnerToken> tokens,
+                                  std::span<const std::size_t> stops) const {
     (void)state;
     (void)tokens;
+    (void)stops;
   }
   /// Processes at most max_input_tokens, yielding after one model-owned
   /// chunk even when the scheduler grants the whole remaining prompt.

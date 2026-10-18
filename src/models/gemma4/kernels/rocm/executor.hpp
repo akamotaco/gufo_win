@@ -62,8 +62,8 @@ struct KvCache {
   std::vector<std::uint16_t*> v;  ///< Per layer, binary16.
   /// Target post-norm hidden state of the frontier token (MTP draft input).
   float* hidden{nullptr};
-  /// The same for the last of the lookahead rows a prefill computed past the
-  /// frontier (Session::Sync), adopted if the next Sync asks for them.
+  /// kSplitRows slots of the same for lookahead rows a prefill computed past
+  /// the frontier (Session::Sync), adopted if a later Sync stops there.
   float* ahead_hidden{nullptr};
   /// Logit row of the frontier token while the owning Session keeps it on
   /// the device (CommitLogits; greedy decode never reads it on the host).
@@ -160,10 +160,10 @@ public:
   void CommitLogits(KvCache& cache, std::uint32_t row);
   /// Copies cache.logits to `out`.
   void CopyCacheLogits(const KvCache& cache, std::vector<float>* out) const;
-  /// Copies row `row` of the last forward to cache.ahead_hidden, and that
-  /// back to cache.hidden.
-  void StashHidden(KvCache& cache, std::uint32_t row);
-  void AdoptStashedHidden(KvCache& cache);
+  /// Copies row `row` of the last forward to stash slot `slot` of
+  /// cache.ahead_hidden (< kSplitRows), and a slot back to cache.hidden.
+  void StashHidden(KvCache& cache, std::uint32_t row, std::uint32_t slot);
+  void AdoptStashedHidden(KvCache& cache, std::uint32_t slot);
   /// Moves every layer's K/V of key `from` to key `to`: an accepted
   /// sibling's spare key into its position.
   void MoveKey(KvCache& cache, std::uint32_t from, std::uint32_t to);

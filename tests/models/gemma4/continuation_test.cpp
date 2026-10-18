@@ -9,6 +9,7 @@
 // Requires GUFO_GEMMA4_MODEL; exits 77 without it.
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdlib>
 #include <functional>
 #include <iostream>
@@ -395,6 +396,54 @@ int main() {
     f.RequireSameState(*slot_a, *checkpoint);
     Require(Greedy(adapter.GetSession(*slot_a), 6) == reference,
             "restore into the wrapped original slot diverges");
+
+    // A frontier adopted at a stop inside a prompt lookahead keeps that row's
+    // hidden state (the MTP drafter's input), as one evaluated directly does.
+    {
+      const auto hidden =
+          std::ranges::find(layout, g4::ContinuationPart::kHidden,
+                            &g4::ContinuationComponent::part);
+      const auto read_hidden = [&](cache::Slot& slot) {
+        std::vector<float> values(hidden->descriptor.state_bytes /
+                                  sizeof(float));
+        Require(hipHostRegister(values.data(), hidden->descriptor.state_bytes,
+                                hipHostRegisterDefault) == hipSuccess,
+                "host registration failed");
+        f.Settle([&](cache::Stream& stream) {
+          return adapter.CapturePrivate(
+              slot, hidden->descriptor.id,
+              std::as_writable_bytes(std::span(values)), stream);
+        });
+        (void)hipHostUnregister(values.data());
+        return values;
+      };
+      const auto text = LongPrompt(*model, 600);
+      const std::span<const g4::TokenId> head(text.data(), text.size() - 40);
+      const std::span<const g4::TokenId> tail(text.data() + head.size(), 40);
+      const std::vector<std::size_t> stops{5, 23};
+      Require(b.Sync(head, {}, {}, &error, tail, stops) &&
+                  b.LookaheadTokens() == tail.size(),
+              "lookahead with stops: " + error);
+      for (const std::size_t stop : stops) {
+        const auto prefix = std::span(text).first(head.size() + stop);
+        Require(
+            b.Sync(prefix, &error) && b.LookaheadTokens() == tail.size() - stop,
+            "lookahead stop not adopted: " + error);
+        Require(a.Sync(prefix, &error), error);
+        const auto adopted = read_hidden(*slot_b);
+        const auto direct = read_hidden(*slot_a);
+        double dot = 0, aa = 0, dd = 0;
+        for (std::size_t i = 0; i < adopted.size(); ++i) {
+          dot += double{adopted[i]} * direct[i];
+          aa += double{adopted[i]} * adopted[i];
+          dd += double{direct[i]} * direct[i];
+        }
+        const double cosine = dot / std::sqrt(aa * dd);
+        std::cout << "adopted hidden at stop " << stop << ": cosine " << cosine
+                  << "\n";
+        Require(cosine > 0.999, "adopted hidden state differs");
+      }
+    }
 
     // A capture taken while another slot prefills reads only its own
     // session's writes, and equals one taken with the device idle.

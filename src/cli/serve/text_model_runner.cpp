@@ -1344,6 +1344,7 @@ void TextRunnerPool::Request::PrepareBatchExecution() {
 }
 
 TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
+  const std::size_t budget = max_input_tokens;
   if (!*this) {
     throw std::logic_error("text runner request is empty");
   }
@@ -1441,8 +1442,26 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
   }
   const auto model_prompt =
       std::span<const TextRunnerToken>(impl_->prompt).first(frontier);
-  impl_->runner->SetPromptLookahead(
-      state, std::span<const TextRunnerToken>(impl_->prompt).subspan(frontier));
+  // Later steps stop at the snapshot boundary, checkpoints and shared
+  // boundaries past this frontier. A runner may evaluate the tokens after it
+  // alongside, up to this step's budget, which the next step likely shares.
+  const auto lookahead =
+      std::span<const TextRunnerToken>(impl_->prompt)
+          .subspan(frontier)
+          .first(std::min(impl_->prompt.size() - frontier, budget));
+  std::vector<std::size_t> stops;
+  const auto add_stop = [&](std::size_t position) {
+    if (position > frontier && position < frontier + lookahead.size())
+      stops.push_back(position - frontier);
+  };
+  add_stop(snapshot_position);
+  for (const auto position : impl_->checkpoints)
+    add_stop(position);
+  for (const auto position : impl_->boundaries)
+    add_stop(position);
+  std::ranges::sort(stops);
+  stops.erase(std::ranges::unique(stops).begin(), stops.end());
+  impl_->runner->SetPromptLookahead(state, lookahead, stops);
   std::unique_ptr<TextRunnerSnapshot> captured;
   const std::function<std::unique_ptr<TextRunnerSnapshot>()> capture =
       in_pass && impl_->lease.component()

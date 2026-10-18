@@ -279,7 +279,8 @@ ContinuationAdapter::ContinuationAdapter(std::shared_ptr<Model> model,
   const Rows window = c.sliding_window - 1;
   // Chunk-aligned window ranges never wrap the ring, and a capture reads a
   // whole window plus its partial leading chunk while up to kSplitRows rows
-  // past the frontier (lookahead, verification) may already be written.
+  // past the frontier (verification) may already be written; prompt
+  // lookahead stops short of that chunk (Session::Extend).
   if (ring_ % kWindowChunkRows ||
       ring_ < window + kWindowChunkRows - 1 + rocm::kSplitRows)
     throw std::invalid_argument("Gemma 4 ring cannot hold a window");
@@ -696,11 +697,12 @@ cache::Completion ContinuationAdapter::CopyRowsOut(
   if (!cache::HasRows(d.kind) || first > end || end > n ||
       bytes.size() != (end - first) * d.row_bytes)
     throw std::invalid_argument("invalid Gemma 4 row capture");
-  // Rows up to kSplitRows past the frontier may already be written, each
+  // Rows past the frontier (lookahead, drafts) may already be written, each
   // evicting the ring slot's earlier position.
-  if (d.kind == cache::ComponentKind::kWindowRows &&
-      first + ring_ < n + rocm::kSplitRows)
-    throw std::invalid_argument("Gemma 4 window rows left the ring");
+  if (d.kind == cache::ComponentKind::kWindowRows)
+    for (auto p = first; p < end; ++p)
+      if (state.occupant[p % state.occupant.size()] != p)
+        throw std::invalid_argument("Gemma 4 window rows left the ring");
   return Transfer(state, false, [&](auto& runs) {
     if (bytes.empty())
       return;
