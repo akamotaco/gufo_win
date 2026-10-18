@@ -230,7 +230,10 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
 
             # No instruction is added: the prompt matches the control within
             # the spelling of the renamed keyword. The JSON instruction alone
-            # was about 45 tokens.
+            # was about 45 tokens. Schema rendering does not depend on the
+            # tool choice, so neighbors alternate which choice is controlled.
+            if choice != ("auto", "required")[index % 2]:
+                continue
             renamed_neighbor = neighbor(name, True)
             if sampling_preset in SHOWS_STRING_CONST_AS_ENUM:
                 renamed_neighbor = const_as_enum(renamed_neighbor)

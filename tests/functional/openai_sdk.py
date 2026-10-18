@@ -2826,7 +2826,8 @@ def main():
                 client, args.model, checks, chat_result,
                 image_content("red") if args.vision else None, args.sampling_preset),
             "tool-choice-cache": lambda: check_tool_choice_cache(
-                client, args.model, checks, chat_result, args.sampling_preset),
+                client, args.model, checks, chat_result, server_log=args.server_log,
+                sampling_preset=args.sampling_preset),
             "tool-schema-edges": lambda: check_tool_schema_edges(
                 client, args.model, checks, chat_result, args.vision, image_content,
                 args.sampling_preset, args.server_log),
@@ -2852,8 +2853,8 @@ def main():
             "cache-edits": lambda: check_cache_edits(
                 client, args.model, checks, chat_result, args.server_log),
             "cache-growth": lambda: check_cache_growth(
-                client, args.model, checks, chat_result, args.sampling_preset,
-                args.server_log),
+                client, args.model, checks, chat_result, server_log=args.server_log,
+                sampling_preset=args.sampling_preset),
             "cache-depth": lambda: check_cache_depth(
                 client, args.model, checks, chat_result, args.concurrency, args.server_log),
             "cache-stalls": lambda: check_cache_stalls(
