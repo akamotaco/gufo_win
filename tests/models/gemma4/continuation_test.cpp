@@ -25,7 +25,9 @@
 #include "src/models/gemma4/continuation_adapter.hpp"
 #include "src/models/gemma4/engine.hpp"
 #include "src/models/gemma4/kernels/rocm/executor.hpp"
+#include "src/models/gemma4/vision/encoder.hpp"
 #include "tests/models/gemma4/check.hpp"
+#include "tests/models/gemma4/image_fixture.hpp"
 
 namespace g4 = gufo::models::gemma4;
 namespace cache = gufo::cache;
@@ -469,6 +471,67 @@ int main() {
       Require(prefilled, prefill_error);
       f.RequireSameState(*slot_a, *concurrent);
       f.RequireSameState(*slot_a, *checkpoint);
+    }
+
+    // A checkpoint with an image restores the image records with its rows:
+    // the restored session keeps the image when the prompt grows past it,
+    // and evaluates from it again when the image changes, exactly as the
+    // session it came from does.
+    if (const char* mmproj = std::getenv("GUFO_GEMMA4_MMPROJ");
+        mmproj != nullptr && *mmproj != '\0') {
+      g4::vision::Encoder encoder(mmproj, model->config().hidden_size);
+      const auto prepare = [&](std::uint32_t seed) {
+        return gemma4_test::Prepare(
+            *model, encoder, seed,
+            "Which colour fills it? Answer with one word.", options.max_context,
+            70);
+      };
+      const auto red = prepare(1), blue = prepare(2);
+      const auto logits = [](const g4::Session& session) {
+        return std::vector<float>(session.Logits().begin(),
+                                  session.Logits().end());
+      };
+      auto& original = adapter.GetSession(*slot_b);
+      Require(original.Sync(red.prompt.tokens, red.spans, red.embed(), &error),
+              error);
+      auto images = cache::ExecutionHistory::Cold(
+          f.ledger, adapter.Components(), adapter.CompatibilityIdentity());
+      const std::vector<cache::Token> pictured_tokens(red.prompt.tokens.begin(),
+                                                      red.prompt.tokens.end());
+      const auto pictured = images.Capture(
+          {pictured_tokens, cache::InputIdentity(pictured_tokens.size()),
+           adapter.Positions(*slot_b), cache::CheckpointPurpose::kPrompt, 1},
+          [&](const cache::PayloadRequest& request) {
+            return f.Save(*slot_b, request);
+          });
+      f.Restore(*slot_a, *pictured, false);
+      f.RequireSameState(*slot_a, *pictured);
+      auto& restored = adapter.GetSession(*slot_a);
+      Require(std::ranges::equal(restored.Images(), original.Images()) &&
+                  logits(restored) == logits(original),
+              "restore lost the image");
+      auto longer = red.prompt.tokens;
+      const auto more = model->Tokenize(" Please answer briefly.");
+      longer.insert(longer.end() - 1, more.begin(), more.end());
+      const auto same = [&](const std::vector<g4::TokenId>& prompt,
+                            const gemma4_test::Prepared& images,
+                            const char* what) {
+        Require(original.Sync(prompt, images.spans, images.embed(), &error) &&
+                    restored.Sync(prompt, images.spans, images.embed(), &error),
+                error);
+        Require(logits(restored) == logits(original), what);
+      };
+      same(longer, red, "restored image prefix extends differently");
+      same(blue.prompt.tokens, blue, "restored session misses a changed image");
+      // In place: the slot holds the image rows of the blue prompt.
+      f.RestoreKeeping(*slot_b, *pictured, nullptr);
+      f.RequireSameState(*slot_b, *pictured);
+      Require(
+          std::ranges::equal(original.Images(), std::span(red.spans).first(1)),
+          "in-place restore kept the other image");
+      std::cout << "images: a " << red.prompt.tokens.size()
+                << "-token checkpoint with a " << red.spans[0].rows
+                << "-row image restores into another slot and in place\n";
     }
 
     Require(adapter.Invalidate(*slot_b), "invalidate refused");
