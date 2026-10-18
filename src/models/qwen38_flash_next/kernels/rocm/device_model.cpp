@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <thread>
+#include <vector>
 #include <initializer_list>
 #include <utility>
 
@@ -106,6 +108,81 @@ struct Uploader {
     if (t.type == core::GgmlType::kQ8_0 && t.experts == 1) {
       max_q8_cols = std::max<std::size_t>(max_q8_cols, t.cols);
     }
+    return d;
+  }
+
+  /// Q5_0 experts (AtomicChat's AD mixes keep 12 layers' down projection in
+  /// Q5_0) re-encoded as Q5_1 while uploading, so they take the tuned Q5_1
+  /// paths: the routed WMMA prefill GEMM and the MMVQ decode. Q5_0 decodes as
+  /// d * (q - 16); Q5_1 with m = -16 d is the same value, -16 d is exact in
+  /// F16, and the kernels' q * d + m rounds once, like the reference. Costs
+  /// 24/22 of the tensor's bytes.
+  DeviceTensor CopyQ5_0AsQ5_1(const TensorRef& t) {
+    if (t.type != core::GgmlType::kQ5_0) {
+      return Copy(t);
+    }
+    DeviceTensor d;
+    if (t.empty() || !ok) {
+      return d;
+    }
+    constexpr std::size_t kIn = 22, kOut = 24;
+    const std::size_t blocks = t.SizeBytes() / kIn;
+    const std::size_t size = blocks * kOut;
+    void* ptr = nullptr;
+    if (Allocate(&ptr, size + kTailMargin) != hipSuccess) {
+      Fail("device allocation failed for " + std::string(t.name) +
+           " (Q5_0 as Q5_1)");
+      return d;
+    }
+    if (Measuring()) {
+      return d;
+    }
+    allocations.push_back(ptr);
+    bytes += size + kTailMargin;
+    const auto* source = static_cast<const std::uint8_t*>(t.data);
+    constexpr std::size_t kChunk = std::size_t{1} << 20;  // blocks per upload
+    std::vector<std::uint8_t> staging(std::min(blocks, kChunk) * kOut);
+    const unsigned workers =
+        std::max(1u, std::min(16u, std::thread::hardware_concurrency() / 2));
+    for (std::size_t first = 0; first < blocks; first += kChunk) {
+      const std::size_t n = std::min(kChunk, blocks - first);
+      const auto convert = [&](std::size_t begin, std::size_t end) {
+        for (std::size_t i = begin; i < end; ++i) {
+          const std::uint8_t* in = source + (first + i) * kIn;
+          std::uint8_t* out = staging.data() + i * kOut;
+          _Float16 scale;
+          std::memcpy(&scale, in, 2);
+          const auto minimum = static_cast<_Float16>(-16.0f * static_cast<float>(scale));
+          std::memcpy(out, in, 2);            // d
+          std::memcpy(out + 2, &minimum, 2);  // m = -16 d
+          std::memcpy(out + 4, in + 2, 20);   // qh (4 bytes) and qs (16 bytes)
+        }
+      };
+      std::vector<std::thread> pool;
+      const std::size_t per = (n + workers - 1) / workers;
+      for (unsigned w = 0; w < workers; ++w) {
+        const std::size_t begin = w * per;
+        if (begin < n) {
+          pool.emplace_back(convert, begin, std::min(n, begin + per));
+        }
+      }
+      for (auto& thread : pool) {
+        thread.join();
+      }
+      if (hipMemcpy(static_cast<std::uint8_t*>(ptr) + first * kOut,
+                    staging.data(), n * kOut,
+                    hipMemcpyHostToDevice) != hipSuccess) {
+        Fail("upload failed for " + std::string(t.name) + " (Q5_0 as Q5_1)");
+        return d;
+      }
+    }
+    (void)hipMemsetAsync(static_cast<std::uint8_t*>(ptr) + size, 0, kTailMargin,
+                         nullptr);
+    d.data = ptr;
+    d.type = core::GgmlType::kQ5_1;
+    d.cols = static_cast<std::uint32_t>(t.cols);
+    d.rows = static_cast<std::uint32_t>(t.rows);
+    d.experts = static_cast<std::uint32_t>(t.experts);
     return d;
   }
 
@@ -330,7 +407,7 @@ struct Uploader {
     d.router = Stack({&l.router, &l.shexp_gate_inp});
     d.ffn_gate_exps = Copy(l.ffn_gate_exps);
     d.ffn_up_exps = Copy(l.ffn_up_exps);
-    d.ffn_down_exps = Copy(l.ffn_down_exps);
+    d.ffn_down_exps = CopyQ5_0AsQ5_1(l.ffn_down_exps);
     d.shexp_gate = Copy(l.shexp_gate);
     d.shexp_up = Copy(l.shexp_up);
     d.shexp_down = Copy(l.shexp_down);
