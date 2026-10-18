@@ -20,6 +20,10 @@ namespace gufo::models::qwen38_flash_next {
 struct MtpCandidateLogits;
 }  // namespace gufo::models::qwen38_flash_next
 
+namespace gufo::models::gemma4 {
+class ContinuationHooks;
+}  // namespace gufo::models::gemma4
+
 namespace gufo::models::gemma4::rocm {
 
 /// A step's draft token, or none to end the chain before it; `last` keeps
@@ -71,6 +75,8 @@ struct KvCache {
   /// blocks); a new cache counts as written everywhere.
   std::uint32_t written_from{0};
   std::uint32_t written_to{UINT32_MAX};
+  /// Called before every row Forward and MoveKey write (component cache).
+  ContinuationHooks* hooks{nullptr};
 };
 
 /// Image soft-token rows of one forward: rows [row, row + count) take

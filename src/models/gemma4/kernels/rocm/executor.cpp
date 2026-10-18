@@ -12,6 +12,7 @@
 
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/hip/managed_alloc.hpp"
+#include "src/models/gemma4/continuation_hooks.hpp"
 #include "src/models/gemma4/draft_vocab.hpp"
 #include "src/models/gemma4/kernels/rocm/gemv.hpp"
 #include "src/models/gemma4/kernels/rocm/kernels.hpp"
@@ -717,6 +718,11 @@ void Executor::Forward(std::span<const Segment> segments,
       logit_rows.size() > max_logit_rows_) {
     throw std::invalid_argument("gemma4 forward exceeds its capacity");
   }
+  for (const Segment& s : segments) {
+    if (s.cache->hooks != nullptr) {
+      s.cache->hooks->BeforeWrite(s.first_position, s.first_position + s.rows);
+    }
+  }
   const std::uint32_t d = c.hidden_size;
   const float eps = c.rms_eps;
   const auto& layers = model_.layers();
@@ -1315,6 +1321,9 @@ void Executor::MoveKey(KvCache& cache, std::uint32_t from, std::uint32_t to) {
     args.k_width[l] = key_widths_[l];
     args.v_width[l] = c.KvDim(l);
     args.ring[l] = c.IsSliding(l) ? cache.ring : 0;
+  }
+  if (cache.hooks != nullptr) {
+    cache.hooks->BeforeWrite(to, to + 1);
   }
   cache.written_from = std::min(cache.written_from, to);
   cache.written_to = std::max(cache.written_to, to + 1);

@@ -225,6 +225,7 @@ private:
   std::shared_ptr<SnapshotMemory> snapshot_memory_;
 
   friend class Session;
+  friend class ContinuationAdapter;
 };
 
 /// One conversation's context. Sync feeds a prompt reusing the longest
@@ -470,6 +471,7 @@ private:
                                               bool sibling = false);
 
   friend class Model;
+  friend class ContinuationAdapter;
 };
 
 }  // namespace gufo::models::gemma4
