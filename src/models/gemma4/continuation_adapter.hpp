@@ -117,6 +117,9 @@ private:
   // AfterExecution for one slot: after its own writes only, once another
   // session's write has fenced them.
   void AfterExecution(State&, hipStream_t stream) const;
+  // Whether the writes AfterExecution(State&) orders after have finished: a
+  // gather launched now cannot hold the copy stream behind queued forwards.
+  [[nodiscard]] bool Executed(const State&) const;
   [[nodiscard]] State& As(cache::Slot&) const;
   [[nodiscard]] const State& As(const cache::Slot&) const;
   [[nodiscard]] const ContinuationComponent& Component(
@@ -132,7 +135,8 @@ private:
   [[nodiscard]] Piece PrivateRegion(State&, const ContinuationComponent&,
                                     bool loading, bool* host) const;
   // `plan` runs host copies and lists device copies, which Transfer batches
-  // into one gather on copy_stream_. The cache's streams carry no work: a
+  // into gathers on copy_stream_: one launches whenever the previous one has
+  // finished, the rest at the first wait. The cache's streams carry no work: a
   // pooled stream can share a hardware queue with the model's stream, and
   // its completion then waited behind another session's prefill chunk.
   [[nodiscard]] cache::Completion Transfer(

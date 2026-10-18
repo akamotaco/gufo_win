@@ -53,6 +53,8 @@ bool Gatherable(const rocm::CopyRun& run) {
 }
 // Device copies one gather launch takes; a fuller batch launches early.
 constexpr std::size_t kBatchRuns = 1024;
+// Gathers in flight per slot, each reading its own descriptor region.
+constexpr std::size_t kGathers = 2;
 bool Covered(Coverage ranges, std::size_t begin, std::size_t end) {
   std::ranges::sort(ranges);
   std::size_t frontier = begin;
@@ -72,7 +74,8 @@ public:
         std::unique_ptr<Session> session)
       : adapter(adapter), guard(guard), session(std::move(session)) {
     // Pinned once: allocating pinned memory later waits for queued forwards.
-    Check(hipHostMalloc(&descriptors, kBatchRuns * sizeof(rocm::CopyRun)));
+    Check(hipHostMalloc(&descriptors,
+                        kGathers * kBatchRuns * sizeof(rocm::CopyRun)));
     Check(hipEventCreateWithFlags(&fence, hipEventDisableTiming));
     this->session->cache_->hooks = this;
     const std::lock_guard lock(adapter.executed_mutex_);
@@ -98,7 +101,7 @@ public:
       const std::lock_guard lock(mutex);
       return result.has_value();
     }
-    // A batched job is not ready before a wait launches its batch.
+    // A batched job is not ready before its batch launches.
     bool Ready() const noexcept {
       const std::lock_guard lock(mutex);
       return result || (launch && hipEventQuery(launch->done) == hipSuccess);
@@ -123,6 +126,12 @@ public:
     const std::lock_guard lock(jobs_mutex);
     FlushLocked();
   }
+  // Whether no gather of this slot is still copying.
+  bool GathersIdleLocked() const noexcept {
+    return std::ranges::all_of(gathers, [](const auto& region) {
+      return !region || hipEventQuery(region->done) == hipSuccess;
+    });
+  }
   void FlushLocked() noexcept {
     if (batch.empty())
       return;
@@ -130,18 +139,21 @@ public:
     try {
       const auto stream = adapter.copy_stream_;
       adapter.AfterExecution(*this, stream);
-      // The previous gather may still read the descriptors.
-      if (last_gather)
-        Check(hipEventSynchronize(last_gather->done));
+      // The gather that last used this region may still read it.
+      auto& region = gathers[next_gather];
+      if (region)
+        Check(hipEventSynchronize(region->done));
       std::uint64_t longest = 0;
       for (const auto& run : batch_runs)
         longest = std::max(longest, run.bytes);
-      std::ranges::copy(batch_runs, descriptors);
+      auto* runs = descriptors + next_gather * kBatchRuns;
+      std::ranges::copy(batch_runs, runs);
       auto queued = std::make_shared<Launch>();
-      rocm::CopyRuns(descriptors, static_cast<std::uint32_t>(batch_runs.size()),
+      rocm::CopyRuns(runs, static_cast<std::uint32_t>(batch_runs.size()),
                      longest, stream);
-      last_gather = queued;
       Check(hipEventRecord(queued->done, stream));
+      region = queued;
+      next_gather = (next_gather + 1) % kGathers;
       launch = std::move(queued);
     } catch (...) {
       // The jobs fail when waited on; a launched gather must still finish
@@ -173,8 +185,9 @@ public:
       const std::lock_guard lock(adapter.executed_mutex_);
       std::erase(adapter.states_, this);
     }
-    if (last_gather)
-      (void)hipEventSynchronize(last_gather->done);
+    for (const auto& region : gathers)
+      if (region)
+        (void)hipEventSynchronize(region->done);
     (void)hipEventDestroy(fence);
     (void)hipHostFree(descriptors);
   }
@@ -254,7 +267,8 @@ public:
   std::vector<std::shared_ptr<Job>> batch;
   std::vector<rocm::CopyRun> batch_runs;
   rocm::CopyRun* descriptors{};
-  std::shared_ptr<const Launch> last_gather;
+  std::array<std::shared_ptr<const Launch>, kGathers> gathers;
+  std::size_t next_gather{0};
   // Under adapter.executed_mutex_: `fence` follows every write of this
   // session queued before it unless the session wrote again (`dirty`).
   hipEvent_t fence{};
@@ -411,6 +425,12 @@ void ContinuationAdapter::AfterExecution(State& state,
   }
   AfterExecution(stream);
 }
+bool ContinuationAdapter::Executed(const State& state) const {
+  const std::lock_guard lock(executed_mutex_);
+  if (state.fenced && !state.dirty)
+    return hipEventQuery(state.fence) == hipSuccess;
+  return hipStreamQuery(model_->executor_->stream()) == hipSuccess;
+}
 std::vector<ContinuationBackingClass> ContinuationAdapter::BackingPlan(
     std::size_t ram) const {
   // Rows, tails and private states share the same committed pages; a payload
@@ -542,6 +562,13 @@ cache::Completion ContinuationAdapter::Transfer(
         state.FlushLocked();
       state.batch.push_back(job);
       state.batch_runs.insert(state.batch_runs.end(), runs.begin(), runs.end());
+      // Launch once the previous gather has finished: the copy stream works
+      // while the caller queues its next transfers, which then launch
+      // together instead of each paying for a launch. A gather that would
+      // wait for queued forwards launches at the first wait instead, so it
+      // does not hold up other slots' copies on the shared stream.
+      if (state.GathersIdleLocked() && Executed(state))
+        state.FlushLocked();
     } else {
       AfterExecution(state, copy_stream_);
       for (const auto& run : runs)
