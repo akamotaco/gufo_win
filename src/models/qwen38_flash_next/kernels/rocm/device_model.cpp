@@ -181,6 +181,18 @@ struct Uploader {
     return d;
   }
 
+  /// AtomicChat builds store the PLE convolution as BF16; widen it to F32 on
+  /// upload so it runs the F32 kernels.
+  DeviceTensor CopyPleConv(const TensorRef& t) {
+    if (t.type != core::GgmlType::kBF16) {
+      return Copy(t);
+    }
+    if (t.empty() || !ok) {
+      return {};
+    }
+    return UploadWidened(t);
+  }
+
   // GGUF packs [fc_embedding | fc_hidden] across each row. Split on a
   // quantization-block boundary without dequantizing or changing any weight.
   void SplitMtpProjection(const TensorRef& t, DeviceTensor& embedding,
@@ -373,7 +385,7 @@ struct Uploader {
     d.ple_norm_key = Copy(l.ple_norm_key);
     d.ple_norm_query = Copy(l.ple_norm_query);
     d.ple_norm_conv = Copy(l.ple_norm_conv);
-    d.ple_conv1d = Copy(l.ple_conv1d);
+    d.ple_conv1d = CopyPleConv(l.ple_conv1d);
     d.router = Stack({&l.router, &l.shexp_gate_inp});
     d.ffn_gate_exps = Copy(l.ffn_gate_exps);
     d.ffn_up_exps = Copy(l.ffn_up_exps);
