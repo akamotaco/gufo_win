@@ -15,6 +15,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <cstdio>
 #include <limits>
 #include <mutex>
 #include <stdexcept>
@@ -124,7 +125,14 @@ CommittedPages CommitPages(std::size_t bytes) {
     return {};
   }
   const int pin = PinPages(data, bytes);
-  if (hipHostRegister(data, bytes, hipHostRegisterDefault) != hipSuccess) {
+  if (const hipError_t registered =
+          hipHostRegister(data, bytes, hipHostRegisterDefault);
+      registered != hipSuccess) {
+    // The caller treats this as a refused segment. Clear the thread's last
+    // error too, or the next kernel launch check reports it as its own.
+    (void)hipGetLastError();
+    std::fprintf(stderr, "committed_backing: hipHostRegister of %zu bytes failed: %s\n",
+                 bytes, hipGetErrorName(registered));
     UnpinPages(pin);
     munmap(data, bytes);
     return {};
