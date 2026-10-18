@@ -72,6 +72,20 @@ MTP uses each model's drafter):
   `split attention head grouping unsupported`: the Gemma 4 engine does not cover the
   12B's head layout yet. This is not specific to Windows.
 
+### Memory setup on a 128 GB machine
+
+- **GPU carve-out (Variable Graphics Memory): 96 GB, no more.** Windows then sees about
+  32 GB of RAM, and its shared-GPU-memory limit is half of that, ~16 GB. That limit is
+  not a separate setting; a larger carve-out shrinks it.
+- **Keep a large page file** (96 GB initial, 160 GB maximum here): Windows charges GPU
+  allocations to the commit limit. It is reserved, not written.
+- **Pass `--cache-ram-bytes`** (4 GiB for Flash-Next, 2 GiB per Gemma server worked well).
+- **Flash-Next with another GPU program:** load Flash-Next (1 session x 262K, MTP,
+  vision) first, then ComfyUI. Anima image generation ran beside it with ComfyUI's
+  overflow in shared memory (13.2 of 15.8 GB), Windows RAM at ~80% in use, commit
+  127.7 of 128.7 GB and no page-file writes; Flash-Next kept its speed (prefill
+  1,471-1,506 tok/s, decode 40.6-47 tok/s). There is little headroom left in that state.
+
 ### Build on Windows
 
 Prerequisites are in [docs/WINDOWS.md](docs/WINDOWS.md#prerequisites): TheRock ROCm
