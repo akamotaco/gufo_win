@@ -2,8 +2,8 @@
 
 **Status:** prototype on `feat/gemma-cache`. Steps 1–3 are done: window
 rows in the shared layer, Gemma serving through the component cache, and
-in-place restore (results below); the reply-end checkpoint and batched
-transfers are next. Before
+in-place restore, and batched gather transfers (results below); the
+reply-end checkpoint is next. Before
 this, Gemma 4 served through the legacy `ContinuationCache` with its own
 device-resident `SessionSnapshot`. Upstream's switch-over
 ([card 19](../../cache-redesign/cards/19-switch-over.md)) deletes that cache
@@ -235,4 +235,12 @@ had cost 3.4% before).
   byte pressure. `gemma4.continuation` covers both in-place cases: after a
   short reply only the private state loads; after a ring wrap the global rows
   stay and the window reloads.
+- **Batched transfers:** the adapter queues the device copies of every
+  transfer and launches them as one gather kernel at the first wait (the
+  other queued streams wait on its event); unaligned or pageable buffers
+  copy singly. Against the legacy control 2,709 of 2,952 timing measures
+  pass (2,678 before); shared-prefix captures are about 5 ms slower (8 ms
+  before). Still open: queueing on shared-prefix requests (+4.7 ms), decode
+  beside concurrent captures in `cache-concurrency` (+9.5 ms, unchanged by
+  batching), and `long_json_stop`'s retry copy.
 
