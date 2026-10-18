@@ -47,9 +47,23 @@ MTP uses each model's drafter):
 | | | | 8.5K | 1,466–1,478 | 28.1* | 48.4–51.2 |
 | | | | 31.8K | 1,497–1,515 | 28.0* | 62.1–65.4 |
 | | | | 250.8K | 1,332–1,339 | | 54.5–66.5 |
+| Qwen3.8-Flash-Next AtomicChat `AD-4.85bpw-Q5_K_M`, 1 session | 262,144 | 86.3 GiB with MTP + vision | 2.1K | 1,381–1,425 | 29.1 | 36.6–37.9 |
+| | | | 8.5K | 1,396–1,422 | 29.3 | 47.4 |
+| | | | 31.8K | 1,441–1,465 | 29.0 | 38.5–38.9 |
+| | | | 159.9K | 1,338 | 28.1 | 42.1 |
 | Gemma 4 31B Q4_K_M (MeroMero) | 200,000 | 32.5 GiB | 2.1K | 469–474 | 11.2 | 22.4 |
 | | | | 8.5K | 449–462 | 10.9 | 21.7 |
 | | | | 31.8K | 407–436 | 10.2 | 18.3 |
+| Gemma 4 31B Q8_0 (MeroMero) | 262,144 | 49.7 GiB (51.2 peak) | 244.1K | 188 | | 6.0 |
+
+- AtomicChat on the same file under a ROCm llama.cpp build (its MTP drafter, same fixed
+  prompts): prefill 1,041 / 1,163 / 1,218 / 1,155 tok/s, decode with MTP 40.7 / 43.1 /
+  50.4 / 45.5 / 34.2 (short / 2.1K / 8.5K / 31.8K / 159.9K) and 27.6–28.4 without it.
+  Gufo's kernels decode faster; the gap at short contexts is the speculative cycle
+  ([docs/WINDOWS-DECODE-OVERHEADS.md](docs/WINDOWS-DECODE-OVERHEADS.md)).
+- Both Gemmas at 262K at once (26B Q8 on one port, 31B Q8 on another) peaked at
+  85.2 GiB dedicated while the 26B took a 244K-token prompt (570 tok/s prefill) and the
+  31B a 62K one, with no page-file writes.
 
 - Flash-Next MTP uses Unsloth's `MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf`; Gufo
   rejects the `shared-Q4_K_M` drafter (Q4_K `hc_*` tensors) and the F16 vision
@@ -116,9 +130,9 @@ build\release\gufo.exe serve --host 127.0.0.1 --port 8093 llm `
   `AD-4.85bpw-Q5_K_M` mix (IQ4_XS/IQ4_NL/Q5_0 experts, Q4_1 n-gram table, BF16
   `ple_conv1d`). Its IQ4 experts expand to Q8_0's form while the routed F16 WMMA
   prefill GEMM fetches them ([docs/IQ4-WMMA-PLAN.md](docs/IQ4-WMMA-PLAN.md)), so it
-  prefills faster than llama.cpp on the same file: 1,327 / 1,316 / 1,338 / 1,241 tok/s
-  at 2.1K / 8.5K / 31.8K / 160K tokens, against 1,048 / 1,151 / 1,222 / 1,166 for a
-  ROCm llama.cpp build (thinking off, one server at a time).
+  prefills faster than llama.cpp on the same file (see the table above). Its HC
+  inject weights are Q8_0 and are expanded to F32 at load; before that fix the model
+  garbled identifiers it copied.
 - Not supported: Gemma 4 12B (see above).
 - Not yet verified on this build: the disk prompt cache (`--cache-disk`), other
   Flash-Next quants, and the full test suite (`BUILD_TESTING` is off; some
