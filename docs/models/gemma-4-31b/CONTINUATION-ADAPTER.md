@@ -243,4 +243,12 @@ had cost 3.4% before).
   before). Still open: queueing on shared-prefix requests (+4.7 ms), decode
   beside concurrent captures in `cache-concurrency` (+9.5 ms, unchanged by
   batching), and `long_json_stop`'s retry copy.
+- **Images (26B MTP with its sidecar):** `image-inputs`, `tool-images`,
+  `conversation` and the image cancellation history pass. The component
+  path had placed a grid checkpoint inside an image span, which Gemma
+  prefills whole (500 "invalid prefill token count"); component-planned
+  checkpoints now stop before such inputs, as the legacy grid did.
+  `image-count` fails on its low-effort thinking check with the legacy build
+  too: the reply's 256-token budget ends inside the reasoning, leaving no
+  JSON text.
 
