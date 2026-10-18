@@ -29,6 +29,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <bcrypt.h>
 #include <psapi.h>
 #include <winternl.h>
 
@@ -47,6 +48,10 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <dirent.h>
+#include <linux/fs.h>
+#include <sys/random.h>
+#include <sys/syscall.h>
 #include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
@@ -890,6 +895,113 @@ int mkdir(const char* path, mode_t) {
   return 0;
 }
 
+int mkdirat(int dirfd, const char* path, mode_t) {
+  const std::wstring resolved = ResolveAt(dirfd, path);
+  if (resolved.empty()) {
+    errno = EBADF;
+    return -1;
+  }
+  if (!CreateDirectoryW(resolved.c_str(), nullptr)) {
+    return Fail(GetLastError());
+  }
+  return 0;
+}
+
+// Directory streams over FindFirstFileExW. fdopendir() owns the descriptor
+// and closes it in closedir(), as POSIX specifies.
+struct gufo_dir {
+  HANDLE find{INVALID_HANDLE_VALUE};
+  WIN32_FIND_DATAW data{};
+  bool pending{false};  // `data` holds an entry readdir() has not returned
+  int fd{-1};
+  struct dirent entry{};
+};
+
+static DIR* OpenDirectoryStream(const std::wstring& directory, int fd) {
+  if (directory.empty()) {
+    errno = EBADF;
+    return nullptr;
+  }
+  std::wstring pattern = directory;
+  if (pattern.back() != L'\\') {
+    pattern += L'\\';
+  }
+  pattern += L'*';
+  auto* dir = new gufo_dir;
+  dir->find = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &dir->data,
+                               FindExSearchNameMatch, nullptr,
+                               FIND_FIRST_EX_LARGE_FETCH);
+  if (dir->find == INVALID_HANDLE_VALUE) {
+    const DWORD error = GetLastError();
+    delete dir;
+    Fail(error);
+    return nullptr;
+  }
+  dir->pending = true;
+  dir->fd = fd;
+  return dir;
+}
+
+DIR* opendir(const char* path) {
+  return OpenDirectoryStream(Widen(path), -1);
+}
+
+DIR* fdopendir(int fd) {
+  return OpenDirectoryStream(DirectoryPathOf(fd), fd);
+}
+
+struct dirent* readdir(DIR* dir) {
+  if (dir == nullptr) {
+    errno = EBADF;
+    return nullptr;
+  }
+  if (!dir->pending && !FindNextFileW(dir->find, &dir->data)) {
+    const DWORD error = GetLastError();
+    if (error != ERROR_NO_MORE_FILES) {
+      Fail(error);
+    }
+    return nullptr;  // The end of the stream leaves errno untouched.
+  }
+  dir->pending = false;
+  const std::string name = Narrow(dir->data.cFileName);
+  const size_t size = name.size() < sizeof(dir->entry.d_name) - 1
+                          ? name.size()
+                          : sizeof(dir->entry.d_name) - 1;
+  memcpy(dir->entry.d_name, name.data(), size);
+  dir->entry.d_name[size] = '\0';
+  const DWORD attributes = dir->data.dwFileAttributes;
+  dir->entry.d_type = (attributes & FILE_ATTRIBUTE_REPARSE_POINT) ? DT_LNK
+                      : (attributes & FILE_ATTRIBUTE_DIRECTORY)   ? DT_DIR
+                                                                  : DT_REG;
+  return &dir->entry;
+}
+
+int closedir(DIR* dir) {
+  if (dir == nullptr) {
+    errno = EBADF;
+    return -1;
+  }
+  FindClose(dir->find);
+  if (dir->fd >= 0) {
+    close(dir->fd);
+  }
+  delete dir;
+  return 0;
+}
+
+ssize_t getrandom(void* buffer, size_t length, unsigned int) {
+  if (length > 0xFFFFFFFFu) {
+    length = 0xFFFFFFFFu;
+  }
+  if (!BCRYPT_SUCCESS(BCryptGenRandom(nullptr, static_cast<PUCHAR>(buffer),
+                                      static_cast<ULONG>(length),
+                                      BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
+    errno = EIO;
+    return -1;
+  }
+  return static_cast<ssize_t>(length);
+}
+
 int access(const char* path, int mode) {
   const DWORD attributes = GetFileAttributesW(Widen(path).c_str());
   if (attributes == INVALID_FILE_ATTRIBUTES) {
@@ -1392,8 +1504,8 @@ unsigned long long gufo_total_physical_bytes(void) {
   return GlobalMemoryStatusEx(&status) ? status.ullTotalPhys : 0;
 }
 
-int renameat(int olddirfd, const char* oldpath, int newdirfd,
-             const char* newpath) {
+static int RenameAt(int olddirfd, const char* oldpath, int newdirfd,
+                    const char* newpath, bool replace) {
   const std::wstring from = ResolveAt(olddirfd, oldpath);
   const std::wstring to = ResolveAt(newdirfd, newpath);
   if (from.empty() || to.empty()) {
@@ -1414,7 +1526,7 @@ int renameat(int olddirfd, const char* oldpath, int newdirfd,
   const size_t bytes = sizeof(FILE_RENAME_INFO) + to.size() * sizeof(wchar_t);
   std::string storage(bytes, '\0');
   auto* info = reinterpret_cast<FILE_RENAME_INFO*>(storage.data());
-  info->Flags = 0x1 /* FILE_RENAME_FLAG_REPLACE_IF_EXISTS */ |
+  info->Flags = (replace ? 0x1 /* FILE_RENAME_FLAG_REPLACE_IF_EXISTS */ : 0) |
                 0x2 /* FILE_RENAME_FLAG_POSIX_SEMANTICS */;
   info->RootDirectory = nullptr;
   info->FileNameLength = static_cast<DWORD>(to.size() * sizeof(wchar_t));
@@ -1422,15 +1534,26 @@ int renameat(int olddirfd, const char* oldpath, int newdirfd,
   const BOOL renamed = SetFileInformationByHandle(
       source, static_cast<FILE_INFO_BY_HANDLE_CLASS>(22 /* FileRenameInfoEx */),
       info, static_cast<DWORD>(bytes));
+  const DWORD rename_error = renamed ? ERROR_SUCCESS : GetLastError();
   CloseHandle(source);
   if (renamed) {
     return 0;
   }
+  if (!replace && (rename_error == ERROR_ALREADY_EXISTS ||
+                   rename_error == ERROR_FILE_EXISTS)) {
+    return Fail(rename_error);
+  }
   if (!MoveFileExW(from.c_str(), to.c_str(),
-                   MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                   (replace ? MOVEFILE_REPLACE_EXISTING : 0) |
+                       MOVEFILE_WRITE_THROUGH)) {
     return Fail(GetLastError());
   }
   return 0;
+}
+
+int renameat(int olddirfd, const char* oldpath, int newdirfd,
+             const char* newpath) {
+  return RenameAt(olddirfd, oldpath, newdirfd, newpath, true);
 }
 
 static FILETIME FiletimeFromTimespec(const struct timespec& ts) {
@@ -1577,7 +1700,23 @@ int sched_yield(void) {
   return 0;
 }
 
-long syscall(long, ...) {
+long syscall(long number, ...) {
+  if (number == SYS_renameat2) {
+    va_list args;
+    va_start(args, number);
+    const int olddirfd = va_arg(args, int);
+    const char* oldpath = va_arg(args, const char*);
+    const int newdirfd = va_arg(args, int);
+    const char* newpath = va_arg(args, const char*);
+    const unsigned int flags = va_arg(args, unsigned int);
+    va_end(args);
+    if ((flags & ~RENAME_NOREPLACE) != 0) {
+      errno = EINVAL;
+      return -1;
+    }
+    return RenameAt(olddirfd, oldpath, newdirfd, newpath,
+                    (flags & RENAME_NOREPLACE) == 0);
+  }
   errno = ENOSYS;
   return -1;
 }
