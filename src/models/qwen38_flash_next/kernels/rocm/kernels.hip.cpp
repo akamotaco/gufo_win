@@ -5157,7 +5157,34 @@ __launch_bounds__(256) __global__
     }
 #pragma unroll
     for (int u = 0; u < (kQ5 ? 0 : kWaveRowTiles); ++u) {
-      if constexpr (kIQ4NL || kIQ4XS) {
+      if constexpr (kPair && kIQ4XS) {
+        // A paired stage covers sub-blocks ib and ib + 1. Half f_c keeps
+        // their elements 16 f_c..16 f_c + 15 in Q4_K's nibble order (low:
+        // sub-block ib, high: ib + 1) and the scale of sub-block ib + f_c.
+        const auto* sbk = f_ptr[u] + ((kb0 / 8) * 136);
+        const int ib = kb0 % 8;
+        const int is = ib + f_c;
+        const std::uint32_t scales_h =
+            *reinterpret_cast<const std::uint16_t*>(sbk + 2);
+        const std::uint32_t scales_l = sbk[4 + (is / 2)];
+        const int ls = static_cast<int>(((scales_l >> (4 * (is & 1))) & 0xFU) |
+                                        (((scales_h >> (2 * is)) & 3U) << 4U));
+        const float d = __half2float(__builtin_bit_cast(
+            __half, *reinterpret_cast<const std::uint16_t*>(sbk)));
+        f_dm[u] = __builtin_bit_cast(
+            std::uint16_t, __float2half_rn(d * static_cast<float>(ls - 32)));
+        uint4 lo;
+        uint4 hi;
+        __builtin_memcpy(&lo, sbk + 8 + (16 * ib), 16);
+        __builtin_memcpy(&hi, sbk + 24 + (16 * ib), 16);
+        const unsigned shift = 4U * static_cast<unsigned>(f_c);
+        const auto mix = [shift](std::uint32_t a, std::uint32_t b) {
+          return ((a >> shift) & 0x0F0F0F0FU) |
+                 (((b >> shift) & 0x0F0F0F0FU) << 4U);
+        };
+        f_codes[u] = make_uint4(mix(lo.x, hi.x), mix(lo.y, hi.y),
+                                mix(lo.z, hi.z), mix(lo.w, hi.w));
+      } else if constexpr (kIQ4NL || kIQ4XS) {
         const int kb = kb0 + f_c;
         const std::uint8_t* qs;
         if constexpr (kIQ4NL) {
@@ -5271,6 +5298,8 @@ __launch_bounds__(256) __global__
         own_codes[u] = f_codes[u];
         if constexpr (kQ5K)
           own_high[u] = f_high[u];
+        if constexpr (kQ8)
+          scale_bias = f_live[u] ? f_dm[u] : 0U;  // IQ4_XS: half2 (d, 0)
       } else if constexpr (kQ8) {
         s_codes[swizzle(row, 2 * f_c)] = f_codes[u];
         s_codes[swizzle(row, (2 * f_c) + 1)] = f_codes_hi[u];
@@ -5381,6 +5410,8 @@ __launch_bounds__(256) __global__
             std::uint32_t nib = (words[i] >> (4U * kb)) & 0x0F0F0F0FU;
             if constexpr (kQ5K)
               nib |= SpreadHighBits((high >> (4 * i)) & 0xFU);
+            if constexpr (kIQ4XS)
+              nib = Iq4Lookup(nib) ^ 0x80808080U;  // signed, as Q8_0
             CodesToHalves(nib, magic, scale2, bias2, h[2 * i], h[2 * i + 1]);
           }
           v16h own;
@@ -6311,6 +6342,12 @@ bool RoutedGatedF16Gemm(const void* gate, const void* up, WeightType type,
     case WeightType::kQ5_K:
       hipLaunchKernelGGL(
           (RoutedF16GEMMKernel<WeightType::kQ5_K, 128, BN, 2, true>), grid,
+          dim3(kThreads), 0, stream, gate, x, tiles, pad_bounds, rows_in,
+          rows_out, nullptr, nullptr, out, m, k, up);
+      return true;
+    case WeightType::kIQ4_XS:
+      hipLaunchKernelGGL(
+          (RoutedF16GEMMKernel<WeightType::kIQ4_XS, 128, BN, 2, true>), grid,
           dim3(kThreads), 0, stream, gate, x, tiles, pad_bounds, rows_in,
           rows_out, nullptr, nullptr, out, m, k, up);
       return true;

@@ -456,13 +456,20 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
   }
 
   if (tile_rows == 48 &&
-      (type == q::WeightType::kQ4_K || type == q::WeightType::kQ5_K)) {
+      (type == q::WeightType::kQ4_K || type == q::WeightType::kQ5_K ||
+       type == q::WeightType::kIQ4_XS)) {
     // Different gate/up weights, with the up scale small enough that these
     // deliberately large synthetic weights do not overflow the F16 output.
     auto up = w.packed;
-    const std::size_t block_bytes = type == q::WeightType::kQ4_K ? 144 : 176;
+    // IQ4_XS carries one superblock scale (d); the K-quants carry d and dmin.
+    const bool iq4 = type == q::WeightType::kIQ4_XS;
+    const std::size_t block_bytes = type == q::WeightType::kQ4_K ? 144
+                                    : iq4                        ? 136
+                                                                 : 176;
     for (std::size_t b = 0; b < up.size(); b += block_bytes) {
       for (std::size_t offset : {0U, 2U}) {
+        if (iq4 && offset != 0)
+          continue;
         __half scale;
         std::memcpy(&scale, up.data() + b + offset, sizeof(scale));
         scale = __float2half(__half2float(scale) / 1024.0F);
