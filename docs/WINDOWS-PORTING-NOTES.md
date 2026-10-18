@@ -7,7 +7,10 @@
 
 ## 1. 브랜치 구조와 원칙
 
-- `win/gemma` = `origin/feat/gemma`(franzmoca/gufo) + Windows 커밋들. 업데이트는 rebase로 한다.
+- `win/gemma` = Windows 커밋들 + `origin/feat/gemma`(franzmoca/gufo)를 **merge**로 받아들인 브랜치.
+  [akamotaco/gufo_win](https://github.com/akamotaco/gufo_win) `main`으로 게시되어 있으므로 **rebase하지 않는다**(게시된 기록을 다시 쓰게 된다).
+  업데이트: `git merge origin/feat/gemma`. 본가(gufo-org) 커밋이 feat/gemma보다 먼저 필요하면 `git merge upstream/main`도 된다(2026-10-18 `1f970923` 사례).
+  게시: `git push publish win/gemma:main`(fast-forward만, 강제 푸시 금지).
 - Windows 포팅 원본은 `win/main`(pixmaate/gufo). 2026-10-03 시점 `d9a84f13`(gufo-org main)에서 갈라졌고,
   그 뒤 본가가 187커밋 진행했다. 그래서 pixmaate 커밋은 거의 모두 충돌한다.
 - 원칙:
@@ -41,6 +44,7 @@ pixmaate 포팅 이후 본가가 추가한 코드가 Windows 호환 계층에 �
 | `src/cli/serve/serve.cpp` | `SIGBUS` (치명 시그널 리포터) | `signal.h`에 `SIGBUS 7` 정의, `sigaction`에서 "전달되지 않는 시그널"로 처리. UCRT `signal()`에 모르는 번호를 넘기면 invalid parameter handler가 돌아 프로세스가 죽을 수 있다 |
 | `src/cli/serve/http_server.cpp` `LoadingResponder` | 생 `::setsockopt`, `::close`, `::recv`, `pollfd{.fd = int}`, `::accept` | `gufo::platform::SetSocketOption / CloseSocket / SocketRecv / CloseConnection`, `static_cast<decltype(pollfd::fd)>(fd)`, `static_cast<int>(::accept(...))` |
 | `src/cli/serve/websocket.cpp` | `getsockopt(SO_RCVTIMEO)`를 `timeval`로 읽음 | `platform::GetSocketTimeout` 추가 (Winsock은 DWORD 밀리초) |
+| `src/core/hip/committed_backing.cpp` (본가 `1f970923`, #633) | io_uring(`<linux/io_uring.h>`, `SYS_io_uring_setup/register`)으로 캐시 페이지를 long-term pin | Windows에선 `PinPages`가 -1(고정 안 함)을 반환하도록 `#ifdef _WIN32`. 원래 실패 시 기존 등록 경로로 돌아가는 선택 기능이고, Windows에선 `hipHostRegister`가 페이지를 고정한다 |
 | `src/core/diagnostics/linux_sysfs.cpp` | `proc_root_`를 `std::filesystem::absolute("/proc")`로 바꿈(본가 `76661e30`) | Windows에선 `C:\proc`가 되어 포팅의 `proc_root_ == "/proc"` 대체 경로가 죽었다 → `gufo diagnose`가 CPU·메모리 0 표시. 비교 대상을 `std::filesystem::absolute("/proc")`로 바꿔 해결 |
 
 **업데이트 때마다 할 점검** (새 POSIX 헤더가 들어왔는지):
@@ -48,7 +52,7 @@ pixmaate 포팅 이후 본가가 추가한 코드가 Windows 호환 계층에 �
 ```sh
 grep -rhoE '#include <(sys/[a-z_/]+|linux/[a-z_/]+|[a-z]+)\.h>' src | sort -u   # 결과를 compat/win32/include 목록과 비교
 grep -rn '::setsockopt\|::getsockopt\|::close(\|::recv(\|SO_RCVTIMEO\|timeval' src/cli/serve   # 소켓 코드
-grep -rn 'syscall(SYS_\|/proc/\|/sys/' src                                     # Linux 전용 경로
+grep -rn 'syscall(SYS_\|/proc/\|/sys/\|io_uring' src                           # Linux 전용 경로·기능
 ```
 
 `immintrin.h`, `cpuid.h`, `png.h`, `jpeglib.h`, `windows.h`는 목록에 없어도 괜찮다(clang 내장이거나 vcpkg 제공).
@@ -118,7 +122,7 @@ grep -rn 'syscall(SYS_\|/proc/\|/sys/' src                                     #
 
 ## 6. 업데이트 후 확인 순서
 
-1. `..\gufo_update.bat` (rebase → 빌드 → DLL 확인 → `gufo diagnose` PASS)
+1. `..\gufo_update.bat` (merge → 빌드 → DLL 확인 → `gufo diagnose` PASS). 확인이 끝나면 `..\gufo_update.bat publish`
 2. 3.1의 grep 점검으로 새 POSIX 사용 확인
 3. Gemma급 모델 하나로 기동·요청 확인. 예:
    `gufo serve --host 127.0.0.1 --port 8093 --sessions 1 llm --model <gguf> --context 32768 --speculative mtp --mtp-model <mtp gguf> --cache-ram-bytes 2147483648`
