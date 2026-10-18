@@ -129,10 +129,11 @@ Measured on gfx1151 with 1 GiB per run, host memory prepared as
 Host copies through `hipMemcpyAsync` run at the same rate on 1, 4 or 16
 streams. Gemma's chunks are 128 KiB–2 MiB, where one gather kernel over
 registered host pages is 1.5–5× faster and as fast as device memory. The
-adapter therefore queues `CopyRowsOut`/`CopyRowsIn` per cache stream and
-submits one gather kernel when a completion is waited on or the stream is
-synchronized. No shared caller polls `Completion::Ready` without waiting, so
-deferred submission is safe with the current code. The checkpoint backing
+adapter therefore queues `CopyRowsOut`/`CopyRowsIn` and launches them as
+gather kernels on its own copy stream: at once when its previous gather has
+finished, and otherwise when a completion is waited on, so copies queued
+while a gather runs launch together. Two descriptor regions let a waited-on
+batch queue behind a running gather. The checkpoint backing
 stays host-addressable `CommittedBackingPool` memory, which the disk tier and
 CRCs require.
 
@@ -355,5 +356,85 @@ had cost 3.4% before).
   checkpoints now stop before such inputs, as the legacy grid did.
   `image-count` fails on its low-effort thinking check with the legacy build
   too: the reply's 256-token budget ends inside the reasoning, leaving no
-  JSON text.
+  JSON text. With `GUFO_GEMMA4_MMPROJ` set, `gemma4.continuation` restores a
+  checkpoint holding an image into another slot and in place: the restored
+  session holds the same image records and logits, and matches the session
+  it came from when the prompt grows past the image and when the image
+  changes.
+- **Retry copies at the record limit:** a 68-request Pi coding session on
+  26B-A4B MTP (`--sessions 2 --context 131072`, thinking on) filled all 128
+  records without a refused capture. Its 67 follow-ups prefilled 108 tokens
+  on average (at most 370; the first prompt 32,457, the longest 39,245).
+  Upstream's refusal of retry copies at the record limit stays.
+- **Legacy hooks removed:** Gemma's runner no longer implements the legacy
+  snapshot hooks (snapshot, restore-or-fork, payload sizes, persistent
+  serialisation); Gemma serves only through the component cache.
+- **Prefix lookups:** components are found through the descriptor index, and
+  each slot is ranked once per acquisition. Cold requests queue 0.35–0.5 ms
+  longer than legacy (0.4–1.4 ms before).
+- **Restore stalls after backing growth:** 31B in-place restores of 1 MB took
+  4–17 ms instead of about 2 ms shortly after the cache grew its host
+  backing. The backing pool maps each 1,049,821,184-byte segment, which is
+  not a multiple of 2 MiB, and registers it with the GPU. Unmapping another
+  mapping inside one of the segment's 2 MiB blocks (here a finished thread's
+  stack, which glibc frees next to a segment) took 1.6–7.5 ms, and the next
+  wait for the GPU, the restore's, then took 4–17 ms with the GPU idle.
+  Unmapping an 8 MiB neighbour of a registered 1 GiB range
+  delayed the next stream synchronisation by 21–28 ms below the range and
+  2–9 ms above it, and not at all with the neighbour 2 MiB away or the range
+  on whole blocks. Segments are now mapped on whole 2 MiB blocks (only their
+  size is registered). Over three `cache-growth` runs every restore's wait
+  for the model stream took 0.09–0.18 ms (7 of 40 took 3.7–17.2 ms before)
+  and no request's restore exceeded 2.4 ms (13.7 and 18.7 ms before). The
+  pool backs every model's component cache. With an 8 MiB memlock limit the
+  pool's long-term page pins fail for every segment (16–22 ms each, in the
+  background), which leaves the pages movable by compaction; a memlock limit
+  above the cache budget enables them.
+- **Gather launches:** a 31B restore of 1.01 GB (the size of legacy's
+  snapshot of the same prompt) launched one gather per 16 transfers, when
+  the cache waited on them, and the GPU idled while the host queued the next
+  16 (about 160 µs each, 3–6 ms of a 13–16 ms restore). A cache that has run
+  longer holds a checkpoint's chunks apart in the backing, so the same
+  restore takes more, smaller transfers and more such waits. Copies now
+  launch as soon as the previous gather has finished, unless they would wait
+  for queued forwards, which would hold up the other slot's copies on the
+  shared stream. Gemma's transfers do not run on the cache's pooled
+  streams, so one pooled stream serves a whole batch and the cache waits
+  every 256 transfers instead of 16. Run alone, `cache-rotation` restores
+  take 10.9–11.6 ms (13.8–14.4 ms before; legacy 9.9–10.1 ms) and its
+  captures 6.4–6.6 ms. Launching every transfer at once instead made 84–212
+  gathers per restore and was no faster.
+- **Backing growth and other threads:** growing the backing faulted each
+  quarter of a new segment (256 MiB) with one `MADV_POPULATE_WRITE`, which
+  holds the process's mmap lock for 36–120 ms. Every other thread's `mmap`,
+  `mprotect` or `munmap` then waited 35–58 ms, and every page fault behind
+  it: a capture runs on a new thread, whose stack and malloc arena are such
+  calls, and a capture coinciding with growth took 50–100 ms (legacy 10 ms).
+  Segments now fault 4 MiB at a time, and map changes during growth wait at
+  most 0.8 ms. A capture coinciding with growth still took 13–55 ms in
+  `cache-rotation`, without delaying its request's first token.
+- **31B MTP against legacy** (`--sessions 2 --context 32768`, the six
+  `cache-*` suites, `cache`, `long-context` and `state-edges`, legacy
+  recorded right before): 932 of 978 timing measures pass (882 of 966
+  before the stall, gather and growth changes). `cache-rotation` restores
+  take 11.5–12.0 ms (13.7–14.3 ms before; legacy 9.9–10.2 ms), queueing
+  13.6–14.1 ms (legacy 11.4–11.8 ms), and first tokens 480.8–495.7 ms
+  (legacy 482.6–489.6 ms). Both builds answer `BETA.` where
+  `cache-concurrency` and `cache-shared-prefix` expect `BETA` on the same
+  requests; legacy also fails `disk-spacing-disk`. The remaining flags:
+  - Restores where legacy reuses the other slot's live session and the
+    component cache copies into the free slot (`cache-edits` edits,
+    `depth_branches`, `long_responses_sampled`, `long_cancel_resume`, the
+    tool cancellations: 4–20 ms against under 2 ms, first tokens up to
+    17 ms later). Slot choice keeps a live frontier, which a tool-call step
+    continues from and no checkpoint covers.
+  - Background prompt captures, 1.4–5.6 times legacy's (`cache-growth`
+    turns 12–61 ms against 8–14 ms, long prompts 78–88 ms against
+    48–55 ms), as before these changes; those requests' first tokens
+    pass.
+  - `cache-concurrency` `fanout`: the second request prefills its 18
+    tokens in the same two chunks in 165 ms against 128 ms; its first token
+    still comes 77 ms sooner than legacy's.
+
+  26B-A4B MTP passes every suite of the same set with these changes.
 
