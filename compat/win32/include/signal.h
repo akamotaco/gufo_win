@@ -24,6 +24,10 @@ extern "C" {
 #ifndef SIGCHLD
 #define SIGCHLD 17
 #endif
+/* Windows reports bad memory accesses as SIGSEGV; SIGBUS never arrives. */
+#ifndef SIGBUS
+#define SIGBUS 7
+#endif
 
 typedef unsigned long sigset_t;
 struct sigaction {

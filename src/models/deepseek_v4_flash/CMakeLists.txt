@@ -57,6 +57,13 @@ add_library(gufo_deepseek_v4_flash STATIC
 set_source_files_properties(
   ${DEEPSEEK_V4_FLASH_ROCM_DIR}/backend.hip.cpp
   PROPERTIES LANGUAGE HIP)
+if (WIN32)
+  # TheRock 10.2's device LTO crashes in "Live DEBUG_VALUE analysis" on the
+  # Q2_K hot-list WMMA kernels; build this file without debug info.
+  set_source_files_properties(
+    ${DEEPSEEK_V4_FLASH_ROCM_DIR}/backend.hip.cpp
+    PROPERTIES COMPILE_OPTIONS -g0)
+endif()
 
 target_compile_definitions(gufo_deepseek_v4_flash PRIVATE
   _GNU_SOURCE
