@@ -1,5 +1,13 @@
 # IQ4_NL / IQ4_XS 전문가를 routed F16 WMMA prefill 경로에 넣기 — 작업 명세
 
+> **완료(2026-10-18).** 구현은 4절 권장안과 달리 더 단순한 방법을 썼다: IQ4 블록을 가중치 읽기 단계(`fetch_stage`)에서
+> `kvalues_iq4nl`(int8) 32개 + 스케일(d, IQ4_XS는 d×(ls−32))로 펼쳐 **Q8_0 경로(2바이트 정렬 읽기, LDS·풀기·WMMA)를 그대로 재사용**
+> (`Iq4Lookup`: `__builtin_amdgcn_perm` 2회 + 비트3 선택). 재포장·메모리 증가 없음. 넓은 배치(≥1024 토큰)에서 IQ4_XS는
+> 묶음(paired) 커널 대신 64토큰 타일 지도로 gate/up을 따로 처리.
+> 결과: 테스트 IQ4_XS/IQ4_NL 6경우 통과(|F16−F64|가 MMQ보다 약 10배 작음). AtomicChat prefill 2.1K/8.5K/31.8K/160K =
+> 1,327/1,316/1,338/1,241 tok/s(이전 876/940/1,008/962, rulith 1,048/1,151/1,222/1,166). UD-Q4_K_XL 1,477/1,469/1,496(회귀 없음).
+> GPU 86.3 GiB 그대로. 아래는 작업 전 작성한 명세 원문.
+
 작성 2026-10-18. 대상 브랜치 `win/gemma`(akamotaco/gufo_win). 이 문서만 읽고 구현을 시작할 수 있도록 쓴다.
 포팅 전반은 [WINDOWS-PORTING-NOTES.md](WINDOWS-PORTING-NOTES.md) 참고.
 
@@ -103,7 +111,8 @@ build\gpu-test\tests\models\qwen38_flash_next\qwen38_flash_next_routed_wmma_ops_
 GPU는 서버와 공유하므로 테스트는 작은 크기로 돌리고, 큰 측정은 서버를 내린 뒤 한다.
 
 **S0 상태: 완료(2026-10-18).** 두 테스트를 위 명령(gpu-test, `-CMakeArgs` Python 지정)으로 빌드하고 실행:
-`PATH`에 `build\gpu-test`와 `buildelease`를 앞에 붙여 실행(DLL은 빌드 폴더 최상위에 복사됨).
+`PATH`에 `build\gpu-test`와 `build
+elease`를 앞에 붙여 실행(DLL은 빌드 폴더 최상위에 복사됨).
 - `qwen38_flash_next_iq_experts_ops_test`: IQ3_S/IQ4_XS/IQ4_NL 정수 MMQ 12개 경우 PASS(배정밀도 대비 rel_error 0.0032–0.0043).
 - `qwen38_flash_next_routed_wmma_ops_test`: Q4_K/Q5_K/Q5_1/Q8_0의 F16 WMMA를 MMQ·F64 참조와 비교, 모두 통과.
   **F16 WMMA가 MMQ보다 F64에 약 10배 가깝다**(예: Q4_K m=640 k=2560: |F16−F64| 1.33, |MMQ−F64| 12.46).
