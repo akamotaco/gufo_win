@@ -37,6 +37,7 @@ public:
   // Nonzero: the adapter adds a ring-backed window component, and the next
   // token also depends on the window rows, so a wrong restore changes it.
   cache::Rows window_rows{}, ring_rows{};
+  bool in_place{};
   mutable std::size_t through_calls{};
   bool UsesComponentCache() const override { return true; }
   TextRunnerDescriptor Descriptor() const override {
@@ -103,6 +104,7 @@ public:
         window_rows ? std::make_unique<FakeAdapter>(window_rows, ring_rows)
                     : std::make_unique<FakeAdapter>();
     adapter = dynamic_cast<FakeAdapter*>(resources->adapter.get());
+    adapter->SetInPlaceRestore(in_place);
     resources->owner = blocks;
     resources->stream = [this, foreground = std::this_thread::get_id()]()
         -> std::unique_ptr<cache::Stream> {
@@ -1536,6 +1538,37 @@ void WindowedDeepRowsSurviveDiskRestart() {
   }
   std::filesystem::remove_all(directory);
 }
+// A retry of the same prompt (swipe, regenerate) restores in place into the
+// slot that answered it: rows it still holds stay, and only the private state
+// and window rows the reply evicted from the ring load. The retry matches an
+// uncached control.
+void SwipeRestoresInPlace() {
+  for (const bool window : {false, true}) {
+    auto runner = window ? WindowRunner() : std::make_shared<Runner>();
+    runner->in_place = true;
+    TextRunnerPool pool(runner, 2);
+    std::vector<TextRunnerToken> prompt(40);
+    std::iota(prompt.begin(), prompt.end(), 10);
+    auto first = pool.Acquire(prompt);
+    Prefill(first);
+    const auto token = Generate(first);
+    // Rows 40-60: the ring of 16 no longer holds window rows 32-39.
+    for (int i = 0; i < 20; ++i)
+      (void)Generate(first);
+    (void)first.Commit();
+    auto swipe = pool.Acquire(prompt);
+    assert(swipe.cached_prompt_tokens() == prompt.size());
+    assert(swipe.cache_restore_bytes() ==
+           32 + (window ? 8 * sizeof(cache::Token) : 0));
+    assert(Generate(swipe) == token);
+    (void)swipe.Commit();
+    auto cold = pool.Acquire(prompt, sampling::SamplingConfig{}, {}, {}, false);
+    assert(!cold.cache_hit());
+    Prefill(cold);
+    assert(Generate(cold) == token);
+    cold.Invalidate();
+  }
+}
 }  // namespace
 int main() {
   PublishedResidentCheckpointKeepsDiskStep();
@@ -1568,4 +1601,5 @@ int main() {
   UnbackedDeepRowsSurviveDiskRestart();
   WindowRowsReuseAndBranches();
   WindowedDeepRowsSurviveDiskRestart();
+  SwipeRestoresInPlace();
 }

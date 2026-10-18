@@ -118,6 +118,72 @@ struct Fixture {
     }
     Require(adapter.Validate(slot, positions), "restore did not validate");
   }
+  // In-place restore: keeps the rows ResidentRows reports and loads the rest
+  // around them. Returns the bytes loaded.
+  std::size_t RestoreKeeping(cache::Slot& slot,
+                             const cache::Checkpoint& checkpoint,
+                             std::vector<cache::ResidentRange>* kept_out) {
+    std::vector<cache::ComponentPosition> positions;
+    for (const auto& c : checkpoint.Components())
+      positions.push_back(c.position);
+    std::vector<cache::ResidentRange> kept;
+    for (auto range : adapter.ResidentRows(slot, positions)) {
+      const auto& c = *std::ranges::find_if(
+          checkpoint.Components(),
+          [&](const auto& x) { return x.descriptor.id == range.id; });
+      range.first =
+          std::max(range.first,
+                   cache::FirstChunkRow(c.descriptor, c.position.valid_rows));
+      if (range.first < range.end)
+        kept.push_back(range);
+    }
+    adapter.BeginRestore(slot, positions, kept);
+    std::size_t loaded = 0;
+    for (const auto& c : checkpoint.Components()) {
+      const auto id = c.descriptor.id;
+      const auto k = std::ranges::find(kept, id, &cache::ResidentRange::id);
+      const auto row = c.descriptor.row_bytes;
+      const auto around = [&](const cache::Payload& payload, cache::Rows first,
+                              cache::Rows end) {
+        const auto& bytes =
+            *std::static_pointer_cast<const std::vector<std::byte>>(
+                payload.Owner());
+        for (const auto& [a, b] :
+             {std::pair{first, k == kept.end() ? end : std::min(end, k->first)},
+              std::pair{k == kept.end() ? end : std::max(first, k->end),
+                        end}}) {
+          if (a >= b)
+            continue;
+          Settle([&](cache::Stream& stream) {
+            return adapter.CopyRowsIn(
+                slot, id, a, b,
+                std::span(bytes).subspan((a - first) * row, (b - a) * row),
+                stream);
+          });
+          loaded += (b - a) * row;
+        }
+      };
+      for (const auto& chunk : c.chunks)
+        around(chunk.Storage(), chunk.First(), chunk.End());
+      if (c.tail) {
+        const auto end = c.position.valid_rows;
+        around(*c.tail, end - end % c.descriptor.rows_per_chunk, end);
+      }
+      if (c.private_state) {
+        const auto& bytes =
+            *std::static_pointer_cast<const std::vector<std::byte>>(
+                c.private_state->Owner());
+        Settle([&](cache::Stream& stream) {
+          return adapter.LoadPrivate(slot, id, bytes, stream);
+        });
+        loaded += bytes.size();
+      }
+    }
+    Require(adapter.Validate(slot, positions), "in-place restore failed");
+    if (kept_out != nullptr)
+      *kept_out = std::move(kept);
+    return loaded;
+  }
   // Captures `slot` and requires every chunk, tail and private state to equal
   // `original` byte for byte.
   void RequireSameState(cache::Slot& slot, const cache::Checkpoint& original) {
@@ -279,6 +345,17 @@ int main() {
     Require(b.Position() == n, "restored position differs");
     Require(Greedy(b, 6) == reference, "restore into another slot diverges");
 
+    // Right after the reply, the original slot still holds every row: an
+    // in-place restore loads only the private state.
+    std::size_t private_bytes = 0;
+    for (const auto& c : checkpoint->Components())
+      private_bytes += c.descriptor.state_bytes;
+    Require(f.RestoreKeeping(*slot_a, *checkpoint, nullptr) == private_bytes,
+            "in-place restore after a short reply loaded rows");
+    f.RequireSameState(*slot_a, *checkpoint);
+    Require(Greedy(adapter.GetSession(*slot_a), 6) == reference,
+            "in-place restore after a short reply diverges");
+
     // The original slot moves a whole ring further, then restores in place.
     auto further = prompt;
     further.insert(further.end(), reference.tokens.begin(),
@@ -286,6 +363,16 @@ int main() {
     const auto more = LongPrompt(*model, ring + 64);
     further.insert(further.end(), more.begin() + 1, more.end());
     Require(a.Sync(further, &error), error);
+    std::vector<cache::ResidentRange> kept;
+    const auto loaded = f.RestoreKeeping(*slot_a, *checkpoint, &kept);
+    // Global rows stay; the window left the ring and loads again.
+    for (const auto& k : kept)
+      Require(adapter.Layout()[k.id.value - 1].descriptor.kind ==
+                      cache::ComponentKind::kAppendRows &&
+                  k.first == 0 && k.end == n,
+              "kept rows outside the global layers after a ring wrap");
+    Require(loaded > private_bytes, "the evicted window was not reloaded");
+    f.RequireSameState(*slot_a, *checkpoint);
     f.Restore(*slot_a, *checkpoint, true);
     f.RequireSameState(*slot_a, *checkpoint);
     Require(Greedy(adapter.GetSession(*slot_a), 6) == reference,

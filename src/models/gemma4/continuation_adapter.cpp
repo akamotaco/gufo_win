@@ -112,6 +112,13 @@ public:
   void BeforeWrite(std::uint32_t first, std::uint32_t end) override {
     if (restoring || failed || pending)
       throw std::logic_error("Gemma 4 slot is not ready for mutation");
+    // Rows past the frontier (rejected drafts, lookahead) are rewritten
+    // routinely, always at or past any checkpoint this branch captured.
+    if (first < written_end)
+      rewrite_from = std::min(rewrite_from, first);
+    written_end = std::max(written_end, end);
+    for (std::uint32_t p = first; p < end; ++p)
+      occupant[p % occupant.size()] = p;
     const Guarding readable(*this);
     const Rows ring = adapter.ring_;
     for (const auto& component : adapter.components_) {
@@ -147,6 +154,18 @@ public:
   ContinuationAdapter& adapter;
   cache::MutationGuard& guard;
   std::unique_ptr<Session> session;
+  // A fresh branch: no rows written or kept.
+  void ForgetRows() {
+    std::ranges::fill(occupant, kNoRow);
+    written_end = 0;
+    rewrite_from = kNoRow;
+  }
+  static constexpr std::uint32_t kNoRow = UINT32_MAX;
+  // Position each ring slot holds; the branch's written end, and the first
+  // position it wrote again below that end.
+  std::vector<std::uint32_t> occupant =
+      std::vector<std::uint32_t>(adapter.ring_, kNoRow);
+  std::uint32_t written_end{0}, rewrite_from{kNoRow};
   bool restoring{false}, guarding{false};
   std::atomic<bool> failed{false};
   std::atomic<std::size_t> pending{0};
@@ -272,7 +291,9 @@ std::vector<ContinuationBackingClass> ContinuationAdapter::BackingPlan(
   return {{page, blocks, header + blocks * per_block}};
 }
 cache::Capabilities ContinuationAdapter::GetCapabilities() const {
-  return {.continuation = true, .persistent_encoding = true};
+  return {.continuation = true,
+          .persistent_encoding = true,
+          .in_place_restore = true};
 }
 std::span<const cache::ComponentDescriptor> ContinuationAdapter::Components()
     const {
@@ -389,6 +410,42 @@ cache::Completion ContinuationAdapter::Transfer(
 
 void ContinuationAdapter::BeginRestore(
     cache::Slot& slot, std::span<const cache::ComponentPosition> positions) {
+  BeginRestore(slot, positions, {});
+}
+std::vector<cache::ResidentRange> ContinuationAdapter::ResidentRows(
+    const cache::Slot& slot,
+    std::span<const cache::ComponentPosition> positions) const {
+  const auto& state = As(slot);
+  if (!state.IsValid() || state.pending || positions.empty())
+    return {};
+  const auto n = positions.front().valid_rows;
+  if (!n || n > state.session->Position() ||
+      std::ranges::any_of(positions,
+                          [&](const auto& p) { return p.valid_rows != n; }))
+    return {};
+  // Rows below the branch's first rewrite stay; window rows while their ring
+  // slots still hold them.
+  const cache::Rows end = std::min<cache::Rows>(n, state.rewrite_from);
+  std::vector<cache::ResidentRange> kept;
+  for (const auto& d : descriptors_) {
+    if (!cache::HasRows(d.kind))
+      continue;
+    if (d.kind != cache::ComponentKind::kWindowRows) {
+      kept.push_back({d.id, 0, end});
+      continue;
+    }
+    cache::Rows first = end;
+    const auto floor = cache::FirstChunkRow(d, n);
+    while (first > floor &&
+           state.occupant[(first - 1) % state.occupant.size()] == first - 1)
+      --first;
+    kept.push_back({d.id, first, end});
+  }
+  return kept;
+}
+void ContinuationAdapter::BeginRestore(
+    cache::Slot& slot, std::span<const cache::ComponentPosition> positions,
+    std::span<const cache::ResidentRange> kept) {
   auto& state = As(slot);
   if (state.restoring || state.failed || state.pending)
     throw std::logic_error(
@@ -408,15 +465,58 @@ void ContinuationAdapter::BeginRestore(
         return p.valid_rows != n;
       }))
     throw std::invalid_argument("inconsistent Gemma 4 component frontiers");
+  // Kept rows must be resident now; the tokens are kept with them.
+  std::vector<Coverage> coverage(descriptors_.size());
+  bool keep_tokens = false;
+  if (!kept.empty()) {
+    const auto resident = ResidentRows(slot, ordered);
+    for (const auto& k : kept) {
+      const auto r =
+          std::ranges::find(resident, k.id, &cache::ResidentRange::id);
+      if (r == resident.end() || k.first < r->first || k.end > r->end ||
+          k.first >= k.end)
+        throw std::invalid_argument("Gemma 4 kept rows are not resident");
+      const auto& d = Component(k.id).descriptor;
+      coverage[k.id.value - 1].emplace_back(k.first * d.row_bytes,
+                                            k.end * d.row_bytes);
+      keep_tokens |= Component(k.id).part == ContinuationPart::kTokens;
+    }
+  }
   // Allocate before guarding: a refusal leaves execution valid. Guard every
-  // range while the old rows are still readable.
+  // replaced range while the old rows are still readable.
   auto& session = *state.session;
   session.tokens_.reserve(n);
   session.logits_.reserve(model_->VocabSize());
-  std::vector<Coverage> coverage(descriptors_.size());
-  state.GuardAll();
+  {
+    const State::Guarding readable(state);
+    for (const auto& component : components_) {
+      const auto& d = component.descriptor;
+      if (!cache::HasRows(d.kind))
+        continue;
+      const auto k = std::ranges::find(kept, d.id, &cache::ResidentRange::id);
+      if (k == kept.end()) {
+        state.guard.BeforeOverwrite(d.id, 0, context_);
+        continue;
+      }
+      state.guard.BeforeOverwrite(d.id, 0, k->first);
+      state.guard.BeforeOverwrite(d.id, k->end, context_);
+    }
+  }
   Check(hipStreamSynchronize(model_->executor_->stream()));
+  auto tokens =
+      keep_tokens ? std::move(session.tokens_) : std::vector<TokenId>{};
   session.Reset();
+  session.tokens_ = std::move(tokens);
+  if (kept.empty()) {
+    state.ForgetRows();
+  } else {
+    // Ring slots past the checkpoint hold the discarded reply.
+    for (auto& occupant : state.occupant)
+      if (occupant != State::kNoRow && occupant >= n)
+        occupant = State::kNoRow;
+    state.rewrite_from = State::kNoRow;
+  }
+  state.written_end = static_cast<std::uint32_t>(n);
   session.held_global_.clear();
   session.held_sliding_.clear();
   session.cache_->written_from = 0;
@@ -513,6 +613,10 @@ cache::Completion ContinuationAdapter::CopyRowsIn(
                              hipMemcpyDefault, native));
         done += piece.bytes;
       }
+      if (d.kind == cache::ComponentKind::kWindowRows)
+        for (auto p = first; p < end; ++p)
+          state.occupant[p % state.occupant.size()] =
+              static_cast<std::uint32_t>(p);
     });
   } catch (...) {
     state.failed = true;
@@ -677,6 +781,7 @@ bool ContinuationAdapter::Invalidate(cache::Slot& slot) noexcept {
     session.held_sliding_.clear();
     session.cache_->written_from = 0;
     session.cache_->written_to = UINT32_MAX;
+    state.ForgetRows();
     state.failed = false;
     state.restoring = false;
     state.expected.clear();

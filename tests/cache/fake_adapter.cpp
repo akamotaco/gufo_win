@@ -275,7 +275,9 @@ FakeAdapter::FakeAdapter(Rows window_rows, Rows ring_rows) : FakeAdapter() {
   ring_rows_ = ring_rows;
 }
 Capabilities FakeAdapter::GetCapabilities() const {
-  return {.continuation = true, .persistent_encoding = true};
+  return {.continuation = true,
+          .persistent_encoding = true,
+          .in_place_restore = in_place_};
 }
 std::span<const ComponentDescriptor> FakeAdapter::Components() const {
   return components_;
@@ -343,6 +345,31 @@ std::vector<ComponentPosition> FakeAdapter::PrefillCheckpointPositions(
 }
 void FakeAdapter::BeginRestore(Slot& slot,
                                std::span<const ComponentPosition> positions) {
+  BeginRestore(slot, positions, {});
+}
+std::vector<ResidentRange> FakeAdapter::ResidentRows(
+    const Slot& slot, std::span<const ComponentPosition> positions) const {
+  const auto& state = AsSlot(slot);
+  if (!in_place_ || !state.valid || state.restoring || state.Busy())
+    return {};
+  const Rows target_end = Position(positions, kTarget);
+  const Rows draft_end = Position(positions, kDraft);
+  std::vector<ResidentRange> kept{
+      {kTarget, 0, std::min<Rows>(target_end, state.target.size())},
+      {kDraft, 0, std::min<Rows>(draft_end, state.draft.size())}};
+  if (const auto* window = WindowDescriptor(components_)) {
+    const Rows end = std::min(target_end, state.window_rows);
+    Rows first = end;
+    while (first > FirstChunkRow(*window, target_end) &&
+           state.Resident(first - 1, first))
+      --first;
+    kept.push_back({kWindow, first, end});
+  }
+  return kept;
+}
+void FakeAdapter::BeginRestore(Slot& slot,
+                               std::span<const ComponentPosition> positions,
+                               std::span<const ResidentRange> kept) {
   auto& state = AsSlot(slot);
   if (state.Busy() || state.failed || state.restoring)
     throw std::logic_error(
@@ -360,18 +387,41 @@ void FakeAdapter::BeginRestore(Slot& slot,
   CheckRange(0, draft_end, static_cast<std::size_t>(draft_end) * sizeof(Token));
   if (std::exchange(fail_allocation_, false))
     throw std::bad_alloc();
+  const auto kept_range = [&](ComponentId id) {
+    const auto k = std::ranges::find(kept, id, &ResidentRange::id);
+    return k == kept.end() ? std::pair<Rows, Rows>{0, 0}
+                           : std::pair{k->first, k->end};
+  };
+  const auto [target_keep_first, target_keep] = kept_range(kTarget);
+  const auto [draft_keep_first, draft_keep] = kept_range(kDraft);
+  const auto [window_keep_first, window_keep] = kept_range(kWindow);
+  if (!kept.empty() &&
+      (!in_place_ || target_keep_first || draft_keep_first ||
+       target_keep > std::min<Rows>(target_end, state.target.size()) ||
+       draft_keep > std::min<Rows>(draft_end, state.draft.size()) ||
+       (window_keep_first < window_keep &&
+        (window_keep > target_end ||
+         !state.Resident(window_keep_first, window_keep)))))
+    throw std::invalid_argument("kept rows are not resident");
   std::vector<Token> target(static_cast<std::size_t>(target_end));
   std::vector<Token> draft(static_cast<std::size_t>(draft_end));
+  std::copy_n(state.target.begin(), target_keep, target.begin());
+  std::copy_n(state.draft.begin(), draft_keep, draft.begin());
   std::vector<std::uint8_t> target_loaded(target.size()),
       draft_loaded(draft.size());
+  std::fill_n(target_loaded.begin(), target_keep, 1);
+  std::fill_n(draft_loaded.begin(), draft_keep, 1);
   // All preservation runs while the old rows/private state remain readable.
-  state.guard_.BeforeOverwrite(kTarget, 0,
+  state.guard_.BeforeOverwrite(kTarget, target_keep,
                                std::max<Rows>(state.target.size(), target_end));
-  state.guard_.BeforeOverwrite(kDraft, 0,
+  state.guard_.BeforeOverwrite(kDraft, draft_keep,
                                std::max<Rows>(state.draft.size(), draft_end));
-  if (ring_rows_)
-    state.guard_.BeforeOverwrite(kWindow, 0,
+  if (ring_rows_) {
+    state.guard_.BeforeOverwrite(kWindow, 0, window_keep_first);
+    state.guard_.BeforeOverwrite(kWindow,
+                                 std::max(window_keep, window_keep_first),
                                  std::max(state.window_rows, target_end));
+  }
   if (state.Busy())
     throw std::logic_error(
         "guard returned with preservation transfers pending");
@@ -383,9 +433,15 @@ void FakeAdapter::BeginRestore(Slot& slot,
       {kTarget, target_end}, {kDraft, draft_end}, {kRecurrent, target_end}};
   if (ring_rows_) {
     state.expected.push_back({kWindow, target_end});
-    std::ranges::fill(state.occupant, kEmptyRingSlot);
+    for (auto& occupant : state.occupant)
+      if (occupant < window_keep_first || occupant >= window_keep)
+        occupant = kEmptyRingSlot;
     state.window_rows = target_end;
     state.window_loaded.assign(static_cast<std::size_t>(target_end), 0);
+    std::fill(
+        state.window_loaded.begin() + window_keep_first,
+        state.window_loaded.begin() + std::max(window_keep_first, window_keep),
+        1);
   }
   state.recurrent = {0, 0, kSeed, kSeed};
   state.private_loaded = false;

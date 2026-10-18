@@ -64,6 +64,11 @@ public:
       const cache::Slot&, cache::Rows first, cache::Rows end) const override;
   void BeginRestore(cache::Slot&,
                     std::span<const cache::ComponentPosition>) override;
+  [[nodiscard]] std::vector<cache::ResidentRange> ResidentRows(
+      const cache::Slot&,
+      std::span<const cache::ComponentPosition>) const override;
+  void BeginRestore(cache::Slot&, std::span<const cache::ComponentPosition>,
+                    std::span<const cache::ResidentRange> kept) override;
   [[nodiscard]] cache::Completion CapturePrivate(const cache::Slot&,
                                                  cache::ComponentId,
                                                  std::span<std::byte>,
