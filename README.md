@@ -43,9 +43,10 @@ MTP uses each model's drafter):
 
 | Model | Context | GPU in use | Prompt | Prefill | Decode | Decode, MTP |
 | --- | ---: | ---: | --- | ---: | ---: | ---: |
-| Qwen3.8-Flash-Next UD-Q4_K_XL | 262,144 | 88.4 GiB (92.5 with MTP + vision) | 2.1K | 1,522 | 28.1 | 40.1 |
-| | | | 8.5K | 1,513 | 28.1 | 47.1 |
-| | | | 31.8K | 1,547 | 28.0 | 57.2 |
+| Qwen3.8-Flash-Next UD-Q4_K_XL, 1 session | 262,144 | 90.9 GB dedicated (91.4 peak) with MTP + vision | 2.1K | 1,491–1,496 | 28.1* | 41.5–44.0 |
+| | | | 8.5K | 1,466–1,478 | 28.1* | 48.4–51.2 |
+| | | | 31.8K | 1,497–1,515 | 28.0* | 62.1–65.4 |
+| | | | 250.8K | 1,332–1,339 | | 54.5–66.5 |
 | Gemma 4 31B Q4_K_M (MeroMero) | 200,000 | 32.5 GiB | 2.1K | 469–474 | 11.2 | 22.4 |
 | | | | 8.5K | 449–462 | 10.9 | 21.7 |
 | | | | 31.8K | 407–436 | 10.2 | 18.3 |
@@ -53,11 +54,20 @@ MTP uses each model's drafter):
 - Flash-Next MTP uses Unsloth's `MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf`; Gufo
   rejects the `shared-Q4_K_M` drafter (Q4_K `hc_*` tensors) and the F16 vision
   projector (use `mmproj-BF16.gguf`). A short prompt with a 512-token reply decodes at
-  28.8 tok/s without MTP and 36.8 with it; the long-prompt MTP rates are high partly
-  because the benchmark prompt repeats itself and prompt lookup copies from it.
-- With MTP and vision at 262K, Flash-Next leaves about 4 GiB of a 96 GB carve-out.
-  Windows also charges GPU allocations to the commit limit, so keep a large page file
-  (it is only reserved, not written: 0.9 GB in use during these runs).
+  41.7–44.0 tok/s with MTP; the long-prompt MTP rates are high partly because the
+  benchmark prompt repeats itself and prompt lookup copies from it. *The no-MTP column
+  was measured while another program held 12.6 GB of GPU memory and may be low.
+- Stay inside the carve-out. Past it the display driver moves buffers into system
+  memory, and Windows wrote to the page file: Flash-Next with **2 sessions x 262K** +
+  MTP + vision sat at 95.3 GB dedicated idle and paged out ~20 MB when two long
+  requests started. One session x 262K + MTP + vision peaked at 91.4 GB through a
+  250K-token prompt with no page-file growth over 10 minutes idle and the benchmark.
+  Gufo's Windows free-memory figure counts shared memory too, so it does not stop
+  this by itself; check what other programs (e.g. ComfyUI) hold before loading.
+- An `mmproj-BF16.gguf` beside the model (or in its parent folder) is loaded
+  automatically. Keep it in a subfolder and pass `--mmproj` to choose vision.
+- Windows charges GPU allocations to the commit limit as well, so keep a large page
+  file; it is reserved, not written (391 MB in use throughout these runs).
 - Gemma 4 12B (QAT Q4_0 and Q4_K_M fine-tunes) loads but fails its first request with
   `split attention head grouping unsupported`: the Gemma 4 engine does not cover the
   12B's head layout yet. This is not specific to Windows.
