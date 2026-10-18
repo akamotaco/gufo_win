@@ -4,6 +4,8 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <optional>
@@ -1173,9 +1175,59 @@ bool Session::FinishDecode(const DecodeRequest& request,
   return true;
 }
 
+namespace {
+
+// GUFO_DECODE_TRACE=1: every 64 single-session decode cycles, the mean
+// milliseconds of drafting (PrepareDecode), verify submission (Forward),
+// acceptance (FinishDecode, which waits for the verify) and the caller's time
+// between cycles, with tokens per cycle.
+struct DecodeTrace {
+  using Clock = std::chrono::steady_clock;
+  static bool Enabled() {
+    static const bool on = [] {
+      const char* v = std::getenv("GUFO_DECODE_TRACE");
+      return v != nullptr && v[0] == '1';
+    }();
+    return on;
+  }
+  static double Ms(Clock::time_point a, Clock::time_point b) {
+    return std::chrono::duration<double, std::milli>(b - a).count();
+  }
+  void Add(Clock::time_point start, Clock::time_point prepared,
+           Clock::time_point submitted, Clock::time_point finished,
+           std::size_t tokens) {
+    if (last_end != Clock::time_point{} && Ms(last_end, start) < 1000.0)
+      sum[3] += Ms(last_end, start);
+    sum[0] += Ms(start, prepared);
+    sum[1] += Ms(prepared, submitted);
+    sum[2] += Ms(submitted, finished);
+    tokens_sum += tokens;
+    last_end = finished;
+    if (++cycles == 64) {
+      std::fprintf(stderr,
+                   "[decode-trace] cycles=64 draft_ms=%.2f submit_ms=%.2f "
+                   "finish_ms=%.2f between_ms=%.2f tokens_per_cycle=%.2f\n",
+                   sum[0] / 64, sum[1] / 64, sum[2] / 64, sum[3] / 64,
+                   static_cast<double>(tokens_sum) / 64);
+      std::fflush(stderr);
+      *this = DecodeTrace{.last_end = last_end};
+    }
+  }
+  double sum[4]{};
+  std::size_t tokens_sum{0};
+  int cycles{0};
+  Clock::time_point last_end{};
+};
+
+}  // namespace
+
 bool Session::DecodeStep(std::size_t max_tokens,
                          sampling::SamplerState& sampler, DecodeResult* result,
                          std::string* error_msg, bool stop_at_eos) {
+  static thread_local DecodeTrace trace;
+  const bool tracing = DecodeTrace::Enabled();
+  const auto t_start = tracing ? DecodeTrace::Clock::now()
+                               : DecodeTrace::Clock::time_point{};
   if (continuation_hooks_)
     continuation_hooks_->BeforeExecution();
   if (!valid_) {
@@ -1193,6 +1245,8 @@ bool Session::DecodeStep(std::size_t max_tokens,
     valid_ = true;
     return true;
   }
+  const auto t_prepared = tracing ? DecodeTrace::Clock::now()
+                                  : DecodeTrace::Clock::time_point{};
   if (pending.lookup != 0)
     model_->batch_policy_.SkipCycle();
   float* logits = !pending.speculative       ? logits_.data()
@@ -1205,8 +1259,14 @@ bool Session::DecodeStep(std::size_t max_tokens,
           error_msg)) {
     return false;
   }
+  const auto t_submitted = tracing ? DecodeTrace::Clock::now()
+                                   : DecodeTrace::Clock::time_point{};
+  const std::size_t before = result != nullptr ? result->tokens.size() : 0;
   const bool ok = FinishDecode(request, pending, error_msg);
   valid_ = ok;
+  if (tracing && ok && result != nullptr)
+    trace.Add(t_start, t_prepared, t_submitted, DecodeTrace::Clock::now(),
+              result->tokens.size() - before);
   return ok;
 }
 

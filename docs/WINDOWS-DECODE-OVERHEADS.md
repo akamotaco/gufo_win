@@ -38,8 +38,8 @@ MTP 켬 수치는 생성 내용에 따라 ±10% 흔들린다(문구를 매번 �
 4K 깊이도 거의 같다. 표보다 전체가 약 7ms 싸지만 비율이 같아 표를 다시 맞춰도 길이 선택은 거의 안 바뀐다.
 
 - 추측 1개의 한계 비용 ≈ **proposal 4.1ms + 검증 4.5ms**(rulith는 합쳐 약 6.6ms).
-- proposal은 바이트로 보면 MTP 한 층(활성 전문가) + 축소 헤드(98,304행 Q8_0 ≈ 267MB ≈ 1.3ms)로 약 1.8ms여야 한다.
-  **나머지 약 2.3ms/단계는 동기화·제출 지연·호스트 왕복으로 추정**한다.
+- 이 도구의 proposal은 **전체 어휘 헤드**(248,320행, 약 675MB ≈ 3ms) 기준이다(`SetDraftVocab`을 부르지 않음).
+  서버의 축소 헤드로는 추측 한 단계가 약 2.3ms다(3절).
 - 검증 한계 비용(4.5ms/토큰)은 대부분 토큰마다 더 읽는 전문가 가중치라 줄이기 어렵다.
 
 재현(서버를 내린 상태 — 모델을 통째로 올린다, PATH에 `build\release`):
@@ -53,20 +53,44 @@ build\gpu-test\tests\models\qwen38_flash_next\qwen38_flash_next_gpu_probe.exe `
 
 `proposal_ms`를 직접 보여 주므로 **디코드 최적화의 A/B 도구**로 쓴다. `--depth N`으로 깊이 하나만 잴 수 있다.
 
-## 3. 다음 작업 (우선순위)
+## 3. 사이클 계측 (서버 경로, `GUFO_DECODE_TRACE=1`)
 
-1. **proposal 단계의 왕복 줄이기.** 드래프트 단계마다 토큰을 pin 메모리로 받고 sync한다
+`Session::DecodeStep`이 64사이클마다 구간 평균을 로그에 찍는다. 짧은 컨텍스트, 사이클당 1.5~1.6토큰:
+
+| 구간 | ms/사이클 |
+| --- | ---: |
+| 추측(`PrepareDecode`: MTP 따라잡기 + 축소 헤드 추측) | 4.1~4.6 |
+| 검증(`Forward`, GPU 완료까지 동기) | 37~38 |
+| 수락·롤백(`FinishDecode`) | 0.6~0.9 |
+| 서버의 사이클 사이 | 0.02 |
+
+- **2절의 proposal 4.1ms/추측은 전체 어휘 헤드 기준이다.** `mtp_audit`는 `SetDraftVocab`을 부르지 않는다.
+  서버(98,304행 축소 헤드)에서 추측 한 단계는 약 2.3ms로, 바이트 하한(약 1.8ms)과 0.5ms 차이뿐이다.
+  → 드래프트 루프의 왕복을 줄여 얻을 몫은 디코드 1~2% 수준.
+- 호스트·서버 쪽도 원인이 아니다(0.02 + 0.7ms).
+- 사이클의 대부분은 검증이고, 추측 토큰 하나를 더 검증하면 층마다 전문가 10개를 더 읽는다(약 1GB, 약 4.5ms, 대역폭 한계).
+- **길이 강제 실험**(정책의 최소 길이를 임시 코드로 올림, 같은 고정 문구): 최소 2개 35.7/39.2/47.0/39.7/41.9,
+  최소 3개 32.0/36.7/46.0/36.7/41.5 tok/s(1절 기본 36.1/36.6/47.4/38.5/42.1). **정책은 맞게 고른다.**
+- rulith는 3개씩 추측해 사이클당 약 1.25개가 맞고, gufo는 최소 3개 강제 시 약 1.05개다. 깊은 추측의 품질 차이인지,
+  생성 내용·집계 방식 차이인지는 이 자료로 가릴 수 없다(엔진마다 생성되는 글이 다르다).
+
+## 4. 다음 작업 (우선순위, 3절 반영)
+
+1. **proposal 단계의 왕복 줄이기** — 3절대로 몫이 1~2%라 우선순위를 낮춘다. 드래프트 단계마다 토큰을 pin 메모리로 받고 sync한다
    (`Executor::MtpHead`/`MtpBody`, 엔진의 드래프트 루프). 후보: pixmaate `a8b45a0b`("fewer host round trips per
-   MTP cycle")의 해당 부분, 드래프트 루프의 `flush_before_wait`(4절), 드래프트 단계를 한 번의 제출로 묶기.
+   MTP cycle")의 해당 부분, 드래프트 루프의 `flush_before_wait`(5절), 드래프트 단계를 한 번의 제출로 묶기.
    2ms 줄이면 한계 비용이 rulith 수준이 되고, 정책이 스스로 더 길게 추측한다. 효과는 `proposal_ms`로 판정.
 2. **low-rank 헤드**(rulith `apply_mtp_lowrank_head`: 2560→512 사전 점수로 후보 512행만 헤드 곱). 헤드 약 1.3ms → 수백 µs.
    rulith 드래프터(`models\shared\mtp-...-Q4_K_M-head-lr512.gguf`)에 텐서가 있지만 gufo는 그 파일의 Q4_K hc 텐서를 거부한다.
-3. 작은 배치(2~8토큰) IQ4 전문가 커널의 효율 확인 — 검증 한계 비용 쪽.
+3. 작은 배치(2~8토큰) IQ4 전문가 커널의 효율 확인 — 검증 한계 비용 쪽. 검증이 사이클의 90%라 레버는 여기다.
+   rulith에는 이 구간 패치가 여러 개 있다(`apply_small_batch_decode`, `apply_verify_small_products`,
+   `apply_mmvq_rows4_058`, `apply_topk_moe_spec_058` — 라우터 커널 8.45 → 6.63µs/층).
+4. 같은 글로 깊은 추측의 적중률 비교: 한 엔진의 출력을 고정하고 다른 엔진에 강제로 먹이며 MTP 제안을 비교해야 한다.
 
 Flash-Next MTP는 `--min-draft-tokens`/`--draft-policy`를 막아 둔다(`src/cli/serve/inference_backend.cpp`의
 "Flash-Next MTP requires a positive draft limit"). 길이를 강제하는 실험에는 코드 변경이 필요하다.
 
-## 4. Windows HIP 동작 마이크로 벤치 (참고)
+## 5. Windows HIP 동작 마이크로 벤치 (참고)
 
 pixmaate/gufo `win/main`의 Flash-Next 디코드 튜닝 3커밋(`ae594013`, `a8b45a0b`, `aeee89a5`, 합쳐 +8~15% 주장, TheRock 10.0
 기준)의 전제를 단독 HIP 벤치로 다시 쟀다(pi 에이전트, 벤치 소스는 오류 검사가 없어 저장소에 넣지 않았다).
@@ -86,7 +110,7 @@ pixmaate/gufo `win/main`의 Flash-Next 디코드 튜닝 3커밋(`ae594013`, `a8b
 - `std::this_thread::sleep_for(5ms)`는 실제로 약 15.6ms 잔다(Windows 타이머 해상도).
 - 기본 `hipHostMalloc` 메모리에 커널이 직접 쓰면 프로세스가 죽는다. `hipHostMallocMapped`는 접근은 된다.
 
-## 5. 하지 말 것
+## 6. 하지 말 것
 
 - 두 스트림 전환(`aeee89a5`) 이식 — 실측 약 10µs.
 - 롤백을 recorded graph로 바꾸기 — 카피 회당 1.8µs.
