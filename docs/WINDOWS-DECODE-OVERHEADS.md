@@ -14,7 +14,7 @@ AtomicChat abliterated(Qwen3.8-Flash-Next `AD-4.85bpw-Q5_K_M`)를 기준으로, 
 | 159.9K | **42.1** (62%) | 34.2 (51%) | 28.1 | – |
 
 디코드 tok/s. 같은 고정 문구, 사고 끔, temperature 0, 캐시 없음, 서버 하나씩 직렬(gufo `10ee14ac`).
-측정 스크립트: `llm	ool\measure.py PORT LABEL`(저장소 밖). 출력 정확도는 `llm	ool\copytest.py PORT TAG [filler_k]`(식별자 40개 따라 쓰기).
+측정 스크립트: `llm\tool\measure.py PORT LABEL`(저장소 밖). 출력 정확도는 `llm\tool\copytest.py PORT TAG [filler_k]`(식별자 40개 따라 쓰기).
 같은 실행의 prefill은 gufo 1,381/1,396/1,441/1,338, rulith 1,041/1,163/1,218/1,155 tok/s.
 MTP 켬 수치는 생성 내용에 따라 ±10% 흔들린다(문구를 매번 바꾸면 적중률이 42~76%로 움직인다).
 
