@@ -8,12 +8,14 @@
 //
 // Requires GUFO_GEMMA4_MODEL; exits 77 without it.
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <functional>
 #include <iostream>
 #include <memory>
 #include <span>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "src/cache/checkpoint.hpp"
@@ -38,10 +40,13 @@ public:
   void BeforeOverwrite(cache::ComponentId id, cache::Rows first,
                        cache::Rows end) override {
     writes.push_back({id, first, end});
+    count.fetch_add(1, std::memory_order_release);
   }
   void BeforeRelease(cache::ComponentId, cache::Rows,
                      cache::Rows) noexcept override {}
   std::vector<Write> writes;
+  // Readable from other threads while the slot executes.
+  std::atomic<std::size_t> count{0};
 };
 
 struct Fixture {
@@ -390,6 +395,32 @@ int main() {
     f.RequireSameState(*slot_a, *checkpoint);
     Require(Greedy(adapter.GetSession(*slot_a), 6) == reference,
             "restore into the wrapped original slot diverges");
+
+    // A capture taken while another slot prefills reads only its own
+    // session's writes, and equals one taken with the device idle.
+    {
+      f.Restore(*slot_a, *checkpoint, false);
+      const auto started = guard_b.count.load(std::memory_order_acquire);
+      std::string prefill_error;
+      bool prefilled = false;
+      std::thread prefill([&] {
+        prefilled = b.Sync(LongPrompt(*model, ring + 700), &prefill_error);
+      });
+      while (guard_b.count.load(std::memory_order_acquire) == started)
+        std::this_thread::yield();
+      auto during = cache::ExecutionHistory::Cold(
+          f.ledger, adapter.Components(), adapter.CompatibilityIdentity());
+      const auto concurrent = during.Capture(
+          {cached, cache::InputIdentity(cached.size()),
+           adapter.Positions(*slot_a), cache::CheckpointPurpose::kPrompt, 1},
+          [&](const cache::PayloadRequest& request) {
+            return f.Save(*slot_a, request);
+          });
+      prefill.join();
+      Require(prefilled, prefill_error);
+      f.RequireSameState(*slot_a, *concurrent);
+      f.RequireSameState(*slot_a, *checkpoint);
+    }
 
     Require(adapter.Invalidate(*slot_b), "invalidate refused");
     Require(adapter.GetSession(*slot_b).Position() == 0 && slot_b->IsValid(),

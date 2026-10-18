@@ -718,6 +718,15 @@ void Executor::Forward(std::span<const Segment> segments,
       logit_rows.size() > max_logit_rows_) {
     throw std::invalid_argument("gemma4 forward exceeds its capacity");
   }
+  if (fences_ != nullptr) {
+    writers_.clear();
+    for (const Segment& s : segments) {
+      if (s.cache->hooks != nullptr) {
+        writers_.push_back(s.cache->hooks);
+      }
+    }
+    fences_->BeforeMutation(writers_);
+  }
   for (const Segment& s : segments) {
     if (s.cache->hooks != nullptr) {
       s.cache->hooks->BeforeWrite(s.first_position, s.first_position + s.rows);
@@ -1288,7 +1297,15 @@ bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n,
                            stream);
 }
 
+void Executor::BeforeMutation(KvCache& cache) {
+  if (fences_ != nullptr && cache.hooks != nullptr) {
+    ContinuationHooks* const writer = cache.hooks;
+    fences_->BeforeMutation(std::span(&writer, 1));
+  }
+}
+
 void Executor::CommitHidden(KvCache& cache, std::uint32_t row) {
+  BeforeMutation(cache);
   const std::size_t d = model_.config().hidden_size;
   HIP_CHECK(hipMemcpyAsync(cache.hidden, h_ + row * d, d * sizeof(float),
                            hipMemcpyDeviceToDevice, stream_));
@@ -1301,6 +1318,7 @@ void Executor::StashHidden(KvCache& cache, std::uint32_t row) {
 }
 
 void Executor::AdoptStashedHidden(KvCache& cache) {
+  BeforeMutation(cache);
   const std::size_t d = model_.config().hidden_size;
   HIP_CHECK(hipMemcpyAsync(cache.hidden, cache.ahead_hidden, d * sizeof(float),
                            hipMemcpyDeviceToDevice, stream_));
@@ -1322,6 +1340,7 @@ void Executor::MoveKey(KvCache& cache, std::uint32_t from, std::uint32_t to) {
     args.v_width[l] = c.KvDim(l);
     args.ring[l] = c.IsSliding(l) ? cache.ring : 0;
   }
+  BeforeMutation(cache);
   if (cache.hooks != nullptr) {
     cache.hooks->BeforeWrite(to, to + 1);
   }
@@ -1616,6 +1635,7 @@ std::span<const std::uint32_t> Executor::ReadArgmax(std::size_t rows) const {
 }
 
 void Executor::CommitLogits(KvCache& cache, std::uint32_t row) {
+  BeforeMutation(cache);
   const std::size_t vocab = model_.vocab_size();
   HIP_CHECK(hipMemcpyAsync(cache.logits, logits_ + std::size_t{row} * vocab,
                            vocab * sizeof(float), hipMemcpyDeviceToDevice,

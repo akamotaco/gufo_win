@@ -22,6 +22,7 @@ struct MtpCandidateLogits;
 
 namespace gufo::models::gemma4 {
 class ContinuationHooks;
+class ContinuationFences;
 }  // namespace gufo::models::gemma4
 
 namespace gufo::models::gemma4::rocm {
@@ -207,6 +208,10 @@ public:
   using TapSink = std::function<void(std::uint32_t layer, const float* rows,
                                      std::uint32_t count, hipStream_t stream)>;
   void SetTapSink(TapSink sink) { tap_sink_ = std::move(sink); }
+  /// Told before every call that writes a session's rows or frontier state
+  /// (component cache); null otherwise.
+  void SetFences(ContinuationFences* fences) noexcept { fences_ = fences; }
+  [[nodiscard]] ContinuationFences* fences() const noexcept { return fences_; }
 
   /// Copies the logits of the last Forward to the host, [rows][vocab].
   [[nodiscard]] std::span<const float> ReadLogits(std::size_t rows) const;
@@ -222,6 +227,8 @@ public:
   [[nodiscard]] const DeviceModel& model() const noexcept { return model_; }
 
 private:
+  /// Tells fences_ that queued work is about to write `cache`.
+  void BeforeMutation(KvCache& cache);
   /// y[rows][w.rows] = x[rows][w.cols] * W^T; `xq` is x staged for the
   /// prefill GEMMs when rows exceed the small-batch limit (Quantize).
   /// `packed` says `wmma_` already holds `x`'s WMMA activation pack.
@@ -265,6 +272,8 @@ private:
   std::uint32_t ring_;
   std::vector<std::uint32_t> key_widths_;
   hipStream_t stream_{nullptr};
+  ContinuationFences* fences_{nullptr};
+  std::vector<ContinuationHooks*> writers_;
   /// Experts beside the dense MLP at grouped widths (MoE models).
   hipStream_t expert_stream_{nullptr};
   hipEvent_t expert_fork_{nullptr};
