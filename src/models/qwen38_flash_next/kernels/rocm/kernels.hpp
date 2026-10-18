@@ -44,6 +44,8 @@ enum class WeightType : std::uint32_t {
   kQ8_0 = 8,
   kQ4_K = 12,
   kQ5_K = 13,
+  kIQ4_NL = 20,
+  kIQ4_XS = 23,
   kBF16 = 30,
 };
 

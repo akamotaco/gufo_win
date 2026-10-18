@@ -5086,6 +5086,8 @@ __device__ __forceinline__ std::size_t RoutedF16RowBytes(std::size_t k) {
   return kType == WeightType::kQ4_K   ? (k / 256) * sizeof(Q4KBlock)
          : kType == WeightType::kQ5_K ? (k / 256) * kQ5KBlockBytes
          : kType == WeightType::kQ5_1 ? (k / 32) * sizeof(Q5_1Block)
+         : kType == WeightType::kIQ4_NL ? (k / 32) * 18
+         : kType == WeightType::kIQ4_XS ? (k / 256) * 136
                                       : (k / 32) * sizeof(Q8_0Block);
 }
 
@@ -5117,6 +5119,20 @@ __device__ __forceinline__ void CodesToHalves(std::uint32_t codes,
   hi = __hfma2(__hadd2(__builtin_bit_cast(__half2, p1), magic), scale2, bias2);
 }
 
+/// Four IQ4 codes (one nibble per byte) to their signed kvalues_iq4nl bytes:
+/// two byte permutes over the table's low and high eight entries, chosen by
+/// bit 3 of each nibble.
+__device__ __forceinline__ std::uint32_t Iq4Lookup(std::uint32_t nib) {
+  // {-127,-104,-83,-65}, {-49,-35,-22,-10}, {1,13,25,38}, {53,69,89,113}
+  constexpr std::uint32_t kT0 = 0xBFAD9881U, kT1 = 0xF6EADDCFU;
+  constexpr std::uint32_t kT2 = 0x26190D01U, kT3 = 0x71594535U;
+  const std::uint32_t sel = nib & 0x07070707U;
+  const std::uint32_t lo = __builtin_amdgcn_perm(kT1, kT0, sel);
+  const std::uint32_t hi = __builtin_amdgcn_perm(kT3, kT2, sel);
+  const std::uint32_t mask = ((nib >> 3U) & 0x01010101U) * 0xFFU;
+  return (hi & mask) | (lo & ~mask);
+}
+
 template<WeightType kType, int BM, int BN, int BK, bool kPair = false>
 __launch_bounds__(256) __global__
     void RoutedF16GEMMKernel(const void* __restrict__ w,
@@ -5137,7 +5153,12 @@ __launch_bounds__(256) __global__
   constexpr int kWaveRowTiles = BM / 128;  // 16-row tiles per wave
   constexpr bool kQ5 = kType == WeightType::kQ5_1;
   constexpr bool kQ5K = kType == WeightType::kQ5_K;
-  constexpr bool kQ8 = kType == WeightType::kQ8_0;
+  // IQ4_NL and IQ4_XS expand to Q8_0's form while fetching: 32 signed
+  // kvalues_iq4nl bytes and one scale per 32-element block (d, or
+  // d * (ls - 32) for an IQ4_XS sub-block), so staging and decode are Q8_0's.
+  constexpr bool kIQ4NL = kType == WeightType::kIQ4_NL;
+  constexpr bool kIQ4XS = kType == WeightType::kIQ4_XS;
+  constexpr bool kQ8 = kType == WeightType::kQ8_0 || kIQ4NL || kIQ4XS;
   constexpr bool kKQuant = kType == WeightType::kQ4_K || kQ5K;
   // 16-byte code chunks per row and stage: Q4_K's nibble pair and Q5_1's
   // two nibble blocks are two, Q8_0's two byte blocks are four.
@@ -5298,7 +5319,44 @@ __launch_bounds__(256) __global__
     }
 #pragma unroll
     for (int u = 0; u < (kQ5 ? 0 : kWaveRowTiles); ++u) {
-      if constexpr (kQ8) {
+      if constexpr (kIQ4NL || kIQ4XS) {
+        const int kb = kb0 + f_c;
+        const std::uint8_t* qs;
+        if constexpr (kIQ4NL) {
+          // block_iq4_nl is 18 bytes: d, then 16 bytes of nibbles.
+          const auto* blk = f_ptr[u] + (kb * 18);
+          f_dm[u] = *reinterpret_cast<const std::uint16_t*>(blk);
+          qs = blk + 2;
+        } else {
+          // block_iq4_xs is 136 bytes: d, scales_h, scales_l[4], then 16
+          // bytes of nibbles per 32-element sub-block.
+          const auto* sbk = f_ptr[u] + ((kb / 8) * 136);
+          const int ib = kb % 8;
+          const std::uint32_t scales_h =
+              *reinterpret_cast<const std::uint16_t*>(sbk + 2);
+          const std::uint32_t scales_l = sbk[4 + (ib / 2)];
+          const int ls =
+              static_cast<int>(((scales_l >> (4 * (ib & 1))) & 0xFU) |
+                               (((scales_h >> (2 * ib)) & 3U) << 4U));
+          const float d = __half2float(__builtin_bit_cast(
+              __half, *reinterpret_cast<const std::uint16_t*>(sbk)));
+          f_dm[u] = __builtin_bit_cast(
+              std::uint16_t, __float2half_rn(d * static_cast<float>(ls - 32)));
+          qs = sbk + 8 + (16 * ib);
+        }
+        uint4 packed;
+        __builtin_memcpy(&packed, qs, 16);
+        // Low nibbles are elements 0..15, high nibbles 16..31, as Q8_0's
+        // first and second 16 codes.
+        f_codes[u] = make_uint4(Iq4Lookup(packed.x & 0x0F0F0F0FU),
+                                Iq4Lookup(packed.y & 0x0F0F0F0FU),
+                                Iq4Lookup(packed.z & 0x0F0F0F0FU),
+                                Iq4Lookup(packed.w & 0x0F0F0F0FU));
+        f_codes_hi[u] = make_uint4(Iq4Lookup((packed.x >> 4U) & 0x0F0F0F0FU),
+                                   Iq4Lookup((packed.y >> 4U) & 0x0F0F0F0FU),
+                                   Iq4Lookup((packed.z >> 4U) & 0x0F0F0F0FU),
+                                   Iq4Lookup((packed.w >> 4U) & 0x0F0F0F0FU));
+      } else if constexpr (kQ8) {
         // block_q8_0 is 34 bytes, so the code loads are 2-byte aligned.
         const auto* blk = f_ptr[u] + ((kb0 + f_c) * 34);
         f_dm[u] = *reinterpret_cast<const std::uint16_t*>(blk);
@@ -6332,6 +6390,18 @@ bool LaunchRoutedF16(const void* w, WeightType type, const __half* x,
                          pad_bounds, rows_in, rows_out, swiglu_gate, out,
                          out_half, m, k, nullptr);
       return true;
+    case WeightType::kIQ4_NL:
+      hipLaunchKernelGGL(
+          (RoutedF16GEMMKernel<WeightType::kIQ4_NL, kBM, BN, kBK>), grid,
+          dim3(kThreads), 0, stream, w, x, tiles, pad_bounds, rows_in,
+          rows_out, swiglu_gate, out, out_half, m, k, nullptr);
+      return true;
+    case WeightType::kIQ4_XS:
+      hipLaunchKernelGGL(
+          (RoutedF16GEMMKernel<WeightType::kIQ4_XS, kBM, BN, kBK>), grid,
+          dim3(kThreads), 0, stream, w, x, tiles, pad_bounds, rows_in,
+          rows_out, swiglu_gate, out, out_half, m, k, nullptr);
+      return true;
     case WeightType::kQ5_K:
       if constexpr (BN > 48) {
         return false;
@@ -6354,7 +6424,10 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
                    const float* swiglu_gate, float* out, __half* out_half,
                    std::size_t m, std::size_t k, hipStream_t stream) {
   const std::size_t block_elems =
-      (type == WeightType::kQ4_K || type == WeightType::kQ5_K) ? 256 : 64;
+      (type == WeightType::kQ4_K || type == WeightType::kQ5_K ||
+       type == WeightType::kIQ4_XS)
+          ? 256
+          : 64;
   if (m == 0 || k == 0 || k % block_elems != 0 || n_tiles == 0 ||
       (out_half == nullptr) == (out == nullptr)) {
     return false;
