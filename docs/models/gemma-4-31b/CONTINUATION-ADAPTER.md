@@ -272,7 +272,7 @@ had cost 3.4% before).
     than with its restored checkpoint (`cache-edits` edits, two
     `cache-concurrency` requests: 1,187 + 4 + 7 tokens instead of
     1,191 + 7, +37–44 ms on 26B). Upstream's shared-prefix checkpoint stops
-    the pass at the divergence point; Gemma has no in-pass capture.
+    the pass at the divergence point. Fixed below (prompt lookahead).
   - Decode order: when two requests become ready together they decode
     batched (45 ms per step for both) instead of one after the other
     (35 ms each); which happens varies between runs on both paths.
@@ -285,6 +285,23 @@ had cost 3.4% before).
   - Acquisition runs three to four prefix-index lookups, 0.4–1.4 ms more
     queueing than legacy on cold requests.
   - `long_json_stop` still loses its retry copy under the full budget.
+- **Prompt lookahead at later stops:** a prefill step that stops at a
+  checkpoint evaluates the tokens after it in the same forward, as far as
+  the forward has rows left (whole, or up to a later stop) and the step's
+  budget allows; it used to ride only a tail of at most 16 tokens, adopted
+  only whole. Later steps adopt it at each stop the runner announces (the
+  logits and hidden state of those rows are kept, one stash slot each), and
+  a step between stops keeps the shared rows and evaluates only its last
+  token. The ridden rows stop short of the frontier's window and its first
+  64-row chunk, so a capture there still reads them. The `cache-edits` edits
+  now take one forward again: 334.5, 399.7 and 335.5 ms prefill against
+  legacy's 342.4, 409.6 and 339.5 ms (+37–44 ms before). `gemma4.target`
+  checks each adopted frontier against one that evaluated its prefix, and
+  `gemma4.continuation` the adopted hidden state; both fail with a wrong
+  logits row or stash slot. Paired runs against the previous build match on
+  long prompts (7,004.7 / 7,008.5 ms, then 7,233.1 / 7,249.4 ms: the host
+  drifts 3–4% between pairs, so long-prefill flags against an older legacy
+  run are not from this). 26B AR decode stays at 55.63 tok/s.
 - **Images (26B MTP with its sidecar):** `image-inputs`, `tool-images`,
   `conversation` and the image cancellation history pass. The component
   path had placed a grid checkpoint inside an image span, which Gemma
