@@ -127,6 +127,11 @@ build\release\gufo.exe serve --host 127.0.0.1 --port 8093 llm `
   --context 65536 --cache-ram-bytes 4294967296
 ```
 
+To watch the servers, `python tools\windows\gufo_monitor.py --servers 8093 --logs <log folder>`
+serves a page on http://127.0.0.1:8090: each session's phase (prefill progress or
+decode rate, from `/slots`), the last requests with cache misses marked, GPU use,
+GPU and system memory, and page-file writes. It only reads.
+
 ### Status
 
 - Working: build, `gufo diagnose`, Gemma 4 26B-A4B and 31B with and without MTP,
