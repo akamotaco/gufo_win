@@ -71,8 +71,9 @@ peers by index; the second feeds a running total that could underflow. They
 must align by absolute chunk index. The disk manifest gains the window size
 only for windowed components: write version 3 when one is present, keep reading
 version 2, so existing Flash-Next directories stay valid. The slot's
-`borrowed_end` fast path never skips ring evictions (they are always below
-it), so the guard needs a per-component lower bound of live registrations.
+guard keeps the hull (lowest first, highest end) of each component's
+registrations, so an append above it and a ring eviction below it both skip
+the registry scan.
 
 Chunk size for window components is open: 64 rows bound each checkpoint's
 private tail to 63 rows (31B 52 MB, 26B 13 MB; v3's 256-position sliding
@@ -309,7 +310,7 @@ had cost 3.4% before).
   per removal on average; a byte-pressure eviction's removal 2.1 to 0.6 ms).
   Two requests that finish prefill together decode as one batch again: a
   peer whose prompt capture is still running and has only the assistant
-  framing left gets up to 10 ms to join, instead of waiting out the other's
+  framing left gets up to 10 ms in total to join, instead of waiting out the other's
   first decode step (`depth_branches`: second first token at 124–128 ms in
   every run, 177–184 ms in two of three before; legacy 123 ms). A wider
   join (any peer with up to 512 tokens left) made a ready request wait for

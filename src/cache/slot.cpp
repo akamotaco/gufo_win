@@ -70,9 +70,20 @@ struct LeaseState final : MutationGuard {
   // Foreground mutation can erase registrations. Reset this cursor whenever
   // execution releases the slot; the idle worker never uses it while leased.
   std::list<Entry>::iterator idle_next{rows.end()};
-  // Conservative per-component upper bound of registered ends. Appends at
-  // or beyond it skip the registry scan on every execution step.
-  std::unordered_map<std::uint32_t, Rows> borrowed_end;
+  // Conservative per-component hull of registered ranges. A mutation wholly
+  // outside it, such as an append beyond the highest end or a ring eviction
+  // below the lowest first, skips the registry scan on every execution step.
+  struct Hull {
+    Rows first{}, end{};
+  };
+  std::unordered_map<std::uint32_t, Hull> borrowed;
+  void Widen(ComponentId c, Rows first, Rows end) {
+    const auto [it, inserted] = borrowed.try_emplace(c.value, Hull{first, end});
+    if (!inserted) {
+      it->second.first = std::min(it->second.first, first);
+      it->second.end = std::max(it->second.end, end);
+    }
+  }
   bool leased{false}, live{false}, spilling{false}, idle_failed{false};
   bool idle_pending{false};
   std::condition_variable_any changed;
@@ -308,8 +319,9 @@ struct LeaseState final : MutationGuard {
       throw std::invalid_argument("reversed mutation range");
     if (!release)
       CheckStop();
-    if (const auto bound = borrowed_end.find(component.value);
-        bound == borrowed_end.end() || bound->second <= first)
+    if (const auto hull = borrowed.find(component.value);
+        hull == borrowed.end() || hull->second.end <= first ||
+        end <= hull->second.first)
       return;
     // Iterate without allocating a request-time snapshot. Leased execution
     // serializes Borrow and mutation; readers never change this registry.
@@ -342,7 +354,7 @@ struct LeaseState final : MutationGuard {
       Preserve(r, false);
     }
     // Every registered range is now preserved; later guards need no scan.
-    borrowed_end.clear();
+    borrowed.clear();
     CheckStop();
   }
   void BeforeOverwrite(ComponentId c, Rows first, Rows end) override {
@@ -590,8 +602,7 @@ std::shared_ptr<BorrowedRows> SlotLease::Borrow(
   rows->metadata = metadata.Convert();
   // Raise the guard bound before registration: a failure afterwards may only
   // leave it conservatively high, never hide a registered range.
-  auto& bound = state_->borrowed_end[c.value];
-  bound = std::max(bound, end);
+  state_->Widen(c, first, end);
   auto result = std::shared_ptr<BorrowedRows>(new BorrowedRows(rows));
   state_->rows.push_back({rows->metadata, rows, c, first, end});
   return result;
@@ -624,8 +635,7 @@ std::shared_ptr<BorrowedRows> SlotLease::Observe(
   rows->bytes = source.size();
   rows->category = ResourceCategory::kBackingAssigned;
   rows->metadata = metadata.Convert();
-  auto& bound = state_->borrowed_end[c.value];
-  bound = std::max(bound, end);
+  state_->Widen(c, first, end);
   auto result = std::shared_ptr<BorrowedRows>(new BorrowedRows(rows));
   state_->rows.push_back({rows->metadata, rows, c, first, end});
   return result;
