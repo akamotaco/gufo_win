@@ -1,5 +1,6 @@
 #include "src/core/hip/committed_backing.hpp"
 
+#include <fcntl.h>
 #include <hip/hip_runtime.h>
 #include <linux/io_uring.h>
 #include <sys/mman.h>
@@ -50,6 +51,10 @@ int PinPages(void* data, std::size_t bytes) {
   const int ring = syscall(SYS_io_uring_setup, 1, &parameters);
   if (ring < 0)
     return -1;
+  // The rings outlive setup; a forked child must not inherit their pins.
+  // FD_CLOEXEC is an fd-table flag: no IORING_SETUP_CLOEXEC, which the
+  // pinned uapi headers predate, and no window for the register call below.
+  (void)fcntl(ring, F_SETFD, FD_CLOEXEC);
   if (syscall(SYS_io_uring_register, ring, IORING_REGISTER_BUFFERS,
               ranges.data(), ranges.size()) == 0)
     return ring;
