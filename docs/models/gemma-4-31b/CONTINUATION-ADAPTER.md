@@ -35,7 +35,7 @@ Sizes per position, binary16:
 | Tokens | 4 B | 4 B | append rows |
 | Frontier hidden (FP32, MTP drafter input) | 11,264 B | 21,504 B | private |
 | Logits (FP32) | 1 MiB | 1 MiB | private |
-| Image records (offset, rows, prefix identity) | 40 B per image | 40 B per image | private metadata |
+| Image records (offset, rows, prefix identity) | 40 B per image, up to 1,024 | 40 B per image, up to 1,024 | private metadata |
 
 The formula reproduces a 26B v3 restore of 22 tokens to the byte (5,847,164).
 A 31B checkpoint at 100K tokens holds 4.8 GiB of global rows and 0.8 GiB of
@@ -265,8 +265,9 @@ had cost 3.4% before).
   `unrelated`) takes 4–5 ms instead of 270–480 ms (legacy 430 ms), and both
   requests reach their first token about 42 ms sooner than legacy. Without
   the per-session events the copy stream alone still waited 612 ms. A
-  restore picks the slot it would have picked anyway, and keeps that slot's
-  rows when its live frontier extends the checkpoint's tokens and inputs.
+  restore picks the slot it would have picked anyway, and kept that slot's
+  rows when its live frontier extended the checkpoint's tokens and inputs
+  (since removed; see row provenance below).
   26B AR decode stays at 55.64–55.66 tok/s. Against the legacy control,
   2,804 of 2,952 timing measures pass (2,709 before). The remaining flags:
   - Prefills split once more where a prompt shares more with a stored prompt
@@ -413,6 +414,52 @@ had cost 3.4% before).
   Segments now fault 4 MiB at a time, and map changes during growth wait at
   most 0.8 ms. A capture coinciding with growth still took 13–55 ms in
   `cache-rotation`, without delaying its request's first token.
+- **Row provenance:** a restore into an idle slot whose live frontier
+  extended the checkpoint's tokens and inputs kept that slot's rows. That
+  slot had computed them itself, and Gemma's rows depend on how they were
+  computed (prefill feeds the projections half-precision inputs and decode
+  does not, and the prefill chunk width changes the arithmetic), so a prompt
+  ending at the checkpoint decoded from logits and a hidden state computed
+  over other rows. The slot's history also recorded the checkpoint, so its
+  later captures shared the checkpoint's chunks for those rows and an exact
+  retry restored in place over them. A slot now keeps rows only for
+  checkpoints its branch captured or was restored from. Against the
+  previous build, the requests that kept rows now load them: 31B
+  `legacy-tool-cancel` 381 MB (restore 4.4–4.5 ms against 1.0–1.1 ms, first
+  token 1.6–2.7 ms later over three runs), 31B `text-cancel` 158 MB
+  (2.1–2.2 ms against 0.6–0.7 ms) and 26B `long_json_stop` 369 MB (4.3 ms
+  against 0.9 ms, first token 2.9 ms later). Every other restore of the nine
+  suites loads the same rows.
+- **Image records:** a checkpoint held 128 image records and dropped the
+  rest, so a restored session prefilled again from the first image it
+  lacked, and from the start when that image lay further back than the
+  sliding-window ring reaches. Checkpoints now hold up to 1,024 records (the
+  private state grows by 35,840 bytes, 26B's to 1,100,816), and a session
+  with more images is not captured. The component layout version is now 2:
+  disk checkpoints from earlier builds are not reused. `gemma4.continuation`
+  restores a session holding 1,024 one-row images, which evaluates only a
+  1,025th image as the original session does, and refuses the capture after
+  it.
+- **Completions after their slot:** waiting on a transfer after its slot was
+  destroyed read the destroyed slot; the wait now returns the result the
+  slot settled. With freed memory overwritten (`MALLOC_PERTURB_`),
+  `gemma4.continuation` aborted on the previous code and passes.
+- **Code-word prompts:** `cache-concurrency` and `cache-shared-prefix` asked
+  for `Reply with only the code BETA.`, and 31B answered `BETA.` on some
+  requests with both builds, which stopped each suite at its first such
+  answer (14 of 29 and 2 of 18 requests ran). They now ask `Reply with only
+  the code word: BETA`; both suites run every request and pass on 31B and
+  26B.
+- **Against the previous build** (the same nine suites on 31B and 26B MTP,
+  then the flagged suites twice more): 31B passes 973 of 984 timing
+  measures, 26B 1,162 of 1,170. Apart from the restores above, no measure
+  is flagged in every run; disk-restart restores vary by up to 12 ms in
+  either direction between runs. With every request now running, 31B
+  `cache-concurrency` and `cache-shared-prefix` pass 278 of 282. Over four
+  runs each, background captures in `cache-concurrency` (`identical`,
+  `fanout`, `unrelated`) took 130–180 ms longer seven times with these
+  changes and three times without, and no first token moved; four runs
+  cannot tell the two rates apart.
 - **31B MTP against legacy** (`--sessions 2 --context 32768`, the six
   `cache-*` suites, `cache`, `long-context` and `state-edges`, legacy
   recorded right before): 932 of 978 timing measures pass (882 of 966
