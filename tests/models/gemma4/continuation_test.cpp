@@ -429,6 +429,14 @@ int main() {
       const std::span<const g4::TokenId> head(text.data(), text.size() - 40);
       const std::span<const g4::TokenId> tail(text.data() + head.size(), 40);
       const std::vector<std::size_t> stops{5, 23};
+      // Stops that descend, repeat or reach past the lookahead are refused.
+      for (const std::vector<std::size_t>& bad :
+           {std::vector<std::size_t>{23, 5}, std::vector<std::size_t>{5, 5},
+            std::vector<std::size_t>{5, tail.size()}}) {
+        std::string refused;
+        Require(!b.Sync(head, {}, {}, &refused, tail, bad) && !refused.empty(),
+                "malformed lookahead stops accepted");
+      }
       Require(b.Sync(head, {}, {}, &error, tail, stops) &&
                   b.LookaheadTokens() == tail.size(),
               "lookahead with stops: " + error);

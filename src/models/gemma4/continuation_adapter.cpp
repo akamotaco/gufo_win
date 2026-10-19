@@ -116,7 +116,8 @@ public:
     }
     TransferResult Wait() noexcept {
       // A settled job may outlive its slot: the slot settles every job
-      // before it is destroyed.
+      // before it is destroyed. An unsettled one reads the slot below, so
+      // its waiter must not run concurrently with the slot's destruction.
       {
         const std::lock_guard lock(mutex);
         if (result)

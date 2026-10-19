@@ -562,6 +562,11 @@ bool Session::Sync(std::span<const TokenId> prompt,
     Reset();
     return Fail(error_msg, "prompt is empty");
   }
+  if (!std::ranges::is_sorted(lookahead_stops, std::ranges::less_equal{}) ||
+      (!lookahead_stops.empty() &&
+       lookahead_stops.back() >= lookahead.size())) {
+    return Fail(error_msg, "lookahead stops must ascend below the lookahead");
+  }
   BeginRequest();
   if (model_->options_.draft_calibration == DraftCalibrationScope::kRequest) {
     for (auto& calibration : calibration_) {
