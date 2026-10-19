@@ -1604,8 +1604,10 @@ void SwipeRestoresInPlace() {
   }
 }
 // A live slot whose tokens and inputs extend a checkpoint another slot
-// captured keeps its rows when that checkpoint restores into it.
-void SharedPrefixRestoresInPlace() {
+// captured computed those rows itself: they need not equal the checkpoint's,
+// and its history does not hold them. Restoring that checkpoint into it loads
+// the rows too, whether or not the prompt goes on past the checkpoint.
+void SharedPrefixRestoresRows(bool continues) {
   auto runner = std::make_shared<Runner>();
   runner->in_place = true;
   ComponentTextCache cache(runner, 2, 1 << 22, {});
@@ -1637,13 +1639,18 @@ void SharedPrefixRestoresInPlace() {
   append(second, other);
   (void)second->Commit({}, {}, other);
   // A third conversation takes the second slot, the only idle one.
-  const auto third_tokens = suffix(60);
+  const auto third_tokens = continues ? suffix(60) : shared;
   auto third = cache.Acquire(third_tokens, {}, {}, true, 0, true);
   assert(third->cached_tokens() == shared.size());
   std::size_t private_bytes = 0;
   for (const auto& d : runner->adapter->Components())
     private_bytes += d.state_bytes;
-  assert(third->restored_snapshot_bytes() == private_bytes);
+  assert(third->restored_snapshot_bytes() > private_bytes);
+  if (!continues) {
+    third->Invalidate();
+    first->Invalidate();
+    return;
+  }
   append(third, std::span(third_tokens).subspan(shared.size()));
   const auto restored = hash(third);
   third->Invalidate();
@@ -1687,5 +1694,6 @@ int main() {
   WindowRowsReuseAndBranches();
   WindowedDeepRowsSurviveDiskRestart();
   SwipeRestoresInPlace();
-  SharedPrefixRestoresInPlace();
+  SharedPrefixRestoresRows(true);
+  SharedPrefixRestoresRows(false);
 }
