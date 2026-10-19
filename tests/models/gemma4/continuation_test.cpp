@@ -6,6 +6,9 @@
 // With GUFO_GEMMA4_MTP_MODEL, greedy MTP cycles after a restore also draft and
 // accept exactly as before it: the drafter reads the restored hidden state.
 //
+// A completion waited after its slot is destroyed returns the result the slot
+// settled.
+//
 // Requires GUFO_GEMMA4_MODEL; exits 77 without it.
 #include <algorithm>
 #include <atomic>
@@ -532,6 +535,32 @@ int main() {
       std::cout << "images: a " << red.prompt.tokens.size()
                 << "-token checkpoint with a " << red.spans[0].rows
                 << "-row image restores into another slot and in place\n";
+    }
+
+    // A completion outlives its slot: the slot settles its transfers before
+    // it is destroyed, and a later wait returns that result.
+    {
+      RecordingGuard guard;
+      auto doomed = adapter.CreateSlot(guard);
+      Require(
+          adapter.GetSession(*doomed).Sync(std::span(prompt).first(64), &error),
+          error);
+      const auto hidden =
+          std::ranges::find(layout, g4::ContinuationPart::kHidden,
+                            &g4::ContinuationComponent::part);
+      std::vector<float> values(hidden->descriptor.state_bytes / sizeof(float));
+      Require(hipHostRegister(values.data(), hidden->descriptor.state_bytes,
+                              hipHostRegisterDefault) == hipSuccess,
+              "host registration failed");
+      auto stream = pool.TryAcquire();
+      Require(stream != nullptr, "no transfer stream");
+      auto completion = adapter.CapturePrivate(
+          *doomed, hidden->descriptor.id,
+          std::as_writable_bytes(std::span(values)), *stream);
+      doomed.reset();
+      Require(completion.Wait() == cache::TransferResult::kSucceeded,
+              "a capture waited after its slot was destroyed failed");
+      (void)hipHostUnregister(values.data());
     }
 
     Require(adapter.Invalidate(*slot_b), "invalidate refused");

@@ -107,6 +107,13 @@ public:
       return result || (launch && hipEventQuery(launch->done) == hipSuccess);
     }
     TransferResult Wait() noexcept {
+      // A settled job may outlive its slot: the slot settles every job
+      // before it is destroyed.
+      {
+        const std::lock_guard lock(mutex);
+        if (result)
+          return *result;
+      }
       owner->Flush();
       const std::lock_guard lock(mutex);
       if (!result) {
