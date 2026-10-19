@@ -134,3 +134,77 @@ assistant also passes: decode KL 1.11695e-6, eight-row KL 1.35631e-6,
 prefill KL 5.46016e-5 (all 22/22 top-1), long-conversation KL 0.004864.
 Greedy equivalence, siblings (23/189 accepted), sampled replay and snapshot
 restore checks pass. [Timing and calibration evidence](artifacts/mtp-verification-2026-10-19.json).
+
+## Coalesced attention qualification (2026-10-20)
+
+`519dfe9c` (source-equivalent to `eb17a526`) versus `422fbe4d`, production
+CMake `release` binaries, unchanged compiler/linker fingerprints. Candidate
+SHA-256 `bb1dd37daf0459c8…` matches `build/release/gufo`; baseline
+`a8038e8407374cae…`. The supplied 31B Q8_0 assistant is SHA-256
+`f4f0edc6cca78252…`; the full target/drafter identities are recorded in the
+[new artifact](artifacts/mtp-attention-e2e-2026-10-20.json). Historical tables
+retain their original drafter identities.
+
+The supplied seven-round operator A/B covers all 160 depth/head-layout/row
+shapes (rows 1–16, depths 0/4K/16K/32K/64K, four and two KV heads).
+Normal, 10× and 30× queries have finite, byte-identical outputs. Rebuilt
+`gemma4.attention_ops` (independent FP64 oracle and row comparisons),
+`gemma4.kernel_ops` and `gemma4.draft_policy` pass on the current source:
+
+```sh
+nix develop -c cmake --build --preset gpu-test --parallel 4 --target \
+  gemma4_attention_ops_test gemma4_kernel_ops_test gemma4_draft_policy_test
+nix develop -c ctest --preset gpu-full \
+  -R '^gemma4[.](attention_ops|kernel_ops|draft_policy)$' --output-on-failure
+```
+
+The supplied candidate `gemma4.target` log is reused: decode/eight-row/prefill
+mean KL 1.11695e-6 / 1.35631e-6 / 5.46016e-5, all 22/22 top-1;
+long-conversation mean KL 0.004864. Greedy equivalence, siblings, sampled
+replay and snapshot checks pass in that log. The full numerical output,
+including reported repetitive-prefill limits, is retained without changing
+tolerances or goldens.
+
+Timing method: native pp2048/tg128 at d16384 then d32768, one fresh process
+per ABBA arm, calibrated policy, cap 15, seed 1, `--verbose`. Prefill has
+an untimed warmup; decode follows depth preparation without an extra decode
+warmup. Native phase times are reconstructed from the printed 0.01-tok/s
+rates. HTTP: `serve llm --sessions 1 --context 40960 --think off`, greedy,
+seed 1, a short 16-token warmup per fresh server. Frozen-document summary
+and essay request 400 tokens; code edit requests 512. The separate
+`--draft-policy fixed --draft-tokens 11` control warms the same code prompt
+with 128 tokens, then repeats it for 512 with all 31,161 prompt tokens cached.
+This cap allows ragged lookup/tail rows. No loading-time measurement or
+page-cache reset is included.
+
+Every HTTP completion hash and prompt/cache/output count matches within its
+four-arm case. Summary is cold (31,290 tokens); essay reuses 22,528 of
+31,297 tokens, code edit 22,528 of 31,161. HTTP hashes establish text agreement
+for these matched histories. Independent model accuracy remains covered by
+the teacher comparisons above. Each arm's server phase metrics and client
+wall time are retained; overlapping stages are not summed into a headline.
+Paired comparisons require both >5% and >3 ms in both repeats. Prefill,
+decode, TTFT and request wall remain within those thresholds. Essay maximum
+inter-token gap fails: 154.02/153.92 → 167.80/167.33 ms. Summary/code snapshot
+flags are mixed and inconclusive; the candidate is not blanket latency-qualified.
+
+Separate fixed-11 rocprof traces isolate the final 512-token request using
+client/SDK monotonic timestamps. Affected global verification attention is
+20.8% of baseline GPU kernel time, 1,665 → 1,449 ms in the two profiles;
+400 candidate launches use the new `WPH=4` route (four waves per head,
+1024 threads per block, one row group per KV head/chunk) for 11/12-row
+launches in the 9–12-row group. These instrumented profiles explain scope and dispatch;
+unprofiled ABBA supplies the throughput results.
+
+The cost-only diagnostic changes exactly the runtime 320-byte dense
+verification table in a copy of the candidate; original binaries and source
+remain unchanged. The duplicate constexpr data in DWARF is not modified.
+It reruns the same fresh-server ABBA summary→essay history with the same
+warmup, model files and settings. Texts and prompt/cache/output counts match;
+previous prices restore baseline proposal/cycle counts and remove the essay
+maximum-gap increase (candidate 152.36/152.48, baseline 152.10/153.94 ms).
+The diagnostic summary snapshot phase still flags slower in both pairs;
+identical unchanged-baseline controls span 86.56–99.49 ms, encompassing its
+97.45–97.84 ms. The flag remains in the artifact and its cause is inconclusive.
+This diagnostic does not clear the original candidate's failed gap check or
+qualify a new production configuration.

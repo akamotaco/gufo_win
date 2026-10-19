@@ -340,3 +340,48 @@ queries scaled 10× and 30×. These are per-layer kernel times.
 | 65,536 | 16 | 4913.5 | 4595.9 | -6.5% |
 
 [Every row, depth, timing round and calibrated cost delta](../gemma-4-31b/artifacts/mtp-verification-2026-10-19.json).
+
+## MTP attention, depth ABBA (2026-10-20)
+
+UD-Q4_K_XL, production `release` binaries: `519dfe9c` (same source as
+`eb17a526`) against `422fbe4d`, including the recalibrated draft costs.
+Greedy, seed 1; fresh processes in baseline/candidate/candidate/baseline
+order. Rates below are decode-only or prefill-only, as labeled; gains use
+the two rates' means. Each request/phase is checked separately at 5% and
+3 ms in the artifact.
+
+Native `gufo bench -p 2048 -n 128 -d 16384,32768 -r 1 --verbose`.
+Prefill and decode are separate measurements; depth preparation is untimed.
+The synthetic repetitive decode exercises wide verification and prompt lookup.
+
+| Gemma 4 26B-A4B UD-Q4_K_XL MTP<br>Depth (tokens) | Phase | Baseline 1 / 2 (tok/s) | Candidate 1 / 2 (tok/s) | Gain |
+| ---: | --- | ---: | ---: | ---: |
+| 16,384 | pp2048 | 2911.80 / 2912.49 | 2903.56 / 2914.18 | -0.1% |
+| 16,384 | tg128 | 236.79 / 237.06 | 239.11 / 239.09 | +0.9% |
+| 32,768 | pp2048 | 2291.52 / 2291.27 | 2289.39 / 2289.21 | -0.1% |
+| 32,768 | tg128 | 207.50 / 207.74 | 211.05 / 211.21 | +1.7% |
+
+HTTP C1, context 40960, one short warmup per fresh server. Default-policy
+summary and essay: the original frozen ~31K-token document, 400 output
+tokens each. The code edit renames a dataclass in a supplied module after
+an archive of similar depth (512 output tokens). A separate fixed-policy
+11-draft control warms that shape with 128 output tokens, then repeats the
+same prompt for 512; the cap exercises the 9–12-row launch range with ragged lookup/tail rows.
+
+| Gemma 4 26B-A4B UD-Q4_K_XL MTP<br>Request | Baseline 1 / 2 (tok/s) | Candidate 1 / 2 (tok/s) | Gain |
+| --- | ---: | ---: | ---: |
+| Summary, default | 75.87 / 75.79 | 76.24 / 76.22 | +0.5% |
+| Essay, default | 75.60 / 75.65 | 75.00 / 74.93 | -0.9% |
+| Code edit, default | 206.07 / 206.40 | 208.58 / 208.72 | +1.2% |
+| Code edit, fixed 11 drafts | 193.28 / 194.59 | 195.55 / 196.25 | +1.0% |
+
+[All rounds, counts, hashes, timings and phase verdicts](../gemma-4-31b/artifacts/mtp-attention-e2e-2026-10-20.json).
+
+All HTTP texts and token/cache counts match across the four arms. Default
+code edit uses the same 43 cycles and 539 proposals on every arm; the
+11-draft control uses 54 cycles and 484 proposals, including ragged
+lookup/tail rows. All per-request timing checks remain within 5% / 3 ms.
+The observed gains are below that threshold; this is a small numerical
+improvement rather than a qualified material speedup. Whole-request code
+latency is 6.08 → 6.05 s (default) and 2.65 → 2.62 s (11-draft control).
+The historical llama.cpp tables retain their original measurements.
