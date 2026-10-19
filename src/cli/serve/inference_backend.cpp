@@ -2896,10 +2896,12 @@ public:
                                    ? model_->PrefillThroughCapacity()
                                    : model_->PrefillCapacity()})));
     std::string error;
-    // Diagnostic for "activation quantization failed": a HIP error already
-    // pending here was left by earlier work, not by this chunk. Logged only.
-    if (const hipError_t pending = hipPeekAtLastError(); pending != hipSuccess)
-      Logger::Warn("chat", std::string("event=hip_error_pending stage=before_prefill_chunk offset=") +
+    // A HIP error pending here was returned to earlier work, which handled
+    // it, and was left as the thread's last error; the quantize kernel's
+    // launch check would report it as this chunk's ("activation quantization
+    // failed"). Log and clear it.
+    if (const hipError_t pending = hipGetLastError(); pending != hipSuccess)
+      Logger::Warn("chat", std::string("event=hip_error_cleared stage=before_prefill_chunk offset=") +
                                std::to_string(offset) + " tokens=" + std::to_string(prompt.size()) +
                                " error=" + hipGetErrorName(pending));
     if (!qfn.session().Sync(prefix, &error, next)) {
