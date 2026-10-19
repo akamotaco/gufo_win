@@ -15,14 +15,17 @@ Upstream Gufo's changes are in [CHANGELOG.md](CHANGELOG.md).
   restart, a 5.5K-token 31B conversation reaches its next first token in
   0.43 s instead of 9.9 s.
 - Prefill no longer splits at checkpoints, captures no longer wait for
-  another session's prefill (26B: 4–5 ms against legacy's 430 ms), and two
-  requests finishing prefill together decode as one batch.
+  another session's prefill (26B: 8–9 ms against legacy's 204–325 ms), and
+  two requests finishing prefill together decode as one batch.
 - Fixed 31B restores stalling 4–17 ms after the cache grew its host memory,
   and captures stalling while it grew.
 - Synced with upstream main through gufo-org/gufo#477 (0.17.1).
-- On 31B MTP, 932 of 978 per-request timing measures match the legacy cache.
-  Restores into a free slot, where legacy reused the other slot's session,
-  and background captures remain slower.
+- `cache_snapshot_ms` reports a prompt capture's own time; it included the
+  wait until the scheduler collected the finished capture.
+- On 31B MTP, 1,105 of 1,164 per-request timing measures match the legacy
+  cache, and prompt captures take a median 0.58 of legacy's time. Restores
+  into a free slot, where legacy reused the other slot's session, remain
+  slower.
 
 ## 2026-10-18: Prompt lookup from upstream and fewer request stalls ([#2](https://github.com/franzmoca/gufo/pull/2))
 

@@ -475,6 +475,31 @@ had cost 3.4% before).
   captures report 38.86/1.77, 49.68/5.42 and 44.52/31.32 ms, where the
   baseline reported 1,549.25 ms for the first `unrelated` capture
   ([per-request values and worker timestamps](artifacts/capture-timing.json)).
+- **Against legacy with the corrected timer** (`1b7b154` and this branch,
+  both with the capture timer fix and built with the release preset; 31B
+  MTP, the nine suites, with the code-word suites running every request;
+  26B MTP `cache-concurrency` twice): 31B passes 1,105 of 1,164 timing
+  measures. Of the 164 prompt captures timed in both builds, 126 take less
+  time than legacy's (median 0.58 of legacy's; 3.7 s against 13.6 s in
+  total); `cache-growth`'s second-turn captures take 26–36 ms against
+  7–11 ms. 26B `unrelated` captures take 8–9 ms against legacy's
+  204–325 ms, and both requests reach their first token 29–71 ms sooner.
+  Legacy fails `disk-spacing-disk`; this branch passes every suite. The
+  remaining 31B flags:
+  - Restores into a free slot where legacy reused the other slot's live
+    session (`cache-edits` edits, `depth_branches`,
+    `long_responses_sampled`, `long_cancel_resume`, `history_turn_1`,
+    `cancelled_leader`, `long_tasks_1`): 9–20 ms against under 2 ms.
+  - Retries after a tool-call stop that prefill 7 tokens (first token about
+    104 ms against 1–2 ms): `state-edges` `tool_argument_stop_retry` in all
+    four runs of this branch and one of two legacy runs;
+    `quoted_call_argument_stop_stream` and a `legacy-tool-cancel` retry in
+    one of four (legacy: one of two and none of two).
+  - Decode beside concurrent captures in `cache-concurrency`, 7–13 ms
+    slower, and `fanout`'s second request prefilling in 168 ms against
+    128 ms.
+  - 20 captures more than 5% and 3 ms slower than legacy's, the
+    `cache-growth` second turns among them.
 - **31B MTP against legacy** (`--sessions 2 --context 32768`, the six
   `cache-*` suites, `cache`, `long-context` and `state-edges`, legacy
   recorded right before): 932 of 978 timing measures pass (882 of 966
@@ -493,7 +518,9 @@ had cost 3.4% before).
   - Background prompt captures, 1.4–5.6 times legacy's (`cache-growth`
     turns 12–61 ms against 8–14 ms, long prompts 78–88 ms against
     48–55 ms), as before these changes; those requests' first tokens
-    pass.
+    pass. These durations included collection delay; with the corrected
+    timer on both builds most captures take less time than legacy's (see
+    below).
   - `cache-concurrency` `fanout`: the second request prefills its 18
     tokens in the same two chunks in 165 ms against 128 ms; its first token
     still comes 77 ms sooner than legacy's.
