@@ -1875,6 +1875,7 @@ struct TextGenerationScheduler::Impl {
     std::deque<std::shared_ptr<ScheduledRequest>> prefilling;
     std::deque<std::shared_ptr<ScheduledRequest>> decoding;
     std::deque<std::shared_ptr<ScheduledRequest>> capturing;
+    std::optional<Clock::time_point> join_deadline;
     // Cold requests waiting for a resident prefill of their shared prefix.
     std::deque<std::shared_ptr<ScheduledRequest>> waiting;
     while (!stop_token.stop_requested()) {
@@ -1953,7 +1954,10 @@ struct TextGenerationScheduler::Impl {
                       }) &&
           runner_pool->SelectDecodePlan(decoding.size() + 1).kind ==
               TextExecutionPlanKind::kBatched) {
-        const auto deadline = Clock::now() + kCaptureJoinWait;
+        // One budget for the whole batch, not for each peer that joins.
+        if (!join_deadline)
+          join_deadline = Clock::now() + kCaptureJoinWait;
+        const auto deadline = *join_deadline;
         bool joined = false;
         for (auto it = capturing.begin(); it != capturing.end();) {
           const auto& peer = (*it)->runner_request;
@@ -1979,6 +1983,7 @@ struct TextGenerationScheduler::Impl {
         if (joined)
           continue;
       }
+      join_deadline.reset();
       const bool due_decoder = HasDueDecoder(decoding);
       const std::size_t resident_count = prefilling.size() + decoding.size();
       const bool preparing_multi_token_batch =
