@@ -43,12 +43,27 @@ __device__ __forceinline__ float XorLane(float v) {
   }
 }
 
+template<int M>
+__device__ __forceinline__ float MaxXorLane(float v) {
+  static_assert(M > 0 && M < kWave && (M & (M - 1)) == 0);
+  if constexpr (M == 16) {
+    return fmaxf(v, XorLane<16>(v));
+  } else {
+    float out;
+    asm("v_max_f32_dpp %0, %1, %1 row_xmask:%2 row_mask:0xf bank_mask:0xf "
+        "bound_ctrl:1"
+        : "=v"(out)
+        : "v"(v), "n"(M));
+    return out;
+  }
+}
+
 __device__ __forceinline__ float WaveMax(float v) {
-  v = fmaxf(v, XorLane<16>(v));
-  v = fmaxf(v, XorLane<8>(v));
-  v = fmaxf(v, XorLane<4>(v));
-  v = fmaxf(v, XorLane<2>(v));
-  return fmaxf(v, XorLane<1>(v));
+  v = MaxXorLane<16>(v);
+  v = MaxXorLane<8>(v);
+  v = MaxXorLane<4>(v);
+  v = MaxXorLane<2>(v);
+  return MaxXorLane<1>(v);
 }
 
 __device__ __forceinline__ float WaveSum(float v) {
@@ -805,6 +820,14 @@ constexpr int kMaxRopePairs = static_cast<int>(kMaxDerivedKeyPairs);
 /// Rows per block of the row-shared split kernel.
 constexpr int kRowBlock = 5;
 
+template<int Step>
+__device__ __forceinline__ float ButterflyPair(float a, float b, int lane) {
+  const bool upper = (lane & Step) != 0;
+  const float send = upper ? a : b;
+  const float keep = upper ? b : a;
+  return keep + XorLaneStep(send, Step);
+}
+
 /// Leaves in every lane L the wave-wide sum of v[L % N].
 template<int N>
 __device__ __forceinline__ float ReduceScatterN(float (&v)[N]) {
@@ -865,8 +888,17 @@ __global__ void __launch_bounds__(kThreads* WPH)
       max(0, min(R, static_cast<int>(a.rows) - static_cast<int>(row0)));
   const std::uint32_t base = (first_split + local) * C;
   const std::size_t stride = static_cast<std::size_t>(a.kv_heads) * D;
+  // At hd512 the eight head waves (per row group) read every key and value:
+  // the block stages each 32-key tile once in shared memory instead of
+  // issuing a copy of every load per wave.
+  constexpr bool kStaged = G == kWaves;
+  static_assert(kStaged || WPH == 1);
   const auto slot_of = [&](std::uint32_t key) {
-    return a.ring != 0 ? key % a.ring : key;
+    if constexpr (kStaged && R > 1) {
+      return key;
+    } else {
+      return a.ring != 0 ? key % a.ring : key;
+    }
   };
   // Cache rows load from a uniform head base plus a 32-bit byte offset (the
   // launcher checks the range), so a lane keeps one offset register rather
@@ -880,12 +912,8 @@ __global__ void __launch_bounds__(kThreads* WPH)
       reinterpret_cast<const __half*>(a.k_cache) + blockIdx.y * D;
   const auto* v_head =
       reinterpret_cast<const __half*>(a.v_cache) + blockIdx.y * D;
-  // At hd512 the eight head waves (per row group) read every key and value:
-  // the block stages each 32-key tile once in shared memory instead of
-  // issuing a copy of every load per wave.
-  constexpr bool kStaged = G == kWaves;
-  static_assert(kStaged || WPH == 1);
-  constexpr int kStageLoads = kStaged ? kWave * D / 8 / kBlockThreads : 1;
+  constexpr int kStageThreads = WPH == 3 ? 512 : kBlockThreads;
+  constexpr int kStageLoads = kStaged ? kWave * D / 8 / kStageThreads : 1;
   __shared__ __align__(16) __half tile[kStaged ? kWave * D : 8];
 
   std::uint32_t lo[R];
@@ -935,7 +963,8 @@ __global__ void __launch_bounds__(kThreads* WPH)
   // dims, staged beside the value tile; every other key dim is its value
   // (the query carries the key weight).
   const bool derived = a.rope_pairs != 0;
-  const int pairs = static_cast<int>(a.rope_pairs);
+  const int pairs = (kStaged && R > 1) ? (derived ? kMaxRopePairs : 0)
+                                       : static_cast<int>(a.rope_pairs);
   __shared__ __align__(16)
       __half rotated[kStaged ? kWave * 2 * kMaxRopePairs : 8];
   // This lane's key dims [lane P, lane P + P) in the rotated tile, or -1.
@@ -978,7 +1007,7 @@ __global__ void __launch_bounds__(kThreads* WPH)
   // 8-dim chunks of rotation pair group t % 32 (dims 8 (t % 32) + j and
   // D / 2 + 8 (t % 32) + j), so derived keys rotate within one thread.
   constexpr int kGroups = D / 16;
-  constexpr int kKeysPerPass = kBlockThreads / kGroups;
+  constexpr int kKeysPerPass = kStageThreads / kGroups;
   static_assert(!kStaged || kStageLoads == 2 * kWave / kKeysPerPass);
   const int group = static_cast<int>(threadIdx.x) % kGroups;
   uint4 staged[kStageLoads];
@@ -988,9 +1017,13 @@ __global__ void __launch_bounds__(kThreads* WPH)
           ? (kWave * 2 * kMaxRopePairs / 8 + kBlockThreads - 1) / kBlockThreads
           : 1;
   uint4 staged_rot[kRotLoads];
-  const int rot_chunks = 2 * pairs / 8;  // per key
+  constexpr int kRotChunks = 2 * kMaxRopePairs / 8;  // per key
+  const int rot_chunks = (kStaged && R > 1) ? kRotChunks : 2 * pairs / 8;
   const auto* k_rotated = reinterpret_cast<const __half*>(a.k_cache);
   auto stage_load = [&](const __half* head_cache, std::uint32_t key0) {
+    if (WPH == 3 && threadIdx.x >= kStageThreads) {
+      return;
+    }
 #pragma unroll
     for (int n = 0; n < kStageLoads / 2; ++n) {
       const std::uint32_t key =
@@ -1017,12 +1050,15 @@ __global__ void __launch_bounds__(kThreads* WPH)
   };
   auto stage_store = [&] {
     __syncthreads();
+    if (WPH != 3 || threadIdx.x < kStageThreads) {
 #pragma unroll
-    for (int n = 0; n < kStageLoads / 2; ++n) {
-      const int kk = static_cast<int>(threadIdx.x) / kGroups + n * kKeysPerPass;
-      __half* dst = tile + kk * D + group * 8;
-      *reinterpret_cast<uint4*>(dst) = staged[2 * n];
-      *reinterpret_cast<uint4*>(dst + D / 2) = staged[2 * n + 1];
+      for (int n = 0; n < kStageLoads / 2; ++n) {
+        const int kk =
+            static_cast<int>(threadIdx.x) / kGroups + n * kKeysPerPass;
+        __half* dst = tile + kk * D + group * 8;
+        *reinterpret_cast<uint4*>(dst) = staged[2 * n];
+        *reinterpret_cast<uint4*>(dst + D / 2) = staged[2 * n + 1];
+      }
     }
     if (derived) {
       rot_store();
@@ -1083,49 +1119,31 @@ __global__ void __launch_bounds__(kThreads* WPH)
       for (int r = 0; r < RR; ++r) {
         s[r] = -INFINITY;
       }
+      constexpr int SG = (P >= 16 && R > 1) ? 4 : LG;
+      constexpr int kLoadStep = LG;
 #pragma unroll 1
-      for (int g0 = 0; g0 < kWave; g0 += LG) {
-        uint4 kraw[LG][P / 8];
+      for (int s0 = 0; s0 < kWave; s0 += SG) {
+        float p2_even[RR] = {};
 #pragma unroll
-        for (int kk = 0; kk < LG; ++kk) {
-          load(k_head, true, key0, g0 + kk, kraw[kk]);
-        }
-#pragma unroll
-        for (int g = 0; g < LG; g += KG) {
-          // Each key converts once for every row where registers allow.
-          constexpr bool kConvertOnce = R <= (D == 512 ? 3 : 5);
-          float kf[kConvertOnce ? KG : 1][kConvertOnce ? P : 1];
-          if constexpr (kConvertOnce) {
-#pragma unroll
-            for (int kk = 0; kk < KG; ++kk) {
-#pragma unroll
-              for (int i = 0; i < P / 8; ++i) {
-                const auto* k2 =
-                    reinterpret_cast<const __half2*>(&kraw[g + kk][i]);
-#pragma unroll
-                for (int j = 0; j < 4; ++j) {
-                  const float2 f = __half22float2(k2[j]);
-                  kf[kk][8 * i + 2 * j] = f.x;
-                  kf[kk][8 * i + 2 * j + 1] = f.y;
-                }
-              }
+        for (int g0 = 0; g0 < SG; g0 += kLoadStep) {
+          if constexpr (SG > kLoadStep) {
+            if (g0 > 0) {
+              __builtin_amdgcn_sched_barrier(0);
             }
           }
+          uint4 kraw[kLoadStep][P / 8];
 #pragma unroll
-          for (int r = 0; r < RR; ++r) {
-            if (!kExactRows && r >= rows) {
-              continue;
-            }
-            float part[KG];
+          for (int kk = 0; kk < kLoadStep; ++kk) {
+            load(k_head, true, key0, s0 + g0 + kk, kraw[kk]);
+          }
 #pragma unroll
-            for (int kk = 0; kk < KG; ++kk) {
-              float dot = 0.0F;
-              if constexpr (kConvertOnce) {
+          for (int g = 0; g < kLoadStep; g += KG) {
+            // Each key converts once for every row where registers allow.
+            constexpr bool kConvertOnce = R <= (D == 512 ? 3 : 5);
+            float kf[kConvertOnce ? KG : 1][kConvertOnce ? P : 1];
+            if constexpr (kConvertOnce) {
 #pragma unroll
-                for (int i = 0; i < P; ++i) {
-                  dot = __builtin_fmaf(q[r][i], kf[kk][i], dot);
-                }
-              } else {
+              for (int kk = 0; kk < KG; ++kk) {
 #pragma unroll
                 for (int i = 0; i < P / 8; ++i) {
                   const auto* k2 =
@@ -1133,16 +1151,91 @@ __global__ void __launch_bounds__(kThreads* WPH)
 #pragma unroll
                   for (int j = 0; j < 4; ++j) {
                     const float2 f = __half22float2(k2[j]);
-                    dot = __builtin_fmaf(q[r][8 * i + 2 * j], f.x, dot);
-                    dot = __builtin_fmaf(q[r][8 * i + 2 * j + 1], f.y, dot);
+                    kf[kk][8 * i + 2 * j] = f.x;
+                    kf[kk][8 * i + 2 * j + 1] = f.y;
                   }
                 }
               }
-              part[kk] = dot;
             }
-            const float score = ReduceScatterN<KG>(part);
-            if (lane / KG == (g0 + g) / KG) {
-              s[r] = score;
+#pragma unroll
+            for (int r = 0; r < RR; ++r) {
+              if (!kExactRows && r >= rows) {
+                continue;
+              }
+              float part[KG];
+#pragma unroll
+              for (int kk = 0; kk < KG; ++kk) {
+                float dot = 0.0F;
+                if constexpr (kConvertOnce) {
+#pragma unroll
+                  for (int i = 0; i < P; ++i) {
+                    dot = __builtin_fmaf(q[r][i], kf[kk][i], dot);
+                  }
+                } else {
+#pragma unroll
+                  for (int i = 0; i < P / 8; ++i) {
+                    const auto* k2 =
+                        reinterpret_cast<const __half2*>(&kraw[g + kk][i]);
+#pragma unroll
+                    for (int j = 0; j < 4; ++j) {
+                      const float2 f = __half22float2(k2[j]);
+                      dot = __builtin_fmaf(q[r][8 * i + 2 * j], f.x, dot);
+                      dot = __builtin_fmaf(q[r][8 * i + 2 * j + 1], f.y, dot);
+                    }
+                  }
+                }
+                part[kk] = dot;
+              }
+              if constexpr (P < 16 || R == 1) {
+                const float score = ReduceScatterN<KG>(part);
+                if (lane / KG == (s0 + g0 + g) / KG) {
+                  s[r] = score;
+                }
+              } else {
+                const int sub = g0 + g;
+                const float v = ButterflyPair<1>(part[0], part[1], lane);
+                if ((sub & 2) == 0) {
+                  p2_even[r] = v;
+                } else {
+                  p2_even[r] = ButterflyPair<2>(p2_even[r], v, lane);
+                }
+              }
+            }
+            if constexpr (P >= 16 && R > 1) {
+              const int sub = g0 + g;
+              if ((sub & 2) != 0) {
+                const bool match4 = ((lane ^ s0) & 4) != 0;
+#pragma unroll
+                for (int r = 0; r + 1 < RR; r += 2) {
+                  if (!kExactRows && r >= rows) {
+                    continue;
+                  }
+                  const float a0 = p2_even[r];
+                  const float a1 = p2_even[r + 1];
+                  const float send = match4 ? a0 : a1;
+                  const float keep = match4 ? a1 : a0;
+                  float u = keep + XorLane<4>(send);
+                  u += XorLane<8>(u);
+                  u += XorLane<16>(u);
+                  const float u1 = XorLane<4>(u);
+                  if (lane / 4 == s0 / 4) {
+                    s[r] = u;
+                    s[r + 1] = u1;
+                  }
+                }
+                if constexpr (RR % 2 == 1) {
+                  constexpr int r = RR - 1;
+                  if (kExactRows || r < rows) {
+                    float v = p2_even[r];
+                    v += XorLane<4>(v);
+                    v += XorLane<8>(v);
+                    v += XorLane<16>(v);
+                    if (lane / 4 == s0 / 4) {
+                      s[r] = v;
+                    }
+                  }
+                }
+              }
             }
           }
         }
@@ -1166,7 +1259,8 @@ __global__ void __launch_bounds__(kThreads* WPH)
           // Wave-uniform statistics live in scalar registers.
           const float mt = Uniform(WaveMax(sr));
           if (mt != -INFINITY) {
-            const float mn = fmaxf(m[r], mt);
+            const float mn =
+                R == 4 ? Uniform(fmaxf(m[r], mt)) : fmaxf(m[r], mt);
             const float scale = Uniform(expf(m[r] - mn));
             p[r] = expf(sr - mn);
             l[r] = __builtin_fmaf(l[r], scale, Uniform(WaveSum(p[r])));
@@ -1414,7 +1508,9 @@ void LaunchSplitAttention(const AttentionArgs& a, hipStream_t stream) {
     // barriers), and so do four once the launch has at least 128 blocks
     // (fewer leave the four-row waves' latency exposed: the 26B's two KV
     // heads at 4K and 16K ran +24% and +7%); otherwise up to six rows take
-    // two waves of three, seven or eight two waves of four.
+    // two waves of three, seven or eight two waves of four, and nine to
+    // twelve three or four waves per head once the launch has at least four
+    // chunks.
     if (a.rows <= 3) {
       RowSplitAttentionKernel<D, G, 3, 1, CW>
           <<<dim3(1, a.kv_heads, chunk_blocks), kThreads, 0, stream>>>(
@@ -1423,14 +1519,29 @@ void LaunchSplitAttention(const AttentionArgs& a, hipStream_t stream) {
       RowSplitAttentionKernel<D, G, 4, 1, CW>
           <<<dim3(1, a.kv_heads, chunk_blocks), kThreads, 0, stream>>>(
               a, first_split, splits);
-    } else if (a.rows > 6) {
+    } else if (a.rows <= 6) {
+      RowSplitAttentionKernel<D, G, 3, 2, CW>
+          <<<dim3(1, a.kv_heads, chunk_blocks), 2 * kThreads, 0, stream>>>(
+              a, first_split, splits);
+    } else if (a.rows <= 8) {
+      RowSplitAttentionKernel<D, G, 4, 2, CW>
+          <<<dim3(1, a.kv_heads, chunk_blocks), 2 * kThreads, 0, stream>>>(
+              a, first_split, splits);
+    } else if (a.rows == 9 && chunk_blocks >= 4) {
+      RowSplitAttentionKernel<D, G, 3, 3, CW>
+          <<<dim3(1, a.kv_heads, chunk_blocks), 3 * kThreads, 0, stream>>>(
+              a, first_split, splits);
+    } else if (a.rows == 10 && a.kv_heads * chunk_blocks >= 128) {
+      RowSplitAttentionKernel<D, G, 4, 3, CW>
+          <<<dim3(1, a.kv_heads, chunk_blocks), 3 * kThreads, 0, stream>>>(
+              a, first_split, splits);
+    } else if (a.rows <= 12 && chunk_blocks >= 4) {
+      RowSplitAttentionKernel<D, G, 3, 4, CW>
+          <<<dim3(1, a.kv_heads, chunk_blocks), 4 * kThreads, 0, stream>>>(
+              a, first_split, splits);
+    } else {
       constexpr std::uint32_t kRows = 4 * 2;
       RowSplitAttentionKernel<D, G, 4, 2, CW>
-          <<<dim3((a.rows + kRows - 1) / kRows, a.kv_heads, chunk_blocks),
-             2 * kThreads, 0, stream>>>(a, first_split, splits);
-    } else {
-      constexpr std::uint32_t kRows = 3 * 2;
-      RowSplitAttentionKernel<D, G, 3, 2, CW>
           <<<dim3((a.rows + kRows - 1) / kRows, a.kv_heads, chunk_blocks),
              2 * kThreads, 0, stream>>>(a, first_split, splits);
     }

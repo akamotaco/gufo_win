@@ -20,18 +20,18 @@ constexpr std::array<std::uint32_t, 5> kDepths = {0, 4096, 16384, 32768, 65536};
 constexpr std::array<float, 5> kDraftStepMs = {1.95F, 2.05F, 2.40F, 2.82F,
                                                3.66F};
 // Verification rows 2-16 at 4K-64K lowered 2026-10-19 by the measured
-// DPP reduction saving in global split attention (ten layers).
+// global split-attention savings (ten layers).
 constexpr std::array<std::array<float, 16>, 5> kVerifyMs = {{
     {99.5F, 99.8F, 100.6F, 101.4F, 102.0F, 102.8F, 103.3F, 103.9F, 109.0F,
      109.6F, 110.1F, 111.1F, 111.7F, 112.3F, 112.7F, 113.1F},
-    {104.1F, 105.2F, 106.4F, 107.9F, 108.6F, 110.4F, 111.7F, 113.0F, 122.4F,
-     123.1F, 123.8F, 124.6F, 125.7F, 127.2F, 127.2F, 130.3F},
-    {108.2F, 109.8F, 111.4F, 114.0F, 117.0F, 119.7F, 122.5F, 124.8F, 138.0F,
-     139.1F, 141.1F, 143.1F, 145.4F, 147.6F, 148.5F, 151.5F},
-    {112.5F, 115.2F, 117.5F, 120.7F, 125.7F, 129.6F, 134.5F, 138.5F, 156.7F,
-     158.6F, 161.7F, 164.5F, 167.6F, 170.5F, 172.2F, 177.0F},
-    {121.0F, 125.0F, 129.3F, 134.2F, 142.3F, 147.6F, 157.0F, 163.5F, 192.9F,
-     196.0F, 201.7F, 208.4F, 212.6F, 217.9F, 221.9F, 229.1F},
+    {104.1F, 105.1F, 106.3F, 107.9F, 108.5F, 110.3F, 111.5F, 112.8F, 120.5F,
+     121.8F, 122.6F, 123.7F, 125.2F, 126.7F, 126.8F, 129.9F},
+    {108.2F, 109.6F, 111.2F, 113.3F, 116.4F, 118.8F, 121.4F, 123.8F, 134.6F,
+     136.8F, 139.5F, 141.7F, 144.0F, 146.1F, 146.9F, 149.4F},
+    {112.5F, 114.9F, 117.2F, 119.6F, 124.6F, 128.5F, 132.7F, 136.6F, 149.7F,
+     153.8F, 157.9F, 161.1F, 164.9F, 167.6F, 169.2F, 173.8F},
+    {121.0F, 124.3F, 128.3F, 132.4F, 140.2F, 145.8F, 153.8F, 160.0F, 180.0F,
+     187.3F, 194.8F, 202.0F, 208.2F, 212.0F, 216.0F, 222.7F},
 }};
 
 // The 26B-A4B (UD-Q4_K_XL target, Unsloth Q8_0 drafter), measured
@@ -44,18 +44,18 @@ constexpr std::array<std::array<float, 16>, 5> kVerifyMs = {{
 constexpr std::array<float, 5> kExpertDraftStepMs = {1.81F, 2.03F, 2.25F, 2.51F,
                                                      3.04F};
 // Verification rows 2-16 at 4K-64K lowered 2026-10-19 by the measured
-// DPP reduction saving in global split attention (five layers).
+// global split-attention savings (five layers).
 constexpr std::array<std::array<float, 16>, 5> kExpertVerifyMs = {{
     {18.3F, 21.1F, 23.1F, 25.4F, 27.3F, 29.1F, 30.8F, 31.8F, 33.2F, 34.4F,
      37.1F, 40.6F, 42.3F, 44.8F, 44.6F, 46.0F},
-    {19.8F, 22.8F, 25.7F, 28.0F, 30.0F, 32.7F, 34.8F, 36.3F, 37.7F, 39.4F,
-     42.4F, 45.9F, 48.7F, 51.0F, 50.9F, 52.5F},
-    {20.8F, 24.0F, 26.7F, 29.4F, 32.0F, 34.9F, 37.7F, 39.4F, 41.6F, 43.2F,
-     46.5F, 50.1F, 52.2F, 54.9F, 55.1F, 57.2F},
-    {21.7F, 25.2F, 28.2F, 31.3F, 34.6F, 37.2F, 39.8F, 41.8F, 45.3F, 47.1F,
-     50.4F, 54.7F, 57.3F, 60.4F, 60.7F, 62.7F},
-    {23.6F, 25.7F, 29.3F, 32.8F, 37.3F, 41.0F, 44.8F, 47.2F, 52.7F, 54.7F,
-     58.9F, 63.2F, 67.6F, 70.9F, 71.4F, 74.4F},
+    {19.8F, 22.8F, 25.7F, 28.0F, 30.0F, 32.7F, 34.7F, 36.2F, 37.1F, 38.9F,
+     42.0F, 45.5F, 48.6F, 50.9F, 50.8F, 52.4F},
+    {20.8F, 24.0F, 26.6F, 29.3F, 31.9F, 34.8F, 37.5F, 39.2F, 40.7F, 42.8F,
+     46.2F, 49.9F, 51.8F, 54.5F, 54.7F, 56.8F},
+    {21.7F, 25.2F, 28.0F, 31.0F, 34.3F, 36.8F, 39.4F, 41.3F, 43.6F, 46.0F,
+     49.6F, 54.0F, 56.6F, 59.7F, 59.9F, 61.8F},
+    {23.6F, 25.7F, 29.1F, 32.4F, 36.8F, 40.5F, 43.9F, 46.2F, 49.2F, 52.2F,
+     57.0F, 61.4F, 66.3F, 69.5F, 69.9F, 72.8F},
 }};
 
 }  // namespace

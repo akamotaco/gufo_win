@@ -86,8 +86,12 @@ reductions (`ReduceScatterN`), softmax statistics (`WaveMax`, `WaveSum`) and
 the per-key `readlane` broadcasts. On 2026-10-19, foldable DPP exchanges
 removed old-value copies from those reductions: five/eight/sixteen rows at 32K improved by 3.7/5.9/6.3%, with
 bit-identical outputs, and both draft-policy tables were adjusted from matched
-measurements through 64K ([experiment log](EXPERIMENTS.md)). Further work
-needs to cut the remaining score reductions or broadcasts. Rows must keep
+measurements through 64K ([experiment log](EXPERIMENTS.md)). On 2026-10-20,
+coalescing the hd512 score reductions across four keys and two rows per
+butterfly, folding `WaveMax` into `v_max_f32_dpp`, specializing `kStaged` for
+zero ring/64 rotated pairs, and running 9–12 rows in one block of 3–4 waves per
+head cut another 6–21% at 32K–64K (5/8/9/12/16 rows at 32K: −6.8/−7.8/−21.3/−9.1/−7.0%),
+again bit-identical. Rows must keep
 the arithmetic of single-row decode (the op test compares every verification row with its
 single-row evaluation bit for bit). The draft cost tables in
 `draft_policy.cpp` hold verification costs by rows and depth: re-measure the
