@@ -72,13 +72,22 @@ public:
   State(ContinuationAdapter& adapter, cache::MutationGuard& guard,
         std::unique_ptr<Session> session)
       : adapter(adapter), guard(guard), session(std::move(session)) {
-    // Pinned once: allocating pinned memory later waits for queued forwards.
-    Check(hipHostMalloc(&descriptors,
-                        kGathers * kBatchRuns * sizeof(rocm::CopyRun)));
-    Check(hipEventCreateWithFlags(&fence, hipEventDisableTiming));
-    this->session->cache_->hooks = this;
-    const std::lock_guard lock(adapter.executed_mutex_);
-    adapter.states_.push_back(this);
+    try {
+      // Pinned once: allocating pinned memory later waits for queued forwards.
+      Check(hipHostMalloc(&descriptors,
+                          kGathers * kBatchRuns * sizeof(rocm::CopyRun)));
+      Check(hipEventCreateWithFlags(&fence, hipEventDisableTiming));
+      this->session->cache_->hooks = this;
+      const std::lock_guard lock(adapter.executed_mutex_);
+      adapter.states_.push_back(this);
+    } catch (...) {
+      // A failed construction never reaches ~State; release what succeeded.
+      if (fence)
+        (void)hipEventDestroy(fence);
+      if (descriptors)
+        (void)hipHostFree(descriptors);
+      throw;
+    }
   }
   // Copies queued on the adapter's copy stream; `done` follows them.
   struct Launch {
