@@ -123,3 +123,14 @@ memory and loading. Gufo drafts under its calibrated policy. Every Gufo
 multi-user completion matches its C1 hash (AR against AR C1, MTP against MTP
 C1); the AR C1 hashes llama.cpp's MTP rows are compared with were qualified
 once with an isolated C1 AR run (`multi-*-q8-gufo-ar.json`).
+
+The 2026-10-19 DPP reduction change preserves every existing attention
+operator output byte for byte against 04d70a14, including each verification
+row’s single-row evaluation. A separate A/B covers rows 1–16 at
+0/4K/16K/32K/64K, both global head layouts, and normal/10×/30× queries;
+all outputs are finite and bit-identical. The FP64 attention and kernel
+operator checks pass. `gemma4.target` with the UD-Q4_K_XL target and Q8_0
+assistant also passes: decode KL 1.11695e-6, eight-row KL 1.35631e-6,
+prefill KL 5.46016e-5 (all 22/22 top-1), long-conversation KL 0.004864.
+Greedy equivalence, siblings (23/189 accepted), sampled replay and snapshot
+restore checks pass. [Timing and calibration evidence](artifacts/mtp-verification-2026-10-19.json).

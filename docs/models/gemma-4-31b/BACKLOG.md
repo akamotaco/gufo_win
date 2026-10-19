@@ -46,9 +46,11 @@ gaps. MTP verify cycles at d0 (~101 ms GPU): target verification projections
 bytes (cold, one row: 5376×16384 247 vs 220 µs). Load-only probes cap it at
 207–217 GB/s regardless of barriers, prefetch depth, request size or DRAM
 locality; occupancy is 9–24 against the AR GEMV's 47–62. Rejected so far:
-split half-wave loads, deeper weight prefetch, software-pipelined groups. The
-remaining idea is cooperative full-line weight loads redistributed to the WMMA
-lanes (today each load instruction touches 16 cache lines). Verification must
+split half-wave loads, deeper weight prefetch, software-pipelined groups.
+Cooperative 128-byte row loads redistributed through direct wave-register
+shuffles were tested on 2026-10-19: bit-identical, but 7–43% slower (the
+[experiment log](EXPERIMENTS.md)). A cheaper register transpose is still
+needed; today each load instruction touches 16 cache lines. Verification must
 keep one arithmetic per format so it still equals decode bit for bit
 (`gemma4.projection_ops`).
 
@@ -71,8 +73,12 @@ about four rows the kernel is compute-bound at ~270–300 µs per added row and
 layer at 32K, ~50% of the unpaired FP32 FMA ceiling. Paired FMAs (VOPD
 through opaque converted floats) were neutral, so the cost is the per-row score
 reductions (`ReduceScatterN`), softmax statistics (`WaveMax`, `WaveSum`) and
-the per-key `readlane` broadcasts. Rows must keep the arithmetic of
-single-row decode (the op test compares every verification row with its
+the per-key `readlane` broadcasts. On 2026-10-19, foldable DPP exchanges
+removed old-value copies from those reductions: five/eight/sixteen rows at 32K improved by 3.7/5.9/6.3%, with
+bit-identical outputs, and both draft-policy tables were adjusted from matched
+measurements through 64K ([experiment log](EXPERIMENTS.md)). Further work
+needs to cut the remaining score reductions or broadcasts. Rows must keep
+the arithmetic of single-row decode (the op test compares every verification row with its
 single-row evaluation bit for bit). The draft cost tables in
 `draft_policy.cpp` hold verification costs by rows and depth: re-measure the
 affected entries after any change (a kernel A/B at each table depth, times the

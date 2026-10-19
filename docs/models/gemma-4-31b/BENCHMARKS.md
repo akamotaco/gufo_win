@@ -307,3 +307,48 @@ token instead of 80).
 <!-- /bench -->
 
 ![Memory occupation](artifacts/charts/memory-q8.svg)
+
+## Verification attention kernel A/B (2026-10-19)
+
+The foldable DPP reductions compared with 04d70a14 on gfx1151, using
+production arithmetic flags. Full attention launch including merge; medians
+of seven alternating A/B rounds. Every output is byte-identical, including
+queries scaled 10× and 30×. These are per-layer kernel times.
+
+| Context | Rows | Before (µs) | After (µs) | Time change |
+| ---: | ---: | ---: | ---: | ---: |
+| 32,768 | 5 | 1749.5 | 1685.2 | -3.7% |
+| 32,768 | 8 | 2566.3 | 2415.1 | -5.9% |
+| 32,768 | 16 | 4939.0 | 4629.7 | -6.3% |
+| 65,536 | 5 | 3401.7 | 3267.9 | -3.9% |
+| 65,536 | 8 | 5033.9 | 4717.6 | -6.3% |
+| 65,536 | 16 | 10046.1 | 9405.4 | -6.4% |
+
+[Every row, depth, timing round and calibrated cost delta](artifacts/mtp-verification-2026-10-19.json).
+
+The production C1 check includes the calibrated cost tables. Native
+`gufo bench` pp2048/tg128 at d0, in ABBA order (tok/s):
+
+| Phase | Baseline 1 | Candidate 1 | Candidate 2 | Baseline 2 |
+| --- | ---: | ---: | ---: | ---: |
+| pp2048 | 575.85 | 574.21 | 575.11 | 575.23 |
+| tg128 | 31.38 | 31.43 | 31.42 | 31.37 |
+
+HTTP, two 400-token greedy answers about a frozen repository document, four
+fresh servers in ABBA order. Input is 31,290 tokens for the summary and
+31,297 for the essay; the latter restores the same 22,528-token prefix on
+every arm. Both completions are identical across every run. Throughput is
+decode-only, with the means calculated separately for each question:
+
+| Request | Baseline 1 / 2 (tok/s) | Candidate 1 / 2 (tok/s) | Decode gain |
+| --- | ---: | ---: | ---: |
+| summary | 23.41 / 23.39 | 23.63 / 23.68 | +1.1% |
+| essay | 20.44 / 20.44 | 20.62 / 20.61 | +0.8% |
+
+The first pair saves about 164 ms of decode on each answer. Cold summary
+prefill still takes 66–67 s and essay prefill about 21 s; these runs establish
+a decode gain, with little effect on total cold-request latency. Each
+request’s prefill/decode timing passes the 5% and 3 ms comparison; the raw
+usage, actual draft counts and output hashes are retained with the kernel
+evidence. This is a focused Gufo comparison against 04d70a14; the reference
+server tables above retain their original measurement dates.

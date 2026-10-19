@@ -36,9 +36,10 @@ __device__ __forceinline__ float XorLane(float v) {
     return __int_as_float(__builtin_amdgcn_permlanex16(
         x, x, 0x76543210, 0xfedcba98, false, false));
   } else {
-    // row_xmask:M
+    // row_xmask:M. Every source lane exists; mov_dpp lets the compiler
+    // fold the exchange into the following add without an old-value copy.
     return __int_as_float(
-        __builtin_amdgcn_update_dpp(x, x, 0x160 | M, 0xf, 0xf, false));
+        __builtin_amdgcn_mov_dpp(x, 0x160 | M, 0xf, 0xf, true));
   }
 }
 

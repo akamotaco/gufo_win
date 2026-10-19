@@ -322,3 +322,21 @@ its prompt cache snapshots (see the
 <!-- /bench -->
 
 ![Memory occupation](artifacts/charts/memory-q8.svg)
+
+## Verification attention kernel A/B (2026-10-19)
+
+The foldable DPP reductions compared with 04d70a14 on gfx1151, using
+production arithmetic flags. Full attention launch including merge; medians
+of seven alternating A/B rounds. Every output is byte-identical, including
+queries scaled 10× and 30×. These are per-layer kernel times.
+
+| Context | Rows | Before (µs) | After (µs) | Time change |
+| ---: | ---: | ---: | ---: | ---: |
+| 32,768 | 5 | 929.7 | 914.3 | -1.7% |
+| 32,768 | 8 | 1313.1 | 1219.4 | -7.1% |
+| 32,768 | 16 | 2493.9 | 2321.1 | -6.9% |
+| 65,536 | 5 | 1733.8 | 1666.3 | -3.9% |
+| 65,536 | 8 | 2533.4 | 2377.3 | -6.2% |
+| 65,536 | 16 | 4913.5 | 4595.9 | -6.5% |
+
+[Every row, depth, timing round and calibrated cost delta](../gemma-4-31b/artifacts/mtp-verification-2026-10-19.json).
