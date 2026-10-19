@@ -33,7 +33,7 @@ gaps. MTP verify cycles at d0 (~101 ms GPU): target verification projections
 
 | # | Item | Area | Effort | Est. impact | Confidence |
 | ---: | --- | --- | --- | --- | --- |
-| 1 | MTP verification projections: close the 5–13% per-byte gap of the WMMA verification GEMV to the AR GEMV | Decode MTP, all depths | Hard | MTP +5–10% | Low |
+| 1 | MTP verification projections: close the 5–13% per-byte gap of the WMMA verification GEMV to the AR GEMV | Decode MTP, all depths | Very hard | MTP +0–3% | Low |
 | 2 | 8-bit KV cache | Decode at depth, memory | Very hard, quality risk | AR +5% at 32K, +14% at 128K; MTP more; about half the KV memory | Speed medium, quality unknown |
 | 3 | MTP verification attention at five or more rows | Decode MTP at depth | Hard | +2–5% at 32K, more at 128K | Low |
 | 4 | Prefill projections past ~70% of the WMMA ceiling | Prefill, all depths | Hard | +2–5% | Low |
@@ -43,16 +43,26 @@ gaps. MTP verify cycles at d0 (~101 ms GPU): target verification projections
 ### 1. MTP verification projections
 
 `wmma_gemv.hip.cpp`. The kernel stays 5–13% behind the AR Gemma GEMV on equal
-bytes (cold, one row: 5376×16384 247 vs 220 µs). Load-only probes cap it at
-207–217 GB/s regardless of barriers, prefetch depth, request size or DRAM
-locality; occupancy is 9–24 against the AR GEMV's 47–62. Rejected so far:
-split half-wave loads, deeper weight prefetch, software-pipelined groups.
-Cooperative 128-byte row loads redistributed through direct wave-register
-shuffles were tested on 2026-10-19: bit-identical, but 7–43% slower (the
-[experiment log](EXPERIMENTS.md)). A cheaper register transpose is still
-needed; today each load instruction touches 16 cache lines. Verification must
-keep one arithmetic per format so it still equals decode bit for bit
-(`gemma4.projection_ops`).
+bytes (cold, one row: 5376×16384 247 vs 220 µs). The 2026-10-16 "16 cache
+lines per instruction" diagnosis is disproven: load-only probes at the
+kernel's launch shape measure 209–212 GB/s for every pattern — per-lane row
+loads, cooperative 4 × 128 B full lines, 16 × 32 B or 8 × 64 B pieces — and
+k-splits lose 5–10%, so the load instructions, request size and extra waves
+are all dead levers (2026-10-19, the [experiment
+log](EXPERIMENTS.md)). The cap is the walk geometry: the launch marches
+through the super-blocks column-locked, while the AR GEMV's waves walk
+contiguous k slices of four rows (225–237 GB/s; a linear stream 240). Waves
+sharing the 16-row group over contiguous ~8-super-block slabs recover
+216–225 GB/s, but the full kernel on that walk loses 3–83% everywhere except
+5376 × 16384 at one to five rows (−0.8 to −2.4%): with waves at different
+super-blocks, the shared LDS activation tile becomes per-wave L2 traffic,
+about 3.5 × the weight bytes. Per-wave LDS tiles do not fit 64 KB, so what
+remains is a walk that does not multiply A reads (unknown) or a repacked
+weight layout, which the AR GEMV shares (doubles projection memory). The
+~7% math term is untouched. Verification must keep one arithmetic per format
+so it still equals decode bit for bit (`gemma4.projection_ops`); the slab
+rewrite showed the accumulation may be restructured (slab partials in slab
+order) while keeping width invariance and the FP64 bound.
 
 ### 2. 8-bit KV cache
 
