@@ -455,11 +455,26 @@ had cost 3.4% before).
   measures, 26B 1,162 of 1,170. Apart from the restores above, no measure
   is flagged in every run; disk-restart restores vary by up to 12 ms in
   either direction between runs. With every request now running, 31B
-  `cache-concurrency` and `cache-shared-prefix` pass 278 of 282. Over four
-  runs each, background captures in `cache-concurrency` (`identical`,
-  `fanout`, `unrelated`) took 130–180 ms longer seven times with these
-  changes and three times without, and no first token moved; four runs
-  cannot tell the two rates apart.
+  `cache-concurrency` and `cache-shared-prefix` pass 278 of 282. Background
+  captures in `cache-concurrency` (`identical`, `fanout`, `unrelated`)
+  reported 130–180 ms more seven times in four runs with these changes and
+  three times without; those durations included collection delay (below),
+  and no first token moved.
+- **Capture timing:** `cache_snapshot_ms` stopped when the scheduler collected
+  the prompt capture's result, so another request's decode or prefill between
+  completion and collection was charged to the capture. On 31B MTP,
+  `cache-concurrency`'s `fanout` prompt capture completed in 6.52 ms but was
+  collected at 130.90 ms; an `unrelated` capture completed in 14.14 ms but was
+  collected at 1,598.34 ms. The worker now records its completion time,
+  including when the capture throws, and the metric ends there. The
+  regression test holds a capture for 20 ms and delays collection by 100 ms:
+  the old timer reports 120 ms, the new one only the capture. The request's
+  work and its first-token time are unchanged. In a matched run against
+  `e3fa4799`, every request's correctness and cache work passes and all 436
+  timing measures pass; the six `identical`, `fanout` and `unrelated`
+  captures report 38.86/1.77, 49.68/5.42 and 44.52/31.32 ms, where the
+  baseline reported 1,549.25 ms for the first `unrelated` capture
+  ([per-request values and worker timestamps](artifacts/capture-timing.json)).
 - **31B MTP against legacy** (`--sessions 2 --context 32768`, the six
   `cache-*` suites, `cache`, `long-context` and `state-edges`, legacy
   recorded right before): 932 of 978 timing measures pass (882 of 966
