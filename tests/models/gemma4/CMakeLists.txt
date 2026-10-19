@@ -57,6 +57,13 @@ if (ENGINE_ENABLE_HIP)
   set_tests_properties(gemma4.continuation PROPERTIES
     LABELS "gemma4;hip;gpu;gfx1151;cache;external-model"
     SKIP_RETURN_CODE 77 RESOURCE_LOCK gemma4)
+  # The same run with freed memory overwritten: waiting on a transfer after
+  # its slot is destroyed passes only by reading the settled result.
+  add_test(NAME gemma4.continuation_perturbed COMMAND gemma4_continuation_test)
+  set_tests_properties(gemma4.continuation_perturbed PROPERTIES
+    LABELS "gemma4;hip;gpu;gfx1151;cache;external-model"
+    SKIP_RETURN_CODE 77 RESOURCE_LOCK gemma4
+    ENVIRONMENT "MALLOC_PERTURB_=165")
   add_executable(gemma4_vision_encoder_test vision_encoder_test.cpp)
   target_link_libraries(gemma4_vision_encoder_test PRIVATE
     gufo_gemma4_reference)

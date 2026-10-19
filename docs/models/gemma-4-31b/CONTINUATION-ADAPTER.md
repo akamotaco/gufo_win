@@ -441,9 +441,10 @@ had cost 3.4% before).
   1,025th image as the original session does, and refuses the capture after
   it.
 - **Completions after their slot:** waiting on a transfer after its slot was
-  destroyed read the destroyed slot; the wait now returns the result the
-  slot settled. With freed memory overwritten (`MALLOC_PERTURB_`),
-  `gemma4.continuation` aborted on the previous code and passes.
+  destroyed read the destroyed slot; the wait now returns the result the slot
+  settled. With freed memory overwritten (`MALLOC_PERTURB_=165`, the
+  `gemma4.continuation_perturbed` ctest entry), `gemma4.continuation` aborted
+  on the previous code and passes.
 - **Code-word prompts:** `cache-concurrency` and `cache-shared-prefix` asked
   for `Reply with only the code BETA.`, and 31B answered `BETA.` on some
   requests with both builds, which stopped each suite at its first such
