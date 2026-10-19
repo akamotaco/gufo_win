@@ -395,31 +395,38 @@ void Session::Reset() {
 
 void Session::DropLookahead() noexcept {
   ahead_.clear();
-  ahead_logits_.clear();
+  ahead_stops_.clear();
 }
+
+namespace {
+// Most prompt lookahead rows one prefill forward evaluates past its frontier.
+constexpr std::size_t kRiddenRows = 64;
+}  // namespace
 
 bool Session::Extend(std::size_t begin, std::string* error_msg,
                      const ImageEmbeddings& embed,
-                     std::span<const TokenId> lookahead) {
+                     std::span<const TokenId> lookahead,
+                     std::span<const std::size_t> stops) {
   auto& executor = *model_->executor_;
   const std::size_t chunk = model_->options_.prefill_chunk;
-  // The lookahead rows ride in the last forward; tokens_ holds them only
-  // while it runs.
   const std::size_t frontier = tokens_.size();
-  tokens_.insert(tokens_.end(), lookahead.begin(), lookahead.end());
   DropLookahead();
+  std::vector<AheadStop> ahead;
+  // Lookahead tokens evaluated in the frontier's forward; tokens_ holds them
+  // only while it runs.
+  std::size_t ridden = 0;
   valid_ = false;
   try {
     std::lock_guard lock(model_->mutex_);
     std::vector<rocm::ImageRows> rows;
     std::size_t count = 0;
-    for (std::size_t start = begin; start < tokens_.size(); start += count) {
-      std::size_t end = std::min(start + chunk, tokens_.size());
+    for (std::size_t start = begin; start < frontier; start += count) {
+      std::size_t end = std::min(start + chunk, frontier);
       // A remainder of at most kSplitRows rows joins this chunk: alone it
       // would read every weight again for a few rows.
-      if (tokens_.size() - end <= rocm::kSplitRows &&
-          tokens_.size() - start <= executor.max_rows()) {
-        end = tokens_.size();
+      if (frontier - end <= rocm::kSplitRows &&
+          frontier - start <= executor.max_rows()) {
+        end = frontier;
       }
       rows.clear();
       for (std::size_t i = 0; i < images_.size(); ++i) {
@@ -447,38 +454,77 @@ bool Session::Extend(std::size_t begin, std::string* error_msg,
                         image.rows, embedding});
       }
       count = end - start;
-      const bool last = end == tokens_.size();
-      // Logit rows: the frontier's last token when this chunk holds it, and
-      // the last lookahead row.
-      std::vector<std::uint32_t> logit_rows;
-      const bool holds_frontier = start < frontier && frontier <= end;
-      if (holds_frontier) {
-        logit_rows.push_back(static_cast<std::uint32_t>(frontier - 1 - start));
-      }
+      const bool last = end == frontier;
       if (last && !lookahead.empty()) {
-        logit_rows.push_back(static_cast<std::uint32_t>(count - 1));
+        // The lookahead rides in the frontier's forward where rows are left,
+        // whole or up to a later stop. It keeps the frontier's window and the
+        // rest of that window's first 64-row chunk in the ring, as a capture
+        // at the frontier reads them. Each ridden row also delays that
+        // capture (and requests waiting for it); past kRiddenRows the delay
+        // exceeds the separate forward it saves (26B: one of a few rows costs
+        // about as much as 120 rows of a long one).
+        const std::size_t room = std::min<std::size_t>(
+            {executor.max_rows() - count,
+             cache_->ring - model_->config().sliding_window - 64, kRiddenRows});
+        if (lookahead.size() <= room) {
+          ridden = lookahead.size();
+        } else {
+          for (const std::size_t stop : stops) {
+            if (stop <= room) {
+              ridden = stop;
+            }
+          }
+        }
+        for (const std::size_t stop : stops) {
+          if (stop != 0 && stop < ridden &&
+              ahead.size() + 1 < rocm::kSplitRows &&
+              ahead.size() + 2 < model_->options_.max_logit_rows &&
+              (ahead.empty() || stop > ahead.back().count)) {
+            ahead.push_back(
+                {stop, static_cast<std::uint32_t>(ahead.size()), {}});
+          }
+        }
+        if (ridden != 0 && model_->options_.max_logit_rows >= 2) {
+          ahead.push_back(
+              {ridden, static_cast<std::uint32_t>(ahead.size()), {}});
+          tokens_.insert(
+              tokens_.end(), lookahead.begin(),
+              lookahead.begin() + static_cast<std::ptrdiff_t>(ridden));
+          count += ridden;
+        } else {
+          ahead.clear();
+          ridden = 0;
+        }
+      }
+      // Logit rows: the frontier's last token, and the lookahead rows ending
+      // each stop.
+      std::vector<std::uint32_t> logit_rows;
+      if (last) {
+        logit_rows.push_back(static_cast<std::uint32_t>(frontier - 1 - start));
+        for (const AheadStop& stop : ahead) {
+          logit_rows.push_back(
+              static_cast<std::uint32_t>(frontier + stop.count - 1 - start));
+        }
       }
       executor.Forward(*cache_, std::span(tokens_).subspan(start, count),
                        static_cast<std::uint32_t>(start), logit_rows, rows);
-      if (logit_rows.empty()) {
+      if (!last) {
         continue;
       }
-      if (holds_frontier) {
-        executor.CommitHidden(*cache_, logit_rows.front());
-      }
-      if (last && !lookahead.empty()) {
-        executor.StashHidden(*cache_, logit_rows.back());
+      executor.CommitHidden(*cache_, logit_rows.front());
+      for (std::size_t i = 0; i < ahead.size(); ++i) {
+        executor.StashHidden(*cache_, logit_rows[1 + i], ahead[i].slot);
       }
       const auto logits = executor.ReadLogits(logit_rows.size());
       const std::size_t vocab = model_->VocabSize();
-      if (holds_frontier) {
-        logits_.assign(logits.begin(),
-                       logits.begin() + static_cast<std::ptrdiff_t>(vocab));
-        logits_on_device_ = false;
-      }
-      if (last && !lookahead.empty()) {
-        ahead_logits_.assign(logits.end() - static_cast<std::ptrdiff_t>(vocab),
-                             logits.end());
+      const auto row = [&](std::size_t i) {
+        const auto at = logits.begin() + static_cast<std::ptrdiff_t>(i * vocab);
+        return std::vector<float>(at, at + static_cast<std::ptrdiff_t>(vocab));
+      };
+      logits_ = row(0);
+      logits_on_device_ = false;
+      for (std::size_t i = 0; i < ahead.size(); ++i) {
+        ahead[i].logits = row(1 + i);
       }
     }
   } catch (const std::exception& e) {
@@ -492,7 +538,9 @@ bool Session::Extend(std::size_t begin, std::string* error_msg,
     return Fail(error_msg, e.what());
   }
   tokens_.resize(frontier);
-  ahead_.assign(lookahead.begin(), lookahead.end());
+  ahead_.assign(lookahead.begin(),
+                lookahead.begin() + static_cast<std::ptrdiff_t>(ridden));
+  ahead_stops_ = std::move(ahead);
   valid_ = true;
   return true;
 }
@@ -508,10 +556,16 @@ void Session::BeginRequest() {
 bool Session::Sync(std::span<const TokenId> prompt,
                    std::span<const ImageSpan> images,
                    const ImageEmbeddings& embed, std::string* error_msg,
-                   std::span<const TokenId> lookahead) {
+                   std::span<const TokenId> lookahead,
+                   std::span<const std::size_t> lookahead_stops) {
   if (prompt.empty()) {
     Reset();
     return Fail(error_msg, "prompt is empty");
+  }
+  if (!std::ranges::is_sorted(lookahead_stops, std::ranges::less_equal{}) ||
+      (!lookahead_stops.empty() &&
+       lookahead_stops.back() >= lookahead.size())) {
+    return Fail(error_msg, "lookahead stops must ascend below the lookahead");
   }
   BeginRequest();
   if (model_->options_.draft_calibration == DraftCalibrationScope::kRequest) {
@@ -522,27 +576,58 @@ bool Session::Sync(std::span<const TokenId> prompt,
   if (prompt.size() > cache_->max_context) {
     return Fail(error_msg, "prompt exceeds the session context");
   }
-  // Rows the previous Sync evaluated past its frontier: adopt them if this
-  // prompt asks for exactly those tokens next.
+  // Rows an earlier Sync evaluated past its frontier: adopt them up to a
+  // stop if this prompt asks for exactly those tokens next, and keep the
+  // rest for the next Sync.
   if (!ahead_.empty()) {
+    const auto stop = std::ranges::find_if(ahead_stops_, [&](const auto& s) {
+      return prompt.size() == tokens_.size() + s.count;
+    });
     const bool adopt =
-        valid_ && !pending_ &&
-        prompt.size() == tokens_.size() + ahead_.size() &&
+        valid_ && !pending_ && stop != ahead_stops_.end() &&
         std::ranges::equal(prompt.first(tokens_.size()), tokens_) &&
-        std::ranges::equal(prompt.subspan(tokens_.size()), ahead_) &&
+        std::ranges::equal(prompt.subspan(tokens_.size()),
+                           std::span(ahead_).first(stop->count)) &&
         std::ranges::equal(images, images_);
     if (adopt) {
       try {
         std::lock_guard lock(model_->mutex_);
-        model_->executor_->AdoptStashedHidden(*cache_);
+        model_->executor_->AdoptStashedHidden(*cache_, stop->slot);
       } catch (const std::exception& e) {
         Reset();
         return Fail(error_msg, e.what());
       }
-      tokens_.insert(tokens_.end(), ahead_.begin(), ahead_.end());
-      logits_.swap(ahead_logits_);
-      DropLookahead();
+      const std::size_t count = stop->count;
+      const auto adopted = static_cast<std::ptrdiff_t>(count);
+      tokens_.insert(tokens_.end(), ahead_.begin(), ahead_.begin() + adopted);
+      logits_.swap(stop->logits);
+      logits_on_device_ = false;
+      ahead_.erase(ahead_.begin(), ahead_.begin() + adopted);
+      ahead_stops_.erase(ahead_stops_.begin(), stop + 1);
+      for (auto& later : ahead_stops_) {
+        later.count -= count;
+      }
+      if (ahead_.empty()) {
+        DropLookahead();
+      }
       return true;
+    }
+    // Between stops, the rows the prompt shares with the lookahead stay:
+    // only the last one is evaluated again, for its logits.
+    if (valid_ && !pending_ && prompt.size() > tokens_.size() + 1 &&
+        std::ranges::equal(prompt.first(tokens_.size()), tokens_) &&
+        std::ranges::equal(images, images_)) {
+      std::size_t shared = 0;
+      while (shared < ahead_.size() &&
+             tokens_.size() + shared < prompt.size() &&
+             prompt[tokens_.size() + shared] == ahead_[shared]) {
+        ++shared;
+      }
+      if (shared != 0) {
+        tokens_.insert(tokens_.end(), ahead_.begin(),
+                       ahead_.begin() + static_cast<std::ptrdiff_t>(shared));
+        valid_ = false;
+      }
     }
     DropLookahead();
   }
@@ -601,10 +686,10 @@ bool Session::Sync(std::span<const TokenId> prompt,
     lookup_.Clear();
   }
   draft_vocab_.Reset();
-  const bool ahead = lookahead.size() <= rocm::kSplitRows &&
-                     prompt.size() + lookahead.size() <= cache_->max_context;
+  const bool ahead = prompt.size() + lookahead.size() <= cache_->max_context;
   return Extend(common, error_msg, embed,
-                ahead ? lookahead : std::span<const TokenId>{});
+                ahead ? lookahead : std::span<const TokenId>{},
+                ahead ? lookahead_stops : std::span<const std::size_t>{});
 }
 
 bool Session::Evaluate(TokenId token, std::string* error_msg) {

@@ -518,6 +518,67 @@ int main() {
       Require(resumed.top1 == 1 && resumed.mean_kl < limits.prefill,
               "boundary snapshot diverges after its tail");
     }
+    // A longer lookahead with stops rides in the same forward. Syncs that stop
+    // at each stop and at its end adopt in turn, keeping the rest; each
+    // adopted frontier matches a Sync that evaluates that prefix itself.
+    {
+      constexpr std::size_t kTail = 40;
+      const std::vector<std::size_t> stops{5, 23};
+      const std::span<const g4::TokenId> head(long_prompt.data(),
+                                              long_prompt.size() - kTail);
+      const std::span<const g4::TokenId> tail(long_prompt.data() + head.size(),
+                                              kTail);
+      auto ahead = model->CreateSession(0, &error);
+      Require(ahead && ahead->Sync(head, {}, {}, &error, tail, stops) &&
+                  ahead->Position() == head.size() &&
+                  ahead->LookaheadTokens() == kTail,
+              "lookahead with stops: " + error);
+      for (const std::size_t stop : {std::size_t{5}, std::size_t{23}, kTail}) {
+        const auto prefix =
+            std::span<const g4::TokenId>(long_prompt).first(head.size() + stop);
+        auto direct = model->CreateSession(0, &error);
+        Require(direct && direct->Sync(prefix, &error), error);
+        Require(ahead->Sync(prefix, &error) &&
+                    ahead->Position() == prefix.size() &&
+                    ahead->LookaheadTokens() == kTail - stop,
+                "lookahead stop " + std::to_string(stop) +
+                    " not adopted: " + error);
+        const Stats adopted = Compare(as_vector(direct->Logits()),
+                                      as_vector(ahead->Logits()), vocab);
+        Require(adopted.top1 == 1 && adopted.mean_kl < limits.decode,
+                "lookahead stop " + std::to_string(stop) + " diverges");
+        const auto logits = as_vector(direct->Logits());
+        const auto next = static_cast<g4::TokenId>(
+            std::max_element(logits.begin(), logits.end()) - logits.begin());
+        if (stop == 5) {
+          // A Sync between stops keeps the rows it shares with the lookahead
+          // and evaluates its last token again.
+          auto between = model->CreateSession(0, &error);
+          const auto mid =
+              std::span<const g4::TokenId>(long_prompt).first(head.size() + 12);
+          auto reference = model->CreateSession(0, &error);
+          Require(between && reference && reference->Sync(mid, &error) &&
+                      between->Sync(head, {}, {}, &error, tail, stops) &&
+                      between->Sync(mid, &error) &&
+                      between->Position() == mid.size() &&
+                      between->LookaheadTokens() == 0,
+                  "sync between lookahead stops: " + error);
+          const Stats kept = Compare(as_vector(reference->Logits()),
+                                     as_vector(between->Logits()), vocab);
+          Require(kept.top1 == 1 && kept.mean_kl < limits.decode,
+                  "sync between lookahead stops diverges");
+        }
+        if (stop == kTail) {
+          Require(
+              direct->Evaluate(next, &error) && ahead->Evaluate(next, &error),
+              error);
+          const Stats step = Compare(as_vector(direct->Logits()),
+                                     as_vector(ahead->Logits()), vocab);
+          Require(step.top1 == 1 && step.mean_kl < limits.decode,
+                  "decoding after the adopted lookahead diverges");
+        }
+      }
+    }
 
     // Bulk prefill over many attention tiles and a wrapped ring stays close
     // to the exact small-batch rows on a realistic conversation.

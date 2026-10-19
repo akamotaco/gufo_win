@@ -98,9 +98,12 @@ void Validate(const DiskManifest& m) {
     references += c.chunks.size() + bool(tail) + bool(private_state);
     if (references > kMaxReferences)
       Invalid();
-    if (d.kind == ComponentKind::kAppendRows) {
+    if (HasRows(d.kind)) {
       if (!d.row_bytes || !d.rows_per_chunk || d.state_bytes || private_state ||
-          c.chunks.size() != c.position.valid_rows / d.rows_per_chunk)
+          (d.kind == ComponentKind::kWindowRows) != (d.window_rows != 0) ||
+          c.chunks.size() != (c.position.valid_rows -
+                              FirstChunkRow(d, c.position.valid_rows)) /
+                                 d.rows_per_chunk)
         Invalid();
       (void)Multiply(d.row_bytes, c.position.valid_rows);
       auto full_bytes = Multiply(d.row_bytes, d.rows_per_chunk);
@@ -114,7 +117,7 @@ void Validate(const DiskManifest& m) {
            tail.value().bytes != Multiply(d.row_bytes, remaining)))
         Invalid();
     } else if (d.kind == ComponentKind::kPrivateState) {
-      if (d.row_bytes || d.rows_per_chunk || !d.state_bytes ||
+      if (d.row_bytes || d.rows_per_chunk || !d.state_bytes || d.window_rows ||
           !c.chunks.empty() || tail || !private_state ||
           private_state->bytes != d.state_bytes ||
           c.position.valid_rows != m.tokens.size())
@@ -196,7 +199,10 @@ MetadataPlan PlanMetadata(std::span<const std::uint8_t> bytes) {
   auto components = r.Count(kMaxComponents, 47);
   plan.retained = Add(plan.retained, components * sizeof(DiskComponent));
   for (std::size_t i = 0; i < components; ++i) {
-    r.Blob(41);
+    // The kind byte follows the ID and layout version; a window component
+    // also carries its window size.
+    if (r.Blob(41)[8] == static_cast<std::uint8_t>(ComponentKind::kWindowRows))
+      r.Blob(8);
     auto chunks = r.Count(kMaxReferences - plan.references, 32);
     plan.references += chunks;
     r.Blob(chunks * 32);
@@ -414,9 +420,12 @@ std::uint64_t DiskChecksum(std::span<const std::uint8_t> bytes,
 }
 std::vector<std::uint8_t> EncodeManifest(const DiskManifest& m) {
   Validate(m);
+  const bool windowed = std::ranges::any_of(m.components, [](const auto& c) {
+    return c.descriptor.kind == ComponentKind::kWindowRows;
+  });
   Writer w;
   w.Blob(kMagic);
-  w.Number(kDiskFormatVersion, 4);
+  w.Number(windowed ? kDiskWindowFormatVersion : kDiskFormatVersion, 4);
   w.Number(m.checkpoint.value, 8);
   w.Number(m.lineage.value, 8);
   w.Blob(m.compatibility);
@@ -438,6 +447,8 @@ std::vector<std::uint8_t> EncodeManifest(const DiskManifest& m) {
     w.Number(d.rows_per_chunk, 8);
     w.Number(d.state_bytes, 8);
     w.Number(c.position.valid_rows, 8);
+    if (d.kind == ComponentKind::kWindowRows)
+      w.Number(d.window_rows, 8);
     w.Number(c.chunks.size(), 4);
     for (const auto& p : c.chunks)
       w.Payload(p);
@@ -462,8 +473,10 @@ DiskManifest DecodeManifest(std::span<const std::uint8_t> bytes) {
     Invalid();
   Reader r{bytes.first(bytes.size() - 8)};
   auto magic = r.Blob(kMagic.size());
-  if (!std::equal(magic.begin(), magic.end(), kMagic.begin()) ||
-      r.Number(4) != kDiskFormatVersion)
+  if (!std::equal(magic.begin(), magic.end(), kMagic.begin()))
+    Invalid();
+  const auto version = r.Number(4);
+  if (version != kDiskFormatVersion && version != kDiskWindowFormatVersion)
     Invalid();
   DiskManifest m;
   m.checkpoint.value = r.Number(8);
@@ -491,6 +504,11 @@ DiskManifest DecodeManifest(std::span<const std::uint8_t> bytes) {
     d.rows_per_chunk = r.Number(8);
     d.state_bytes = r.Number(8);
     c.position = {d.id, r.Number(8)};
+    if (d.kind == ComponentKind::kWindowRows) {
+      if (version != kDiskWindowFormatVersion)
+        Invalid();
+      d.window_rows = r.Number(8);
+    }
     auto chunks = r.Count(kMaxReferences - references, 32);
     c.chunks.reserve(chunks);
     references += chunks;
@@ -510,7 +528,13 @@ DiskManifest DecodeManifest(std::span<const std::uint8_t> bytes) {
     c.private_state = optional_payload();
     m.components.push_back(std::move(c));
   }
-  if (!r.bytes.empty())
+  // Only manifests with window components use the window format version, so
+  // every manifest has one canonical encoding.
+  if (!r.bytes.empty() ||
+      (version == kDiskWindowFormatVersion &&
+       std::ranges::none_of(m.components, [](const auto& c) {
+         return c.descriptor.kind == ComponentKind::kWindowRows;
+       })))
     Invalid();
   Validate(m);
   return m;
@@ -557,7 +581,44 @@ struct DiskStore::Impl {
     FileIdentity identity;
   };
   std::mutex verification_mutex;
+  // One entry per payload file whose bytes matched its checksum, until the
+  // file is removed. A matching identity skips the next re-read.
   std::map<std::pair<bool, DiskFileId>, VerifiedFile> verified;
+  bool VerificationCached(std::pair<bool, DiskFileId> key,
+                          const FileIdentity& identity) {
+    std::lock_guard guard(verification_mutex);
+    auto it = verified.find(key);
+    return it != verified.end() && it->second.identity == identity;
+  }
+  void RememberVerified(std::pair<bool, DiskFileId> key,
+                        const FileIdentity& identity) {
+    std::lock_guard guard(verification_mutex);
+    auto it = verified.find(key);
+    if (it != verified.end()) {
+      it->second.identity = identity;
+      return;
+    }
+    try {
+      auto reservation = ledger->Reserve(ResourceCategory::kMetadata, 256);
+      auto [inserted, added] =
+          verified.emplace(key, VerifiedFile{{}, identity});
+      try {
+        inserted->second.charge = reservation.Convert();
+      } catch (...) {
+        verified.erase(inserted);
+        throw;
+      }
+    } catch (const std::bad_alloc&) {
+      // Verification caching is optional; the completed read remains valid.
+    }
+  }
+  void ForgetVerified(std::pair<bool, DiskFileId> key) {
+    std::unique_lock guard(verification_mutex);
+    auto node = verified.extract(key);
+    guard.unlock();
+    // The charge returns to the ledger outside the verification lock.
+    node = {};
+  }
 #ifdef GUFO_CACHE_TESTING
   std::function<void(DiskPublicationStep)> crash_hook;
 #define DISK_STEP(step)                      \
@@ -710,8 +771,9 @@ struct DiskStore::Impl {
       auto claim = [&](bool is_private, const DiskPayload& p,
                        const ComponentDescriptor& d, std::uint64_t first) {
         const std::vector<std::uint64_t> geometry{
-            m.lineage.value,  d.id.value, d.layout_version, d.row_bytes,
-            d.rows_per_chunk, first,      p.bytes,          p.checksum};
+            m.lineage.value, d.id.value,       d.layout_version,
+            d.row_bytes,     d.rows_per_chunk, first,
+            p.bytes,         p.checksum,       d.window_rows};
         auto [it, inserted] = claims.try_emplace(
             {is_private, p.file}, Claim{m.compatibility, geometry, {}, false});
         auto& value = it->second;
@@ -722,7 +784,7 @@ struct DiskStore::Impl {
         value.entries.push_back(i);
       };
       for (const auto& c : m.components) {
-        Rows first{};
+        Rows first = FirstChunkRow(c.descriptor, c.position.valid_rows);
         for (const auto& p : c.chunks) {
           claim(false, p, c.descriptor, first);
           first = Add(first, c.descriptor.rows_per_chunk);
@@ -774,6 +836,9 @@ struct DiskStore::Impl {
     }
     if (!Regular(st))
       return;
+    if (directory == chunks.Get() || directory == private_files.Get())
+      if (auto id = ParseName(name))
+        ForgetVerified({directory == private_files.Get(), *id});
     if (unlinkat(directory, name.c_str(), 0) < 0)
       IoError("remove cache file");
     {
@@ -948,9 +1013,17 @@ struct DiskStore::Impl {
       CostTimer timer(publication_stats.filesystem_ns);
       status = fstat(fd.Get(), &st);
     }
+    const bool private_file = directory == private_files.Get();
     if (fd.Get() < 0 || status < 0 || !Regular(st) ||
         std::uint64_t(st.st_size) != payload.bytes)
-      DependencyFailure(directory == private_files.Get(), payload.file);
+      DependencyFailure(private_file, payload.file);
+    // Each publication inherits the chunks of earlier checkpoints. Re-read
+    // only those whose identity changed since this store last verified them.
+    const auto key = std::make_pair(private_file, payload.file);
+    const FileIdentity identity{st.st_dev,  st.st_ino,  st.st_size,
+                                st.st_mtim, st.st_ctim, payload.checksum};
+    if (VerificationCached(key, identity))
+      return;
     ResourceReservation charge;
     std::vector<std::uint8_t> allocated;
     if (staging.empty()) {
@@ -995,7 +1068,13 @@ struct DiskStore::Impl {
         st.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
         st.st_ctim.tv_sec != after.st_ctim.tv_sec ||
         st.st_ctim.tv_nsec != after.st_ctim.tv_nsec)
-      DependencyFailure(directory == private_files.Get(), payload.file);
+      DependencyFailure(private_file, payload.file);
+    RememberVerified(key, identity);
+    {
+      // Verified; drop the pages this re-read brought in.
+      CostTimer timer(publication_stats.filesystem_ns);
+      (void)posix_fadvise(fd.Get(), 0, 0, POSIX_FADV_DONTNEED);
+    }
   }
   void Publish(DiskFileId file, const DiskManifest& m,
                std::span<const DiskWriteBuffer> buffers,
@@ -1064,6 +1143,34 @@ struct DiskStore::Impl {
         if (sources[j].file == source.file &&
             sources[j].private_file == source.private_file)
           Invalid();
+    }
+    // Most writes fit even if every payload were new. Only inspect stored
+    // ownership when that upper bound exceeds the remaining capacity.
+    auto remaining = stats.managed_bytes > budget_bytes
+                         ? 0
+                         : budget_bytes - stats.managed_bytes;
+    bool check_capacity = bytes.size() > remaining;
+    if (!check_capacity) {
+      remaining -= bytes.size();
+      for (const auto& [key, payload] : dependencies) {
+        if (payload.bytes > remaining) {
+          check_capacity = true;
+          break;
+        }
+        remaining -= payload.bytes;
+      }
+    }
+    if (check_capacity) {
+      std::uint64_t required = bytes.size();
+      for (const auto& [key, payload] : dependencies)
+        if (!Referenced(key.first ? private_files.Get() : chunks.Get(),
+                        payload.file))
+          required = Add(required, payload.bytes);
+      // Eviction can retry this publication many times. Refuse it before
+      // reading and checksumming the shared prefix on every failed attempt.
+      if (stats.managed_bytes > budget_bytes ||
+          required > budget_bytes - stats.managed_bytes)
+        throw DiskCapacityExhausted();
     }
     std::uint64_t additional = bytes.size();
     for (auto& [key, p] : dependencies) {
@@ -1229,6 +1336,12 @@ struct DiskStore::Impl {
         }
         DISK_STEP(kPayloadWritten);
         Sync(fd.Get());
+        {
+          // The payload is durable; drop its clean pages so multi-GB snapshots
+          // don't accumulate in the page cache.
+          CostTimer timer(publication_stats.filesystem_ns);
+          (void)posix_fadvise(fd.Get(), 0, 0, POSIX_FADV_DONTNEED);
+        }
         DISK_STEP(kPayloadSynced);
         Rename(dir, payload_name);
         DISK_STEP(kPayloadRenamed);
@@ -1552,12 +1665,7 @@ DiskReadStats DiskStore::ReadPayload(
                                     before.st_ctim, payload.checksum};
   stats.filesystem_ns += elapsed(begin);
   const auto key = std::make_pair(private_file, payload.file);
-  {
-    std::lock_guard guard(impl_->verification_mutex);
-    auto it = impl_->verified.find(key);
-    stats.verification_cached =
-        it != impl_->verified.end() && it->second.identity == identity;
-  }
+  stats.verification_cached = impl_->VerificationCached(key, identity);
   std::uint64_t offset{}, checksum{};
   while (offset < payload.bytes) {
     auto piece = staging.first(
@@ -1589,29 +1697,11 @@ DiskReadStats DiskStore::ReadPayload(
                                      payload.checksum} ||
       (!stats.verification_cached && checksum != payload.checksum))
     impl_->DependencyFailure(private_file, payload.file);
+  // The consumer holds the bytes now; drop the page-cache copy.
+  (void)posix_fadvise(file.Get(), 0, 0, POSIX_FADV_DONTNEED);
   stats.filesystem_ns += elapsed(begin);
-  if (!stats.verification_cached) {
-    std::lock_guard guard(impl_->verification_mutex);
-    auto it = impl_->verified.find(key);
-    if (it != impl_->verified.end()) {
-      it->second.identity = identity;
-    } else if (impl_->verified.size() < 1024) {
-      try {
-        auto reservation =
-            impl_->ledger->Reserve(ResourceCategory::kMetadata, 256);
-        auto [inserted, added] =
-            impl_->verified.emplace(key, Impl::VerifiedFile{{}, identity});
-        try {
-          inserted->second.charge = reservation.Convert();
-        } catch (...) {
-          impl_->verified.erase(inserted);
-          throw;
-        }
-      } catch (const std::bad_alloc&) {
-        // Verification caching is optional; the completed read remains valid.
-      }
-    }
-  }
+  if (!stats.verification_cached)
+    impl_->RememberVerified(key, identity);
   return stats;
 }
 DiskReadPin DiskStore::Pin(CheckpointId id, std::uint64_t epoch) const {

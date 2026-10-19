@@ -74,17 +74,16 @@ priority rules contribute a union. Unknown paths expand to all compatible
 coverage. Suite metadata must cover every name in `run.py`; dependencies are
 deliberately conservative, so even narrow source rules can select many suites.
 
-`Devlab functional checks` starts when a maintainer applies `ci:functional` to a
-PR, or manually dispatches it with a PR number. The label event uses trusted base
-workflow code (`pull_request_target`); only Maintain/Admin senders and rerun
-actors authorize execution. The event's exact PR head must still be current.
-Later commits do not inherit approval: remove and reapply the label to approve
-another revision. It pins the PR head and merge base on `main`, plans on a hosted runner,
+`Devlab functional checks` runs on every push to a non-draft PR, like `CI`
+(`pull_request`), and fork PRs follow the same repository approval policy; a
+newer push cancels the PR's earlier run. Maintain/Admin users can also dispatch
+it with a PR number. It pins
+the event's PR head and merge base on `main`, plans on a hosted runner,
 and allocates the cluster only for affected Flash-Next MTP coverage (or an
 explicit benchmark request). AR suites run only when a dispatch sets `ar`, which
 plans with `--model flash-next-q4`; the default is `--model flash-next-q4/mtp`.
-`--model` accepts a model or a single `model/mode` profile. The workflow and harness come from the trusted
-workflow revision; only the production binary is built from the approved PR.
+`--model` accepts a model or a single `model/mode` profile. The workflow, harness
+and production binary all come from the PR, as in `CI`.
 It fetches the pinned Q4 shards, MTP sidecar and vision projector into a persistent
 cache under `$GUFO_CI_CACHE` (default `$RUNNER_TOOL_CACHE/gufo`; the weights need
 about 110 GiB free), and retains reports and selection reasons as artifacts.
@@ -98,12 +97,14 @@ versions, because newer unpinned SDKs break every suite inside the client. Keep 
 covering every third-party import here; the install step imports the harness
 to catch gaps.
 
-A hosted `report` job then updates a single PR comment with results, failure
-log tails and benchmark deltas, sets the `devlab/functional` commit status and
-removes `ci:functional`. The status is advisory: it is not a required check, so
-a broken cluster never blocks merging. Suite failures report `failure`; cluster
-or harness problems (authorization, build, download, cancellation) report
-`error`. The PR write token stays on the hosted runner.
+A hosted `report` job then renders results, failure log tails and benchmark
+deltas into the run summary. For branches in this repository and dispatches it
+also updates a single PR comment and sets the `devlab/functional` commit status;
+a fork PR's token is read-only, so its result stays in the job checks. The check
+is advisory: it is not required, so a broken cluster never blocks merging. Suite
+failures report `failure`; cluster or harness problems (authorization, build,
+download, cancellation) report `error`. The PR write token stays on the hosted
+runner.
 
 `cluster.py` executes each configuration group with a fresh server/cache history
 and continues to other groups after a failure, removing each group's disk cache
@@ -257,6 +258,7 @@ RAM, disk and restart settings once their contracts pass.
 | `cache-edits` | Reuse earlier work after editing the latest message, shortening an older tool result, or editing an earlier user message and dropping later turns; compare with uncached responses |
 | `cache-growth` | Keep cache reuse advancing over several turns when the client omits reasoning; check reasoning replay and thinking-off controls, including Messages thinking blocks, and compare with uncached responses |
 | `cache-depth` | Histories beyond 16K, concurrent branches from rewritten replies, a side conversation, resume, unchanged retries and exact uncached controls; use context 32768 and also check sessions 1 |
+| `cache-stalls` | Flash-Next AR/MTP: sequential coding/planning prompts with 6.4K/25.6K/55.6K/56K padding and three repeats each, thinking on and tg128. Checks prefix reuse and exact fully cached replay; retains each request's PP/TG and maximum-gap timing gate. Public equivalents of #632, whose prompts were not attached. Use sessions 2/context 262144 to match its capacity; minimum context 65536. Explicit selection only, outside `all` |
 | `cache-rotation` | Check cache RAM limits and keep history across conversations and small side requests; compare answers with uncached controls |
 | `cache-shared-prefix` | New conversations under one system prompt, one after another, with long and short tasks: from the third on they restore the whole shared prefix; compare answers with uncached controls |
 | `cache-bridge` | A chat bridge sends each user message with metadata its history copy drops, under a full RAM budget with small unrelated requests between turns: from the third turn on, reuse reaches the user turn two back; compare answers with uncached controls. Not in `all` |
@@ -396,15 +398,19 @@ history, so the controls cannot hide a missed checkpoint. `cache-edits` checks
 latest-message edits, shortened tool results and rewinds. `cache-growth` checks
 omitted, preserved and explicitly discarded reasoning, plus thinking off.
 Unchanged retries in `cache-growth`, `cache-depth`, `long-context`, reasoning-separator,
-tool-history, schema edges, state edges, progress and metrics must prefill nothing,
-unless the runner's server log shows that memory pressure refused the retry
-copy; the retry may then prefill only the assistant opening after the stable
-boundary. In agent histories the mutable suffix includes the final user turn;
-`tool-history` bounds it with an independent count-tokens request rather than
-extra slack. Generic capture failures do not qualify for this exception.
+tool-history, `tool-choice-cache`, schema edges, state edges, progress and metrics
+must prefill nothing, unless the runner's server log shows that memory pressure
+refused the retry copy; the retry may then prefill only the assistant opening
+after the stable boundary. In agent histories the mutable suffix includes the
+final user turn; `tool-history` bounds it with an independent count-tokens
+request rather than extra slack, and `tool-choice-cache` does the same per case.
+Generic capture failures do not qualify for this exception.
 Run `nix develop -c python3 tests/functional/test_long_context.py` to check
 that only a capacity refusal in the preceding request's log window permits
 the framing suffix; lost context, changed output and unrelated refusals fail.
+Run `nix develop -c python3 tests/functional/test_tool_choice.py` to check that
+the tool-choice retry may prefill its final user turn only when the server
+logged a capacity refusal during the continued request.
 Component disk-spacing checks correlate drained publication logs with the
 checkpoint IDs captured by their own requests, excluding delayed writes from
 earlier suites even when their token counts match.

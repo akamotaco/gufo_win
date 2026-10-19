@@ -225,6 +225,7 @@ private:
   std::shared_ptr<SnapshotMemory> snapshot_memory_;
 
   friend class Session;
+  friend class ContinuationAdapter;
 };
 
 /// One conversation's context. Sync feeds a prompt reusing the longest
@@ -244,17 +245,20 @@ public:
   /// Sync with images: `images` (ordered, each followed by a text token)
   /// take their rows from `embed`. Reuse stops at the first image whose
   /// identity or placement changed, and an image is always evaluated whole.
-  /// `lookahead`: text tokens expected to follow `prompt` in the next Sync
+  /// `lookahead`: text tokens expected to follow `prompt` in later Syncs
   /// (the chat template's generation prompt after a cache boundary). Up to
   /// kSplitRows of them are evaluated in the prompt's last forward instead
   /// of a separate one, while the session still ends at `prompt`, so a
-  /// snapshot taken now holds exactly `prompt`; the next Sync adopts them if
-  /// it asks for exactly `prompt` followed by `lookahead`.
+  /// snapshot taken now holds exactly `prompt`. A later Sync adopts them if
+  /// it asks for `prompt` followed by all of `lookahead`, or by the first
+  /// `stop` of them for a `stop` in `lookahead_stops` (ascending, each below
+  /// lookahead.size()); the rest stay for the Sync after it.
   [[nodiscard]] bool Sync(std::span<const TokenId> prompt,
                           std::span<const ImageSpan> images,
                           const ImageEmbeddings& embed,
                           std::string* error_msg = nullptr,
-                          std::span<const TokenId> lookahead = {});
+                          std::span<const TokenId> lookahead = {},
+                          std::span<const std::size_t> lookahead_stops = {});
   [[nodiscard]] bool Evaluate(TokenId token, std::string* error_msg = nullptr);
   /// Appends `tokens` and returns the logits of every row ([n][vocab]);
   /// used for teacher-forced qualification.
@@ -331,6 +335,10 @@ public:
   [[nodiscard]] std::uint32_t Position() const noexcept {
     return static_cast<std::uint32_t>(tokens_.size());
   }
+  /// Tokens a Sync evaluated past the frontier that a later Sync may adopt.
+  [[nodiscard]] std::size_t LookaheadTokens() const noexcept {
+    return ahead_.size();
+  }
   [[nodiscard]] std::uint32_t ContextSize() const noexcept;
   /// True after DecodeStep: the last emitted token is not yet evaluated, so
   /// Logits() still predicts that token rather than the next one.
@@ -363,11 +371,13 @@ private:
   Session(std::shared_ptr<Model> model, std::unique_ptr<rocm::KvCache> cache);
   /// Evaluates tokens_[begin, end) in prefill chunks that never split an
   /// image; the last row's logits land in logits_. `lookahead` rows follow
-  /// in the last forward: their last row's logits and hidden state are
-  /// stashed (ahead_), the session itself ends at tokens_.
+  /// in the last forward: the logits and hidden state of the rows ending
+  /// each of `stops` and of the last row are stashed (ahead_stops_), the
+  /// session itself ends at tokens_.
   bool Extend(std::size_t begin, std::string* error_msg,
               const ImageEmbeddings& embed = {},
-              std::span<const TokenId> lookahead = {});
+              std::span<const TokenId> lookahead = {},
+              std::span<const std::size_t> stops = {});
   /// Forgets rows a Sync computed past the frontier.
   void DropLookahead() noexcept;
 
@@ -454,9 +464,17 @@ private:
   /// cache's frontier hidden.
   std::optional<TokenId> pending_;
   /// Tokens evaluated past tokens_ by Sync's lookahead: their KV rows are in
-  /// the cache, the last one's hidden state in cache_->ahead_hidden.
+  /// the cache.
   std::vector<TokenId> ahead_;
-  std::vector<float> ahead_logits_;
+  /// Where a later Sync may stop inside ahead_, in order: the lookahead tokens
+  /// it adopts, the logits of the last of them and that row's hidden state
+  /// in stash slot `slot` of cache_->ahead_hidden. The last ends ahead_.
+  struct AheadStop {
+    std::size_t count;
+    std::uint32_t slot;
+    std::vector<float> logits;
+  };
+  std::vector<AheadStop> ahead_stops_;
   /// Snapshot blocks whose rows the cache still holds, by position block
   /// (expired where it does not), so the next snapshot shares them and a
   /// restore skips them.
@@ -470,6 +488,7 @@ private:
                                               bool sibling = false);
 
   friend class Model;
+  friend class ContinuationAdapter;
 };
 
 }  // namespace gufo::models::gemma4
