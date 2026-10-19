@@ -3,6 +3,7 @@
 
 #include <hip/hip_runtime.h>
 
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -30,6 +31,10 @@ struct ContinuationComponent {
   ContinuationPart part;
   std::uint32_t layer{0};
 };
+// Image records a checkpoint holds. A session with more images is not
+// captured: a restore that dropped records would prefill again from the first
+// image it lacks.
+inline constexpr std::size_t kContinuationImages = 1024;
 struct ContinuationBackingClass {
   std::size_t block_bytes{}, blocks{}, metadata_bytes{};
 };

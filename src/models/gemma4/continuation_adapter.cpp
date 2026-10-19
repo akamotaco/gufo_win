@@ -4,8 +4,10 @@
 #include <array>
 #include <atomic>
 #include <cstring>
+#include <memory>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
 #include <utility>
 
@@ -24,15 +26,12 @@ void Check(hipError_t result) {
 // checkpoint's private tail to 63 sliding rows (31B: 52 MB, 26B: 13 MB).
 constexpr Rows kGlobalChunkRows = 256;
 constexpr Rows kWindowChunkRows = 64;
-// Image records a checkpoint keeps; a restored session's Sync re-evaluates
-// from the first image past them.
-constexpr std::size_t kMaxImages = 128;
 struct Metadata {
   std::uint32_t version{1};
   std::uint32_t position{};
   std::uint32_t images{};
   std::uint32_t reserved{};
-  std::array<ImageSpan, kMaxImages> image{};
+  std::array<ImageSpan, kContinuationImages> image{};
 };
 static_assert(std::is_trivially_copyable_v<Metadata>);
 using Coverage = std::vector<std::pair<std::size_t, std::size_t>>;
@@ -349,7 +348,7 @@ ContinuationAdapter::ContinuationAdapter(std::shared_ptr<Model> model,
     for (unsigned i = 0; i < 4; ++i)
       identity_.push_back(static_cast<std::uint8_t>(value >> (8 * i)));
   };
-  put(1);  // Component layout version.
+  put(2);  // Component layout version (2: 1,024 image records).
   put(Session::kSnapshotPayloadVersion);
   put(context);
   put(ring_);
@@ -813,21 +812,24 @@ cache::Completion ContinuationAdapter::CapturePrivatePiece(
   if (component.descriptor.kind != cache::ComponentKind::kPrivateState ||
       offset > total || bytes.size() > total - offset)
     throw std::invalid_argument("invalid Gemma 4 private piece");
-  Metadata metadata{};
+  std::unique_ptr<Metadata> metadata;
   if (component.part == ContinuationPart::kMetadata) {
     const auto& session = *state.session;
-    metadata.position = session.Position();
-    metadata.images = static_cast<std::uint32_t>(
-        std::min(session.images_.size(), kMaxImages));
-    std::copy_n(session.images_.begin(), metadata.images,
-                metadata.image.begin());
+    if (session.images_.size() > kContinuationImages)
+      throw std::length_error("a Gemma 4 checkpoint holds at most " +
+                              std::to_string(kContinuationImages) + " images");
+    metadata = std::make_unique<Metadata>();
+    metadata->position = session.Position();
+    metadata->images = static_cast<std::uint32_t>(session.images_.size());
+    std::copy_n(session.images_.begin(), metadata->images,
+                metadata->image.begin());
   }
   return Transfer(state, false, [&](auto& runs) {
     if (bytes.empty())
       return;
-    if (component.part == ContinuationPart::kMetadata) {
+    if (metadata) {
       std::memcpy(bytes.data(),
-                  reinterpret_cast<const std::byte*>(&metadata) + offset,
+                  reinterpret_cast<const std::byte*>(metadata.get()) + offset,
                   bytes.size());
       return;
     }
@@ -914,7 +916,7 @@ bool ContinuationAdapter::Validate(
   const auto& metadata = state.metadata;
   const auto n = state.expected.front().valid_rows;
   if (metadata.version != 1 || metadata.position != n ||
-      metadata.images > kMaxImages)
+      metadata.images > kContinuationImages)
     return refuse();
   std::uint64_t previous_end = 0;
   for (std::uint32_t i = 0; i < metadata.images; ++i) {

@@ -6,18 +6,21 @@
 // With GUFO_GEMMA4_MTP_MODEL, greedy MTP cycles after a restore also draft and
 // accept exactly as before it: the drafter reads the restored hidden state.
 //
-// A completion waited after its slot is destroyed returns the result the slot
-// settled.
+// A checkpoint holds up to kContinuationImages image records; a session with
+// more is not captured. A completion waited after its slot is destroyed
+// returns the result the slot settled.
 //
 // Requires GUFO_GEMMA4_MODEL; exits 77 without it.
 #include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <iostream>
 #include <memory>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -561,6 +564,70 @@ int main() {
       Require(completion.Wait() == cache::TransferResult::kSucceeded,
               "a capture waited after its slot was destroyed failed");
       (void)hipHostUnregister(values.data());
+    }
+
+    // A checkpoint holds every image record up to kContinuationImages, and a
+    // restored session evaluates only an image past them, as the original
+    // does. A session with more images is not captured. One-row images with
+    // zero embeddings sit at odd positions, each followed by a text token.
+    {
+      const std::size_t most = g4::kContinuationImages;
+      const auto bytes =
+          std::size_t{model->config().hidden_size} * sizeof(float);
+      void* embedding = nullptr;
+      Require(hipMalloc(&embedding, bytes) == hipSuccess &&
+                  hipMemset(embedding, 0, bytes) == hipSuccess,
+              "image embedding allocation failed");
+      const g4::ImageEmbeddings embed = [&](std::size_t) {
+        return static_cast<const float*>(embedding);
+      };
+      const auto many_tokens = LongPrompt(*model, 2 * most + 4);
+      std::vector<g4::ImageSpan> many;
+      for (std::size_t i = 0; i <= most; ++i) {
+        g4::ImageSpan span{static_cast<std::uint32_t>(1 + 2 * i), 1};
+        std::memcpy(span.identity.data(), &i, sizeof(i));
+        many.push_back(span);
+      }
+      const auto few_tokens = std::span(many_tokens).first(2 * most + 2);
+      const auto few = std::span(many).first(most);
+      Require(a.Sync(few_tokens, few, embed, &error), error);
+      auto pictured = cache::ExecutionHistory::Cold(
+          f.ledger, adapter.Components(), adapter.CompatibilityIdentity());
+      const std::vector<cache::Token> few_cached(few_tokens.begin(),
+                                                 few_tokens.end());
+      const auto all = pictured.Capture(
+          {few_cached, cache::InputIdentity(few_cached.size()),
+           adapter.Positions(*slot_a), cache::CheckpointPurpose::kPrompt, 1},
+          [&](const cache::PayloadRequest& request) {
+            return f.Save(*slot_a, request);
+          });
+      f.Restore(*slot_b, *all, false);
+      Require(std::ranges::equal(b.Images(), few),
+              "restore lost image records");
+      Require(a.Sync(many_tokens, many, embed, &error) &&
+                  b.Sync(many_tokens, many, embed, &error),
+              error);
+      Require(std::ranges::equal(a.Logits(), b.Logits()),
+              "the restored session evaluated more than the new image");
+      bool refused = false;
+      try {
+        auto over = cache::ExecutionHistory::Cold(
+            f.ledger, adapter.Components(), adapter.CompatibilityIdentity());
+        const std::vector<cache::Token> many_cached(many_tokens.begin(),
+                                                    many_tokens.end());
+        (void)over.Capture(
+            {many_cached, cache::InputIdentity(many_cached.size()),
+             adapter.Positions(*slot_a), cache::CheckpointPurpose::kPrompt, 1},
+            [&](const cache::PayloadRequest& request) {
+              return f.Save(*slot_a, request);
+            });
+      } catch (const std::length_error&) {
+        refused = true;
+      }
+      Require(refused, "a session with more image records was captured");
+      (void)hipFree(embedding);
+      std::cout << "images: " << most
+                << " image records restore; one more refuses the capture\n";
     }
 
     Require(adapter.Invalidate(*slot_b), "invalidate refused");
