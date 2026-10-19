@@ -998,8 +998,21 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     entry->busy = true;
     entry->used = ++impl_->clock;
     if (!live) {
+      // A new branch keeps captures still in flight on the old one from
+      // attaching. An in-place restore keeps the rows up to its checkpoint,
+      // so the durable ancestor that ends within them stays this slot's.
       entry->branch = std::make_shared<const std::uint8_t>(0);
-      entry->durable.reset();
+      if (entry->durable && in_place) {
+        const auto& kept = entry->durable->Manifest();
+        const auto tokens = in_place->Tokens();
+        if (kept.tokens.size() > tokens.size() ||
+            !std::equal(kept.tokens.begin(), kept.tokens.end(),
+                        tokens.begin()) ||
+            kept.input != At(input, kept.tokens.size()))
+          entry->durable.reset();
+      } else {
+        entry->durable.reset();
+      }
     }
     if (entry->live) {
       impl_->index.Erase(*entry->live);
@@ -1230,15 +1243,25 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
         if (restored) {
           request.cached = candidate.boundary;
           const std::lock_guard lock(impl_->mutex);
-          entry->durable = candidate.durable;
+          // The in-place checkpoint without a file of its own leaves the
+          // slot's earlier ancestor, which ends within the kept rows.
+          if (candidate.durable ||
+              !(in_place && candidate.checkpoint == in_place))
+            entry->durable = candidate.durable;
         }
       } catch (...) {
         if (!impl_->resources->adapter->Invalidate(request.slot.Execution()))
           throw;
         request.restored = 0;
+        const std::lock_guard lock(impl_->mutex);
+        entry->durable.reset();
       }
     }
     if (!restored) {
+      {
+        const std::lock_guard lock(impl_->mutex);
+        entry->durable.reset();
+      }
       if (!impl_->resources->adapter->Invalidate(request.slot.Execution()))
         throw std::runtime_error("component cold initialization failed");
       entry->history = std::make_unique<cache::ExecutionHistory>(
