@@ -39,6 +39,8 @@ gaps. MTP verify cycles at d0 (~101 ms GPU): target verification projections
 | 4 | Prefill projections past ~70% of the WMMA ceiling | Prefill, all depths | Hard | +2–5% | Low |
 | 5 | Global prefill attention redesign: two heads per wave over one shared LDS arena | Prefill at depth | Hard | +1.5–3% at 32K, +3–6% at 128K | Medium |
 | 6 | AR decode GEMV | Decode AR | Hard | +2–4% | Low |
+| 7 | Measure and validate MTP cycle cost estimates | Decode MTP, 31B and 26B | Medium | Unmeasured; scheduling and pause stability | Unmeasured |
+| 8 | Benchmark acceptance calibration accuracy and benefit | Decode MTP, 31B and 26B | Medium | Unmeasured | Unmeasured |
 
 ### 1. MTP verification projections
 
@@ -94,9 +96,10 @@ head cut another 6–21% at 32K–64K (5/8/9/12/16 rows at 32K: −6.8/−7.8/�
 again bit-identical. Rows must keep
 the arithmetic of single-row decode (the op test compares every verification row with its
 single-row evaluation bit for bit). The draft cost tables in
-`draft_policy.cpp` hold verification costs by rows and depth: re-measure the
-affected entries after any change (a kernel A/B at each table depth, times the
-number of global layers).
+`draft_policy.cpp` hold verification costs by rows and depth. Kernel A/B at
+each table depth, times the number of global layers, estimates the affected
+component; validate complete operation costs and any resulting scheduling
+change separately (open item 7).
 
 ### 4. Prefill projections
 
@@ -126,6 +129,74 @@ revalidate quality.
 
 Already at ~94% of the measured DRAM read bandwidth; past work is in the
 decode GEMV rows of EXPERIMENTS.md.
+
+### 7. Measure and validate MTP cycle cost estimates
+
+Added 2026-10-20. The controller decides whether another proposal pays by
+comparing expected output with estimated draft and verification costs.
+Updating those estimates from kernel savings can change the schedule: in the
+[depth ABBA and pricing diagnostic](artifacts/mtp-attention-e2e-2026-10-20.json),
+31B essay decode improved 1.5%, but the maximum streaming gap grew from about
+154 to 168 ms. Keeping the new kernel and restoring the old dense verification
+prices restored baseline aggregate schedules and removed that gap increase in
+a separate matched ABBA. The exact cycle responsible was not traced.
+
+Measure before redesigning the model:
+
+- Measure complete drafter steps and target verification forwards with the
+  actual target/drafter files, across context depths and verification widths.
+  Include prose and code, especially for the 26B's text-dependent expert
+  routing. Probe both sides of kernel launch boundaries.
+- Record per-cycle predicted and actual costs, depth, total verification rows,
+  neural steps including discarded terminal proposals, lookup copies,
+  siblings, accepted/emitted tokens and concurrency. Separate GPU durations
+  from host overhead and queueing; align cycles with streamed token gaps.
+- Evaluate prediction error on held-out workloads, especially the marginal
+  cost of one more proposal. Fit the smallest table or model that explains
+  consequential errors; preserve dispatch boundaries where interpolation
+  fails. Quantify measurement variation before adding a decision margin.
+
+Hold acceptance calibration constant while evaluating cost changes. First
+qualify kernel changes with prices unchanged, then qualify new prices as a
+separate scheduling change. Use matched native and HTTP ABBA on both models,
+including long-context prose and high-acceptance code. Retain every request
+and phase, apply the 5% and 3 ms rules, and inspect streaming gaps separately
+from throughput. Better cost prediction alone does not impose a pause budget;
+an explicit latency objective is a separate policy experiment. No speedup or
+online timing adaptation is assumed.
+
+### 8. Benchmark acceptance calibration accuracy and benefit
+
+Added 2026-10-20. Existing calibrated-policy replay and HTTP comparisons are
+in [EXPERIMENTS.md](EXPERIMENTS.md), including rejected alternative rules.
+The unit tests verify learning arithmetic, while end-to-end timings combine
+acceptance estimates with cost estimates and scheduling. Establish current
+prediction accuracy and the benefit of learning before changing the signal,
+bins, history weighting or uncertainty handling.
+
+- Log each acceptance prediction before verification, its signal, draft
+  position and valid observed outcome. Accepted chain proposals and the first
+  rejection provide labels; later proposals must not be counted as additional
+  failures. Measure predicted versus observed acceptance, sample counts and
+  probability error, including uncertainty for sparsely observed bins.
+- Cover prose, code writing/editing and repetitive text on both models, short
+  and long contexts, greedy and sampled decoding. Separate fresh calibration
+  from shared history; test transitions such as code to prose and reverse the
+  request order. Use separate development and held-out evaluation prompts.
+- With identical cost estimates, compare current learned calibration against
+  its frozen initial estimates, confidence thresholds and several fixed draft
+  lengths. Controlled draft-length probes should check positions the current
+  stopping rule rarely reaches. Offline replay is diagnostic: a changed policy
+  changes subsequent histories, so confirm useful variants with matched HTTP
+  ABBA and native measurements.
+
+Report prediction accuracy separately from throughput, request latency,
+streaming gaps and wasted draft work. A higher acceptance percentage alone is
+not success: drafting fewer tokens can raise that percentage while slowing
+generation. Retain numerical quality, greedy equivalence and seeded sampled
+replay/snapshot checks for any policy change; acceptance prediction must not
+relax target verification. Recent-history weighting and conservative decision
+margins remain hypotheses until these comparisons demonstrate a benefit.
 
 ## Opt-in levers (quality trade, default off)
 
