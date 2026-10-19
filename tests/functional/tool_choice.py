@@ -3,11 +3,14 @@
 import json
 import sys
 
+from cache_growth import check_unchanged_retry, log_offset
 from templates import THINKING_OFF_OPENING_TOKENS
 from tool_native import assert_native, cached
 
 
-def check_tool_choice_cache(client, model, checks, chat_result, sampling_preset="qwen38"):
+def check_tool_choice_cache(client, model, checks, chat_result, sampling_preset="qwen38",
+                            server_log=None):
+    from messages_count_tokens import assert_count_response
     function = {
         "name": "read", "description": "Read a file.",
         "parameters": {"type": "object", "properties": {"path": {"type": "string"}},
@@ -51,12 +54,22 @@ def check_tool_choice_cache(client, model, checks, chat_result, sampling_preset=
                 else "Reply with only DONE. Do not call a tool.")}]}
         if after is not None:
             continued["tool_choice"] = after
+        # Clients may replace the final user turn of an agent history. Count
+        # that turn and its assistant opening in a separate request, as
+        # tool-history does.
+        suffix = client.post("/messages/count_tokens", body={
+            "model": model, "thinking": {"type": "disabled"},
+            "messages": [continued["messages"][-1]]}, cast_to=object)
+        checks[label + "_mutable_suffix_count"] = suffix
+        mutable_suffix_tokens = assert_count_response(suffix)
+        start = log_offset(server_log)
         done = record(label + "_continued", continued, index % 2 != 0)
         # A template whose history drops the thinking-off opening reuses the
         # stable boundary before it instead of the call (templates.py).
         opening = THINKING_OFF_OPENING_TOKENS.get(sampling_preset)
         expected = (first["usage"]["prompt_tokens"] + first["usage"]["completion_tokens"]
                     if opening is None else first["usage"]["prompt_tokens"] - opening)
+        end = log_offset(server_log)
         assert cached(done["usage"]) >= expected, (
             label, "tool choice lost the generated frontier", expected, done)
         if after == "required":
@@ -69,10 +82,15 @@ def check_tool_choice_cache(client, model, checks, chat_result, sampling_preset=
             assert done["text"].strip() == "DONE", done
 
         # An identical prompt under another tool choice must have identical
-        # token counts and reuse its completed prompt without any prefill.
+        # token counts and reuse its completed prompt without any prefill. If
+        # the server logged that memory pressure refused the prompt copy, the
+        # retry may prefill the final user turn and its assistant opening.
         retry = record(label + "_retry", {**continued, "tool_choice": "auto"})
         assert retry["usage"]["prompt_tokens"] == done["usage"]["prompt_tokens"], retry
-        assert cached(retry["usage"]) == retry["usage"]["prompt_tokens"], retry
+        prompt_tokens = retry["usage"]["prompt_tokens"]
+        check_unchanged_retry(label + "_retry", retry, prompt_tokens - cached(retry["usage"]),
+                              server_log, start, end,
+                              mutable_suffix_tokens=mutable_suffix_tokens)
 
     # Required calls remain mandatory even when the user asks for plain text.
     # The grammar must supply that guarantee without a system instruction.
