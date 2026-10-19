@@ -78,6 +78,11 @@ MTP uses each model's drafter):
   250K-token prompt with no page-file growth over 10 minutes idle and the benchmark.
   Gufo's Windows free-memory figure counts shared memory too, so it does not stop
   this by itself; check what other programs (e.g. ComfyUI) hold before loading.
+- AtomicChat's file is 3.75 GiB smaller, and it fits **2 sessions x 262K** + MTP +
+  vision: 91.9 GB dedicated idle, 92.6 GB peak (other programs held 1.7 GB) through two
+  concurrent 249K-token prompts, no page-file growth. Each prefilled at ~1,280 tok/s
+  (about 1,315 combined) and both recalled the code word. Free Windows RAM fell to
+  7.3 GB, so leave the GPU to it alone.
 - An `mmproj-BF16.gguf` beside the model (or in its parent folder) is loaded
   automatically. Keep it in a subfolder and pass `--mmproj` to choose vision.
 - Windows charges GPU allocations to the commit limit as well, so keep a large page
