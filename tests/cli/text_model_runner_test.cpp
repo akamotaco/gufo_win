@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -515,6 +516,52 @@ public:
     ++stats_->snapshot_restores;
   }
 };
+
+void TestSnapshotTimingEndsWhenCaptureCompletes() {
+  class GatedRunner final : public SnapshotRunner {
+  public:
+    using SnapshotRunner::SnapshotRunner;
+    mutable std::binary_semaphore entered{0}, release{0};
+    bool fail{false};
+    std::unique_ptr<TextRunnerSnapshot> Snapshot(
+        const TextRunnerState& state) const override {
+      entered.release();
+      release.acquire();
+      if (fail)
+        throw std::runtime_error("injected capture failure");
+      return SnapshotRunner::Snapshot(state);
+    }
+  };
+  for (const bool fail : {false, true}) {
+    auto runner = std::make_shared<GatedRunner>(std::make_shared<FakeStats>());
+    runner->fail = fail;
+    TextRunnerPool pool(runner, 2);
+    auto request = pool.Acquire({1, 2, 3});
+    Expect(request.Prefill(3).decode_ready, "prompt is ready for capture");
+    const auto started = std::chrono::steady_clock::now();
+    Expect(!request.PreparePromptSnapshot(), "capture runs asynchronously");
+    Expect(runner->entered.try_acquire_for(std::chrono::seconds(5)),
+           "capture worker entered");
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    runner->release.release();
+    const auto deadline = started + std::chrono::seconds(5);
+    while (request.SnapshotPending() &&
+           std::chrono::steady_clock::now() < deadline)
+      std::this_thread::yield();
+    Expect(!request.SnapshotPending(), "capture worker completed");
+    const auto ready_ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - started)
+                              .count();
+    // Model the scheduler spending a decode step on a peer before it can
+    // collect this completed capture. That delay is not capture work.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    const auto metrics = request.Commit();
+    Expect(metrics.snapshot_ms >= 10 && metrics.snapshot_ms <= ready_ms + 5,
+           "capture timing includes the copy but excludes delayed collection");
+    Expect((metrics.snapshot_bytes == 0) == fail,
+           "timing preserves successful and failed capture results");
+  }
+}
 
 class PartialRetentionRunner final : public SnapshotRunner {
 public:
@@ -2381,6 +2428,7 @@ int main() {
   // The cache warning assertion in this binary matches the plain "[WARN]
   // [cache]" text captured from a redirected sink; a TTY stderr tints it.
   ::setenv("NO_COLOR", "1", 1);
+  TestSnapshotTimingEndsWhenCaptureCompletes();
   TestInPassStableCheckpoint();
   TestInPassFailureRetainsOnlyCompletedCheckpoints();
   TestNewImageGetsAStableCheckpoint();

@@ -487,6 +487,7 @@ public:
     struct CommitMetrics {
       std::optional<ComponentCacheMetrics> component_cache;
       std::size_t snapshot_bytes{0};
+      /// Capture work through worker completion, excluding later collection.
       double snapshot_ms{0.0};
       std::size_t disk_queued_bytes{0};
       double disk_enqueue_ms{0.0};

@@ -979,6 +979,12 @@ struct TextRunnerPool::Request::Impl {
       snapshot_future =
           std::async(wait ? std::launch::deferred : std::launch::async,
                      [this, owner = runner, state, persist = bool(disk_store)] {
+                       struct RecordCompletion {
+                         std::chrono::steady_clock::time_point& finished;
+                         ~RecordCompletion() {
+                           finished = std::chrono::steady_clock::now();
+                         }
+                       } timing{snapshot_finished};
                        if (lease.component())
                          return lease.Capture();
                        return persist ? owner->SnapshotForPersistence(*state)
@@ -998,10 +1004,9 @@ struct TextRunnerPool::Request::Impl {
     } catch (...) {
       prompt_snapshot.reset();
     }
-    snapshot_metrics.snapshot_ms +=
-        std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - snapshot_start)
-            .count();
+    snapshot_metrics.snapshot_ms += std::chrono::duration<double, std::milli>(
+                                        snapshot_finished - snapshot_start)
+                                        .count();
     if (prompt_snapshot == nullptr) {
       disk_capture.reset();
       if (retain_snapshot) {
@@ -1192,6 +1197,9 @@ struct TextRunnerPool::Request::Impl {
   std::size_t snapshot_bytes{0};
   bool retain_snapshot{false};
   std::chrono::steady_clock::time_point snapshot_start;
+  // Written by the capture worker, including on failure; future::get above
+  // synchronizes that write before the result's timing is collected.
+  std::chrono::steady_clock::time_point snapshot_finished;
   std::unique_ptr<ContinuationDiskStore::CaptureReservation> disk_capture;
   std::future<std::unique_ptr<TextRunnerSnapshot>> snapshot_future;
 };
