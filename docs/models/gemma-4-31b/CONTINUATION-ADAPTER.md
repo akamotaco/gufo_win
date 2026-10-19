@@ -499,7 +499,9 @@ had cost 3.4% before).
     slower, and `fanout`'s second request prefilling in 168 ms against
     128 ms.
   - 20 captures more than 5% and 3 ms slower than legacy's, the
-    `cache-growth` second turns among them.
+    `cache-growth` second turns among them; two of those requests also
+    reach their first token 12–22 ms later (`state-edges`
+    `schema_payload_alpha`, `quoted_call_argument_stop_stream`).
 - **31B MTP against legacy** (`--sessions 2 --context 32768`, the six
   `cache-*` suites, `cache`, `long-context` and `state-edges`, legacy
   recorded right before): 932 of 978 timing measures pass (882 of 966
