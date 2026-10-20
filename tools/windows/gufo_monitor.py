@@ -9,15 +9,19 @@ requests from its log when --logs names a folder of gufo-PORT-*.log files (cache
 full recompute, time to first token). System: GPU
 utilisation (busiest engine, usually Compute), dedicated/shared GPU memory, free RAM, commit,
 page-file use and pages written, sampled every second by one long-running PowerShell.
+The model each server runs comes from its /props (file name, context, vision), and the page
+warns while the Windows GPU timeout is still 2 s (docs/WINDOWS-TDR.md).
 Read-only: it never starts, stops or sends requests to a model.
 """
 import argparse
+import ctypes
 import json
 import re
 import subprocess
 import threading
 import time
 import urllib.request
+import winreg
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -117,13 +121,54 @@ def recent_requests(port, count=8):
     return rows
 
 
+TDR_KEY = r"System\CurrentControlSet\Control\GraphicsDrivers"
+
+
+def tdr():
+    """TdrDelay in seconds (None: not set, Windows uses 2 s) and whether the key changed since boot,
+    in which case a new value is not in effect until the next reboot."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, TDR_KEY) as key:
+            try:
+                delay = int(winreg.QueryValueEx(key, "TdrDelay")[0])
+            except OSError:
+                delay = None
+            changed = winreg.QueryInfoKey(key)[2] / 1e7 - 11644473600  # FILETIME to Unix time
+    except OSError:
+        return None
+    boot = time.time() - ctypes.windll.kernel32.GetTickCount64() / 1000
+    return {"delay": delay, "effective": delay or 2, "pending_reboot": changed > boot + 60}
+
+
+PROPS = {}  # port -> (time fetched, model summary); refreshed every 10 s and on restart
+
+
+def model_info(port, base):
+    cached = PROPS.get(port)
+    if cached and time.time() - cached[0] < 10:
+        return cached[1]
+    try:
+        props = json.loads(get(base + "/props"))
+    except Exception:
+        props = {}
+    path = props.get("model_path") or ""
+    name = re.sub(r"(-\d{5}-of-\d{5})?\.gguf$", "", Path(path.replace("\\", "/")).name) if path else ""
+    info = {"file": name, "served": props.get("model_alias") or props.get("model"),
+            "ctx": (props.get("default_generation_settings") or {}).get("n_ctx"),
+            "vision": bool((props.get("modalities") or {}).get("vision"))}
+    PROPS[port] = (time.time(), info)
+    return info
+
+
 def server(port):
     base = "http://127.0.0.1:%d" % port
     try:
         slots = json.loads(get(base + "/slots"))
     except Exception:
+        PROPS.pop(port, None)  # a restarted server may run another model
         return {"port": port, "name": PORTS[port], "up": False}
-    out = {"port": port, "name": PORTS[port], "up": True, "slots": slots, "recent": recent_requests(port)}
+    out = {"port": port, "name": PORTS[port], "up": True, "slots": slots, "recent": recent_requests(port),
+           "info": model_info(port, base)}
     try:
         out["metrics"] = metrics(get(base + "/metrics"))
     except Exception:
@@ -135,7 +180,7 @@ def server(port):
 def snapshot():
     with lock:
         system = latest["system"]
-    return {"t": time.time(), "system": system, "servers": [server(p) for p in PORTS]}
+    return {"t": time.time(), "system": system, "tdr": tdr(), "servers": [server(p) for p in PORTS]}
 
 
 class Handler(BaseHTTPRequestHandler):

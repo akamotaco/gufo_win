@@ -142,7 +142,11 @@ build\release\gufo.exe serve --host 127.0.0.1 --port 8093 llm `
 To watch the servers, `python tools\windows\gufo_monitor.py --servers 8093 --logs <log folder>`
 serves a page on http://127.0.0.1:8090: each session's phase (prefill progress or
 decode rate, from `/slots`), the last requests with cache misses marked, GPU use,
-GPU and system memory, and page-file writes. It only reads.
+GPU and system memory, and page-file writes. It only reads. Each server is titled with
+the model file it loaded (from `/props`), and a red banner appears while the Windows
+GPU timeout is still 2 s or changed without a reboot ([docs/WINDOWS-TDR.md](docs/WINDOWS-TDR.md)).
+
+![gufo monitor with Qwen3.8-Flash-Next on port 8080](assets/windows-monitor.png)
 
 ### Status
 
