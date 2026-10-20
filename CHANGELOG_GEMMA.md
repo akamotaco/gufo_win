@@ -4,6 +4,29 @@ Changes made in this fork's Gemma 4 engine, newest first. Each entry is a brief
 summary; its pull request has the details, measurements and validation.
 Upstream Gufo's changes are in [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-19: Continuations from the component cache ([#3](https://github.com/franzmoca/gufo/pull/3))
+
+- Gemma 4 serves continuations through upstream's component cache instead of
+  whole-session snapshots. Checkpoints keep global rows, sliding-window rows
+  and a small private state apart, so a conversation's checkpoints share rows
+  and a restore loads only what its slot lacks: a 26B swipe of a 16K-token
+  prompt restores 1 MB in under 1 ms.
+- The disk cache (`--cache-disk`) uses the component disk tier: after a
+  restart, a 5.5K-token 31B conversation reaches its next first token in
+  0.43 s instead of 9.9 s.
+- Prefill no longer splits at checkpoints, captures no longer wait for
+  another session's prefill (26B: 8–9 ms against legacy's 204–325 ms), and
+  two requests finishing prefill together decode as one batch.
+- Fixed 31B restores stalling 4–17 ms after the cache grew its host memory,
+  and captures stalling while it grew.
+- Synced with upstream main through gufo-org/gufo#477 (0.17.1).
+- `cache_snapshot_ms` reports a prompt capture's own time; it included the
+  wait until the scheduler collected the finished capture.
+- On 31B MTP, 1,105 of 1,164 per-request timing measures match the legacy
+  cache, and prompt captures take a median 0.58 of legacy's time. Restores
+  into a free slot, where legacy reused the other slot's session, remain
+  slower.
+
 ## 2026-10-18: Prompt lookup from upstream and fewer request stalls ([#2](https://github.com/franzmoca/gufo/pull/2))
 
 - Synced with upstream main through gufo-org/gufo#613. Gemma 4 takes its

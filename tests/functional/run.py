@@ -446,8 +446,8 @@ def main():
     def ensure_fresh_cache(label, always=False):
         """Restart before a suite if this server's cache was already used/full."""
         nonlocal current_log
-        if not report["suites"] or not (
-                always or CACHE_PRESSURE in current_log.read_text()):
+        pressure = current_log.exists() and CACHE_PRESSURE in current_log.read_text()
+        if not report["suites"] or not (always or pressure):
             return
         segment.close()
         current_log = output / f"server-{label}.log"

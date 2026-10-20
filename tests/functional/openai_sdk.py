@@ -2838,7 +2838,8 @@ def main():
                 client, args.model, checks, chat_result,
                 image_content("red") if args.vision else None, args.sampling_preset),
             "tool-choice-cache": lambda: check_tool_choice_cache(
-                client, args.model, checks, chat_result, args.sampling_preset, args.server_log),
+                client, args.model, checks, chat_result, server_log=args.server_log,
+                sampling_preset=args.sampling_preset),
             "tool-parameter-order": lambda: check_tool_parameter_order(
                 client, args.model, checks, chat_result),
             "tool-schema-edges": lambda: check_tool_schema_edges(

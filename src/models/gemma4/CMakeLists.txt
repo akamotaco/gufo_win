@@ -27,6 +27,7 @@ if (ENGINE_ENABLE_HIP)
     ${GEMMA4_ROCM_DIR}/device_model.cpp
     ${GEMMA4_ROCM_DIR}/executor.cpp
     vision/encoder.hip
+    continuation_adapter.cpp
     engine.cpp)
   set_source_files_properties(${GEMMA4_ROCM_DIR}/kernels.hip.cpp
     ${GEMMA4_ROCM_DIR}/attention_wmma.hip.cpp

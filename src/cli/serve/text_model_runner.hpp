@@ -1,6 +1,7 @@
 #ifndef GUFO_SERVER_TEXT_MODEL_RUNNER_HPP_
 #define GUFO_SERVER_TEXT_MODEL_RUNNER_HPP_
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -401,14 +402,17 @@ public:
     (void)state;
   }
   /// The prompt tokens after the next Prefill's frontier, set before every
-  /// prefill step (empty when the frontier ends the prompt). A step that
-  /// stops at a snapshot boundary must still leave the state exactly at that
-  /// boundary; a runner may compute these tokens alongside and adopt the
-  /// result if the following step asks for exactly them.
-  virtual void SetPromptLookahead(
-      TextRunnerState& state, std::span<const TextRunnerToken> tokens) const {
+  /// prefill step (empty when the frontier ends the prompt), and where later
+  /// steps stop inside them (token counts, ascending). A step that stops at a
+  /// snapshot boundary must still leave the state exactly at that boundary;
+  /// a runner may compute these tokens alongside and adopt the result when a
+  /// following step stops at one of `stops` or at their end.
+  virtual void SetPromptLookahead(TextRunnerState& state,
+                                  std::span<const TextRunnerToken> tokens,
+                                  std::span<const std::size_t> stops) const {
     (void)state;
     (void)tokens;
+    (void)stops;
   }
   /// Processes at most max_input_tokens, yielding after one model-owned
   /// chunk even when the scheduler grants the whole remaining prompt.
@@ -521,6 +525,7 @@ public:
     struct CommitMetrics {
       std::optional<ComponentCacheMetrics> component_cache;
       std::size_t snapshot_bytes{0};
+      /// Capture work through worker completion, excluding later collection.
       double snapshot_ms{0.0};
       std::size_t disk_queued_bytes{0};
       double disk_enqueue_ms{0.0};
@@ -593,6 +598,9 @@ public:
     /// Starts capture and polls completion without blocking other sessions.
     [[nodiscard]] bool PreparePromptSnapshot();
     [[nodiscard]] bool SnapshotPending() const;
+    /// Waits up to `timeout` for a pending snapshot; true once none is.
+    [[nodiscard]] bool AwaitSnapshot(
+        std::chrono::steady_clock::duration timeout) const;
     void Invalidate() noexcept;
 
   private:

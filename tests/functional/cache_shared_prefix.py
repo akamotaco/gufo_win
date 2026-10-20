@@ -52,7 +52,7 @@ def check_cache_shared_prefix(client, model, checks, chat_result, preset=None):
         system = system_prompt(f"cache_shared_prefix_{label}", 220)
         conversations = [[{"role": "system", "content": system},
                           {"role": "user", "content": background(code, tail_lines) +
-                           f"Reply with only the code {code}."}]
+                           f"Reply with only the code word: {code}"}]
                          for code in CODES]
         results = []
         for index, (messages, code) in enumerate(zip(conversations, CODES)):

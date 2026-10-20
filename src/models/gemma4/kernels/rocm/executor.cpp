@@ -12,6 +12,7 @@
 
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/hip/managed_alloc.hpp"
+#include "src/models/gemma4/continuation_hooks.hpp"
 #include "src/models/gemma4/draft_vocab.hpp"
 #include "src/models/gemma4/kernels/rocm/gemv.hpp"
 #include "src/models/gemma4/kernels/rocm/kernels.hpp"
@@ -212,7 +213,8 @@ std::size_t Executor::CacheBytes(const Config& c, std::uint32_t max_context,
     bytes += AlignUp(slots * key_widths[l] * sizeof(std::uint16_t)) +
              AlignUp(slots * c.KvDim(l) * sizeof(std::uint16_t));
   }
-  return bytes + 2 * AlignUp(std::size_t{c.hidden_size} * sizeof(float)) +
+  return bytes + AlignUp(std::size_t{c.hidden_size} * sizeof(float)) +
+         AlignUp(std::size_t{kSplitRows} * c.hidden_size * sizeof(float)) +
          AlignUp(std::size_t{vocab} * sizeof(float)) +
          AlignUp(draft_table_bytes);
 }
@@ -411,8 +413,9 @@ std::unique_ptr<KvCache> Executor::CreateCache(std::uint32_t max_context,
   const std::size_t hidden_bytes =
       AlignUp(std::size_t{c.hidden_size} * sizeof(float));
   cache->hidden = reinterpret_cast<float*>(at);
-  cache->ahead_hidden = reinterpret_cast<float*>(at + hidden_bytes);
-  at += 2 * hidden_bytes;
+  at += hidden_bytes;
+  cache->ahead_hidden = reinterpret_cast<float*>(at);
+  at += AlignUp(std::size_t{kSplitRows} * c.hidden_size * sizeof(float));
   cache->logits = reinterpret_cast<float*>(at);
   at += AlignUp(std::size_t{model_.vocab_size()} * sizeof(float));
   if (draft_table_bytes() != 0) {
@@ -716,6 +719,20 @@ void Executor::Forward(std::span<const Segment> segments,
       (segments.size() > 1 && n > kSplitRows) ||
       logit_rows.size() > max_logit_rows_) {
     throw std::invalid_argument("gemma4 forward exceeds its capacity");
+  }
+  if (fences_ != nullptr) {
+    writers_.clear();
+    for (const Segment& s : segments) {
+      if (s.cache->hooks != nullptr) {
+        writers_.push_back(s.cache->hooks);
+      }
+    }
+    fences_->BeforeMutation(writers_);
+  }
+  for (const Segment& s : segments) {
+    if (s.cache->hooks != nullptr) {
+      s.cache->hooks->BeforeWrite(s.first_position, s.first_position + s.rows);
+    }
   }
   const std::uint32_t d = c.hidden_size;
   const float eps = c.rms_eps;
@@ -1282,22 +1299,40 @@ bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n,
                            stream);
 }
 
+void Executor::BeforeMutation(KvCache& cache) {
+  if (fences_ != nullptr && cache.hooks != nullptr) {
+    ContinuationHooks* const writer = cache.hooks;
+    fences_->BeforeMutation(std::span(&writer, 1));
+  }
+}
+
 void Executor::CommitHidden(KvCache& cache, std::uint32_t row) {
+  BeforeMutation(cache);
   const std::size_t d = model_.config().hidden_size;
   HIP_CHECK(hipMemcpyAsync(cache.hidden, h_ + row * d, d * sizeof(float),
                            hipMemcpyDeviceToDevice, stream_));
 }
 
-void Executor::StashHidden(KvCache& cache, std::uint32_t row) {
+void Executor::StashHidden(KvCache& cache, std::uint32_t row,
+                           std::uint32_t slot) {
+  if (slot >= kSplitRows) {
+    throw std::invalid_argument("gemma4 hidden stash slot");
+  }
   const std::size_t d = model_.config().hidden_size;
-  HIP_CHECK(hipMemcpyAsync(cache.ahead_hidden, h_ + row * d, d * sizeof(float),
-                           hipMemcpyDeviceToDevice, stream_));
+  HIP_CHECK(hipMemcpyAsync(cache.ahead_hidden + slot * d, h_ + row * d,
+                           d * sizeof(float), hipMemcpyDeviceToDevice,
+                           stream_));
 }
 
-void Executor::AdoptStashedHidden(KvCache& cache) {
+void Executor::AdoptStashedHidden(KvCache& cache, std::uint32_t slot) {
+  if (slot >= kSplitRows) {
+    throw std::invalid_argument("gemma4 hidden stash slot");
+  }
+  BeforeMutation(cache);
   const std::size_t d = model_.config().hidden_size;
-  HIP_CHECK(hipMemcpyAsync(cache.hidden, cache.ahead_hidden, d * sizeof(float),
-                           hipMemcpyDeviceToDevice, stream_));
+  HIP_CHECK(hipMemcpyAsync(cache.hidden, cache.ahead_hidden + slot * d,
+                           d * sizeof(float), hipMemcpyDeviceToDevice,
+                           stream_));
 }
 
 void Executor::MoveKey(KvCache& cache, std::uint32_t from, std::uint32_t to) {
@@ -1315,6 +1350,10 @@ void Executor::MoveKey(KvCache& cache, std::uint32_t from, std::uint32_t to) {
     args.k_width[l] = key_widths_[l];
     args.v_width[l] = c.KvDim(l);
     args.ring[l] = c.IsSliding(l) ? cache.ring : 0;
+  }
+  BeforeMutation(cache);
+  if (cache.hooks != nullptr) {
+    cache.hooks->BeforeWrite(to, to + 1);
   }
   cache.written_from = std::min(cache.written_from, to);
   cache.written_to = std::max(cache.written_to, to + 1);
@@ -1607,6 +1646,7 @@ std::span<const std::uint32_t> Executor::ReadArgmax(std::size_t rows) const {
 }
 
 void Executor::CommitLogits(KvCache& cache, std::uint32_t row) {
+  BeforeMutation(cache);
   const std::size_t vocab = model_.vocab_size();
   HIP_CHECK(hipMemcpyAsync(cache.logits, logits_ + std::size_t{row} * vocab,
                            vocab * sizeof(float), hipMemcpyDeviceToDevice,
