@@ -83,21 +83,25 @@ __device__ __forceinline__ void QuantizeQ8_1Lane(float v, void* y,
                                                  std::size_t i) {
   const float xi = Materialize(v);
   float amax = fabsf(xi);
-  float sum = xi;
 #pragma unroll
   for (int offset = 16; offset > 0; offset >>= 1) {
     amax = fmaxf(amax, XorLane(amax, offset));
   }
-#pragma unroll
-  for (int offset = 16; offset > 0; offset >>= 1) {
-    sum += XorLane(sum, offset);
-  }
   const float d = amax / 127.0f;
   const std::int8_t q = amax == 0.0f ? 0 : roundf(xi / d);
+  // The block sum is d*sum(q), as in quantize_q8_1. The steps are spelled
+  // out: after the divergent `q`, a `#pragma unroll` loop stays rolled and
+  // dispatches XorLane's switch at run time, doubling HcCombineKernel.
+  int sumq = q;
+  sumq += XorLane(sumq, 16);
+  sumq += XorLane(sumq, 8);
+  sumq += XorLane(sumq, 4);
+  sumq += XorLane(sumq, 2);
+  sumq += XorLane(sumq, 1);
   Q8_1Block* blocks = static_cast<Q8_1Block*>(y);
   blocks[i / 32].qs[i % 32] = q;
   if (i % 32 == 0) {
-    blocks[i / 32].ds = make_half2(d, sum);
+    blocks[i / 32].ds = make_half2(d, d * sumq);
   }
 }
 
@@ -1337,14 +1341,32 @@ __global__ void SmallGemmKernel(const void* w, const float* x, float* out,
     for (unsigned st = 0; st < kSteps; ++st) {
       const std::uint32_t i0 = i_base + st * stride;
       if constexpr (kWhole) {
-        // F32 rows of whole passes (k a multiple of stride * kSteps): every
-        // step is in range, so the four elements arrive as one 16-byte load.
-        const float4 w4 = reinterpret_cast<const float4*>(
-            static_cast<const void*>(wrow))[i0 / 4];
-        wv[st][0] = w4.x;
-        wv[st][1] = w4.y;
-        wv[st][2] = w4.z;
-        wv[st][3] = w4.w;
+        // Rows of whole passes (k a multiple of stride * kSteps): every step
+        // is in range, so the four elements arrive as one load: 16 bytes for
+        // F32, 8 bytes for F16/BF16 (widened exactly, as RowElement does).
+        if constexpr (type == WeightType::kF32) {
+          const float4 w4 = reinterpret_cast<const float4*>(
+              static_cast<const void*>(wrow))[i0 / 4];
+          wv[st][0] = w4.x;
+          wv[st][1] = w4.y;
+          wv[st][2] = w4.z;
+          wv[st][3] = w4.w;
+        } else {
+          static_assert(type == WeightType::kF16 || type == WeightType::kBF16);
+          const ushort4 h4 = reinterpret_cast<const ushort4*>(
+              static_cast<const void*>(wrow))[i0 / 4];
+          if constexpr (type == WeightType::kBF16) {
+            wv[st][0] = Bf16ToF32(h4.x);
+            wv[st][1] = Bf16ToF32(h4.y);
+            wv[st][2] = Bf16ToF32(h4.z);
+            wv[st][3] = Bf16ToF32(h4.w);
+          } else {
+            wv[st][0] = __half2float(__ushort_as_half(h4.x));
+            wv[st][1] = __half2float(__ushort_as_half(h4.y));
+            wv[st][2] = __half2float(__ushort_as_half(h4.z));
+            wv[st][3] = __half2float(__ushort_as_half(h4.w));
+          }
+        }
 #pragma unroll
         for (unsigned j = 0; j < tokens; ++j) {
           const float4 x4 = reinterpret_cast<const float4*>(
@@ -7130,10 +7152,10 @@ bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
 template<WeightType type, unsigned tokens>
 void LaunchSmallGemm(const void* w, const float* x, float* out, std::uint32_t m,
                      std::uint32_t k, hipStream_t stream) {
-  if constexpr (type == WeightType::kF32) {
-    // Rows of whole four-step passes (K 2560: router, GDN alpha/beta,
-    // indexer) take the unchecked 16-byte loads, four steps at a time at
-    // any width: the same products in the same order.
+  if constexpr (type != WeightType::kQ8_0) {
+    // Rows of whole four-step passes (K 2560: router and GDN alpha/beta in
+    // F16, indexer in BF16) take the unchecked vector loads, four steps at a
+    // time at any width: the same products in the same order.
     const bool aligned = (reinterpret_cast<std::uintptr_t>(w) |
                           reinterpret_cast<std::uintptr_t>(x)) %
                              16 ==

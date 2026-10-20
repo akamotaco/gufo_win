@@ -966,30 +966,30 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
       const auto uncovered = [&](const Impl::Entry& e) {
         if (!e.live || e.live_tokens.size() <= kUncoveredTokens)
           return false;
-        const auto covering = impl_->index.Lookup(
+        return !impl_->index.HasCheckpoint(
             {impl_->identity, e.live_tokens,
-             cache::InputIdentity(e.live_tokens.size(), e.live_input)});
-        std::size_t deepest = 0;
-        for (const auto& candidate : covering.candidates)
-          if (!candidate.live)
-            deepest =
-                std::max(deepest, static_cast<std::size_t>(candidate.boundary));
-        return e.live_tokens.size() - deepest > kUncoveredTokens;
+             cache::InputIdentity(e.live_tokens.size(), e.live_input)},
+            e.live_tokens.size() - kUncoveredTokens);
       };
+      using Rank = std::tuple<bool, bool, bool, bool, std::uint64_t>;
       const auto rank = [&](const Impl::Entry& e) {
-        return std::tuple{uncovered(e), !e.slot->PreservationComplete(),
-                          bool(e.live),
-                          e.live_tokens.size() >= kUncoveredTokens, e.used};
+        return Rank{uncovered(e), !e.slot->PreservationComplete(), bool(e.live),
+                    e.live_tokens.size() >= kUncoveredTokens, e.used};
       };
-      // Each rank looks the frontier up once; compare the computed ranks.
-      std::optional<decltype(rank(*impl_->entries.front()))> best;
+      std::optional<Rank> selected_rank;
       for (auto& candidate : impl_->entries) {
         if (candidate->busy)
           continue;
-        auto ranked = rank(*candidate);
-        if (!best || ranked < *best) {
-          best = std::move(ranked);
+        if (!entry) {
           entry = candidate.get();
+          continue;
+        }
+        if (!selected_rank)
+          selected_rank = rank(*entry);
+        const auto candidate_rank = rank(*candidate);
+        if (candidate_rank < *selected_rank) {
+          entry = candidate.get();
+          selected_rank = candidate_rank;
         }
       }
     }
@@ -1031,6 +1031,9 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     request.state->SetStopAtEos(stop_at_eos);
     impl_->runner->SetPromptContext(*request.state, context);
     const auto started = Clock::now();
+    // Cold Acquire has already reset the slot. In-place acquisition and live
+    // frontiers retain rows; attempted restores can also dirty a cold slot.
+    bool clean = !live && !in_place;
     bool restored = bool(live);
     if (live)
       request.cached = found.selected->boundary;
@@ -1069,6 +1072,7 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
             return k == kept.end() ? std::optional<cache::ResidentRange>{}
                                    : std::optional{*k};
           };
+          clean = false;
           impl_->resources->adapter->BeginRestore(request.slot.Execution(),
                                                   positions, kept);
           // Every pin outlives all submitted loads, including failure drain.
@@ -1206,6 +1210,7 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
           }
           restored = true;
         } else if (candidate.durable && impl_->streaming) {
+          clean = false;
           cache::TransferTiming timing;
           const auto id = candidate.durable->Manifest().checkpoint;
           restored = impl_->streaming->Restore(
@@ -1252,6 +1257,7 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
       } catch (...) {
         if (!impl_->resources->adapter->Invalidate(request.slot.Execution()))
           throw;
+        clean = true;
         request.restored = 0;
         const std::lock_guard lock(impl_->mutex);
         entry->durable.reset();
@@ -1262,7 +1268,8 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
         const std::lock_guard lock(impl_->mutex);
         entry->durable.reset();
       }
-      if (!impl_->resources->adapter->Invalidate(request.slot.Execution()))
+      if (!clean &&
+          !impl_->resources->adapter->Invalidate(request.slot.Execution()))
         throw std::runtime_error("component cold initialization failed");
       entry->history = std::make_unique<cache::ExecutionHistory>(
           cache::ExecutionHistory::Cold(impl_->ledger,
@@ -1392,12 +1399,10 @@ ContinuationLookup ComponentTextCache::Lease::lookup() const noexcept {
 bool ComponentTextCache::Lease::HasSnapshotFor(
     std::span<const ContinuationToken> tokens) const {
   const std::lock_guard lock(impl_->cache->mutex);
-  auto found = impl_->cache->index.Lookup(
+  return impl_->cache->index.HasCheckpoint(
       {impl_->cache->identity, tokens,
-       cache::InputIdentity(tokens.size(), At(impl_->input, tokens.size()))});
-  return std::any_of(
-      found.candidates.begin(), found.candidates.end(),
-      [&](const auto& c) { return !c.live && c.boundary == tokens.size(); });
+       cache::InputIdentity(tokens.size(), At(impl_->input, tokens.size()))},
+      tokens.size());
 }
 bool ComponentTextCache::Lease::TryReserveSnapshot(
     std::size_t bytes, std::size_t boundary, bool preserve,
