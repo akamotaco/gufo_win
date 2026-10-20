@@ -69,10 +69,10 @@ public:
   [[nodiscard]] float Estimate(float signal) const noexcept;
   void Observe(float signal, bool accepted) noexcept;
   void Reset() noexcept;
-
-private:
+  /// The bin a signal falls in.
   [[nodiscard]] static std::size_t Bin(float signal) noexcept;
 
+private:
   std::array<float, kBins> accepted_{};
   std::array<float, kBins> seen_{};
 };

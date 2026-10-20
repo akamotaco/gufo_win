@@ -34,6 +34,13 @@ g4::CycleRecord Sample() {
   r.estimates = {0.625F, 0.875F};
   r.margins = {0.0F, 1.5F};
   r.sibling_estimates = {0.96875F};
+  r.proposal_signals = {0.5F, 0.75F, 0.25F};
+  r.row_acceptance = {1.0F, 0.5F};
+  r.runner_ups = {42, -1};
+  r.runner_up_signals = {0.25F, 0.0F};
+  r.runner_up_hits = {false, true};
+  r.observed = {true, false};
+  r.sibling_observed = true;
   r.stop = g4::CycleRecord::Stop{
       .signal = 0.25F, .estimate = 0.5F, .gain = 20.5F, .cost = 51.25F};
   r.begin_ns = 100;
@@ -62,6 +69,15 @@ void CheckFormat() {
   Require(
       estimates != nullptr && estimates->is_array() && estimates->size() == 2,
       "estimates");
+  const auto* ups = v.find("runner_ups");
+  Require(ups != nullptr && ups->size() == 2 &&
+              v.find("runner_up_hits")->size() == 2 &&
+              v.find("row_acceptance")->size() == 2 &&
+              v.find("proposal_signals")->size() == 3,
+          "row labels and runner-ups");
+  Require(
+      v.find("observed")->size() == 2 && v.find("sibling_observed")->is_bool(),
+      "observations");
   const auto* stop = v.find("stop");
   Require(stop != nullptr && stop->member_double("gain") == 20.5 &&
               stop->member_double("cost") == 51.25,

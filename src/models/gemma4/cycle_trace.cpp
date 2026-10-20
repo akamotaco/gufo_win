@@ -28,6 +28,7 @@ std::string FormatCycleRecord(const CycleRecord& r) {
   v["copied"] = static_cast<std::size_t>(r.copied);
   v["siblings"] = static_cast<std::size_t>(r.siblings);
   v["drafter_steps"] = static_cast<std::size_t>(r.drafter_steps);
+  v["step_cap"] = static_cast<std::size_t>(r.step_cap);
   v["small_head"] = r.small_head;
   v["accepted"] = static_cast<std::size_t>(r.accepted);
   v["sibling_accepted"] = r.sibling_accepted;
@@ -39,6 +40,29 @@ std::string FormatCycleRecord(const CycleRecord& r) {
   v["estimates"] = Floats(r.estimates);
   v["margins"] = Floats(r.margins);
   v["sibling_estimates"] = Floats(r.sibling_estimates);
+  v["proposal_signals"] = Floats(r.proposal_signals);
+  v["row_acceptance"] = Floats(r.row_acceptance);
+  json::Value runner_ups = json::Value::array();
+  for (const std::int32_t token : r.runner_ups) {
+    runner_ups.push_back(static_cast<long long>(token));
+  }
+  v["runner_ups"] = std::move(runner_ups);
+  v["runner_up_signals"] = Floats(r.runner_up_signals);
+  json::Value hits = json::Value::array();
+  for (const bool hit : r.runner_up_hits) {
+    hits.push_back(hit);
+  }
+  v["runner_up_hits"] = std::move(hits);
+  json::Value observed = json::Value::array();
+  for (const bool outcome : r.observed) {
+    observed.push_back(outcome);
+  }
+  v["observed"] = std::move(observed);
+  if (r.sibling_observed) {
+    v["sibling_observed"] = *r.sibling_observed;
+  } else {
+    v["sibling_observed"] = nullptr;
+  }
   if (r.stop) {
     json::Value stop = json::Value::object();
     stop["signal"] = static_cast<double>(r.stop->signal);

@@ -451,6 +451,11 @@ private:
   void FinishCycle(Cycle& cycle, std::span<const float> logits,
                    std::span<const std::uint32_t> argmax,
                    std::uint32_t first_hidden_row);
+  /// Records each chain row's acceptance probability and the greedy
+  /// runner-up hits in the cycle's trace, before verification.
+  void TraceRows(Cycle& cycle, std::span<const float> logits,
+                 std::span<const std::uint32_t> argmax,
+                 std::size_t chain) const;
 
   std::shared_ptr<Model> model_;
   std::unique_ptr<rocm::KvCache> cache_;

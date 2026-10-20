@@ -25,8 +25,10 @@ struct CycleRecord {
   std::uint32_t rows{0};
   std::uint32_t copied{0};
   std::uint32_t siblings{0};
-  /// Drafter steps run, including a last proposal the policy declined.
+  /// Drafter steps run, including a last proposal the policy declined, and
+  /// the most the chain could run.
   std::uint32_t drafter_steps{0};
+  std::uint32_t step_cap{0};
   /// The chain drafted on the small head over frequent tokens.
   bool small_head{false};
   /// Accepted drafts and copies, whether a sibling was accepted, and the
@@ -46,6 +48,27 @@ struct CycleRecord {
   std::vector<float> estimates;
   std::vector<float> margins;
   std::vector<float> sibling_estimates;
+  /// Every drafter proposal's signal under any policy, a declined last one
+  /// included.
+  std::vector<float> proposal_signals;
+  /// Per verified chain row past the pending one (MTP drafts, then
+  /// copies): the probability that verification accepts it given the rows
+  /// before it accepted, whatever happened to them. Greedy: 1 when the
+  /// target's argmax is the row's token, else 0; sampled: min(1, p/q) with
+  /// p the request sampler's distribution at the cycle's start (exact
+  /// without repetition penalties) and q the proposal's probability (1 for
+  /// a copy).
+  std::vector<float> row_acceptance;
+  /// Per MTP draft, the drafter's alternative beside it (-1: none) and its
+  /// signal; greedy also records whether the target's argmax at that row is
+  /// the alternative.
+  std::vector<std::int32_t> runner_ups;
+  std::vector<float> runner_up_signals;
+  std::vector<bool> runner_up_hits;
+  /// What the calibrated policy learned: each judged MTP draft's outcome
+  /// (signals[i] with observed[i]) and the sibling's, when one was judged.
+  std::vector<bool> observed;
+  std::optional<bool> sibling_observed;
   /// The proposal the calibrated policy declined: its signal, estimate,
   /// expected gain and cost (the chain stops when gain < cost).
   struct Stop {
