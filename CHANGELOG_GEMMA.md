@@ -4,6 +4,27 @@ Changes made in this fork's Gemma 4 engine, newest first. Each entry is a brief
 summary; its pull request has the details, measurements and validation.
 Upstream Gufo's changes are in [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-20: Faster MTP attention at depth and a per-cycle draft trace ([#5](https://github.com/franzmoca/gufo/pull/5))
+
+- MTP verification attention folds its reductions into DPP additions and
+  coalesces score reductions, and 9–12 verified rows launch as one block:
+  31B five-to-sixteen-row verification attention 4–6% faster at 32K and
+  64K; 31B MTP decode at 16K +7.2% (native tg128), ~31K HTTP requests
+  +0.1–1.9%.
+- Drafter step prices are remeasured on the drafters actually used (31B
+  Q8_0 assistant, 26B Unsloth drafter), so the draft policy's price error
+  at ~31K falls from 1.19 to 1.06 (31B) and from 0.76 to 1.04 (26B);
+  throughput is unchanged.
+- `--draft-trace PATH` (serve, prompt and bench) writes one JSON line per
+  MTP verification cycle: rows, siblings, drafter steps, acceptance, the
+  policy's estimates and stop decision, per-row target statistics and stage
+  timings. `gemma4_draft_replay` checks and replays the draft policy offline
+  from these traces.
+- A study of the calibrated draft policy on exactly labelled chains found it
+  accurate and near the best achievable before verification; no policy
+  change.
+- Synced with upstream main through gufo-org/gufo#665 (0.18.0).
+
 ## 2026-10-20: MTP on depth-upscaled 31B targets ([#4](https://github.com/franzmoca/gufo/pull/4))
 
 - MTP decoding accepts targets of up to 96 layers instead of 64, so

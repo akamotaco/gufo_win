@@ -206,6 +206,10 @@ void RegisterBenchOptions(ArgParser& parser, BenchOptions& opt,
       "Gemma 4 calibrated drafting: shared (learned across requests) or "
       "request (reset per request; exact seeded replay) (default: shared)",
       "Speculative", &opt.draft_calibration);
+  parser.AddOption("", "--draft-trace", "PATH",
+                   "Gemma 4 MTP: append one JSON line per verification cycle "
+                   "(prices, estimates, outcome, stage times) to PATH",
+                   "Speculative", &opt.draft_trace_path);
   parser.AddOption("", "--dspark-model", "PATH",
                    "DeepSeek V4 Flash DSpark support GGUF", "Speculative",
                    &opt.dspark_model_path);
@@ -925,7 +929,8 @@ int RunQwen38FlashNextBenchmark(
     return 1;
   }
   if (mtp && (options.min_draft_tokens != 1 || !options.draft_policy.empty() ||
-              !options.draft_calibration.empty())) {
+              !options.draft_calibration.empty() ||
+              !options.draft_trace_path.empty())) {
     std::cerr << "Error: Flash-Next MTP requires --min-draft-tokens 1 and no "
                  "--draft-policy\n";
     return 1;
@@ -1230,11 +1235,12 @@ std::optional<BenchOptions> ParseBenchOptions(std::span<const char* const> args,
   if ((!opt.draft_policy.empty() && opt.speculative_backend != "mtp" &&
        (opt.speculative_backend != "dflash2" ||
         (opt.draft_policy != "fixed" && opt.draft_policy != "adaptive"))) ||
-      (!opt.draft_calibration.empty() && opt.speculative_backend != "mtp")) {
+      ((!opt.draft_calibration.empty() || !opt.draft_trace_path.empty()) &&
+       opt.speculative_backend != "mtp")) {
     if (error_msg != nullptr)
       *error_msg =
           "--draft-policy requires DFlash2 (fixed or adaptive) or MTP; "
-          "--draft-calibration requires MTP";
+          "--draft-calibration and --draft-trace require MTP";
     return std::nullopt;
   }
   if (opt.min_draft_tokens != 1 && opt.speculative_backend == "dflash2") {
@@ -1286,7 +1292,8 @@ int RunGemma4Benchmark(const BenchOptions& options,
       .mtp_model_path = mtp ? options.mtp_model_path : "",
       .draft_tokens = options.draft_tokens_given ? options.draft_tokens
                                                  : g4::kDefaultDraftTokens,
-      .min_draft_tokens = options.min_draft_tokens};
+      .min_draft_tokens = options.min_draft_tokens,
+      .draft_trace_path = options.draft_trace_path};
   try {
     model_options.draft_policy = g4::ParseDraftPolicy(options.draft_policy);
     model_options.draft_calibration =

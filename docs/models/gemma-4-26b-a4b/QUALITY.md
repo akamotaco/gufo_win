@@ -151,3 +151,50 @@ memory and loading. Gufo drafts under its calibrated policy. Every Gufo
 multi-user completion matches its C1 hash (AR against AR C1, MTP against MTP
 C1); the AR C1 hashes llama.cpp's MTP rows are compared with were qualified
 once with an isolated C1 AR run (`multi-*-q8-gufo-ar.json`).
+
+The shared DPP reduction change of 2026-10-19 preserves the existing
+attention operator outputs byte for byte against 04d70a14, including this
+model’s two-KV-head layout and all verification widths through 16.
+`gemma4.target` with UD-Q4_K_XL and the Unsloth Q8_0 MTP drafter passes:
+decode KL 7.52968e-7, eight-row KL 2.58145e-5 (both 22/22 top-1), prefill KL
+3.71873e-5 (21/22), long-conversation KL 0.0264956. Greedy equivalence,
+siblings, sampled replay and snapshot checks pass. These are candidate
+quality measurements; the operator A/B establishes unchanged attention
+arithmetic. [Raw results](../gemma-4-31b/artifacts/mtp-verification-2026-10-19.json).
+
+## Coalesced attention qualification (2026-10-20)
+
+The shared `422fbe4d` attention change is byte-identical to `519dfe9c` /
+`eb17a526` across all 160 supplied row/depth/head-layout cases, including
+this model's two-KV-head layout and normal/10×/30× queries. Rebuilt current
+`gemma4.attention_ops`, `gemma4.kernel_ops` and `gemma4.draft_policy` pass;
+commands and full outputs are in the [shared artifact](../gemma-4-31b/artifacts/mtp-attention-e2e-2026-10-20.json)
+and the [31B qualification](../gemma-4-31b/QUALITY.md#coalesced-attention-qualification-2026-10-20).
+
+The supplied candidate UD-Q4_K_XL / Unsloth Q8_0 `gemma4.target` log is
+reused: decode/eight-row mean KL 7.52968e-7 / 2.58145e-5 (22/22 top-1),
+prefill 3.71873e-5 (21/22), long-conversation 0.0264956. Greedy equivalence,
+siblings, sampled replay and snapshot checks pass in that log. Its reported
+repetitive-prefill discrepancy remains visible in the raw numerical output;
+no tolerances or goldens change.
+
+Production CMake `release` baseline/candidate SHA-256 prefixes are
+`a8038e8407374cae` / `bb1dd37daf0459c8`; identical compiler/linker
+fingerprints. Target `ef728c8e0c337fd1…`, draft `6326fb9f5e487aa8…`;
+full file hashes, sizes and commands are recorded in the artifact. Native
+pp2048/tg128 runs d16384 then d32768 in one process per ABBA arm, calibrated
+cap 15, seed 1, with the CLI prefill warmup; printed rates have 0.01-tok/s
+resolution. HTTP uses fresh `--sessions 1 --context 40960 --think off`
+servers, greedy seed 1, a short 16-token warmup, summary/essay400 then
+code-edit512. The fixed-policy 11-draft control warms code128 before the
+cached code512 request; lookup/tail rows remain ragged. Loading is excluded.
+
+Every HTTP completion hash and prompt/cache/output count matches within its
+case: summary cold 31,290 tokens; essay reuses 30,720 of 31,297, code edit
+22,528 of 31,161; the fixed-11 control reuses all 31,161. This establishes
+baseline/candidate text agreement for these histories. Independent upstream
+accuracy remains covered by the existing teacher checks. All paired
+request/phase timing checks remain within 5% and 3 ms. Small numerical
+gains below that threshold are reported as such; no material speedup is
+qualified. Native and HTTP timings have separate scopes, and overlapping
+server stages are not summed into request wall time.

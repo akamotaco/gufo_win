@@ -16,6 +16,7 @@
 
 #include "src/core/sampling.hpp"
 #include "src/models/gemma4/config.hpp"
+#include "src/models/gemma4/cycle_trace.hpp"
 #include "src/models/gemma4/draft_policy.hpp"
 #include "src/models/gemma4/draft_vocab.hpp"
 #include "src/models/gemma4/tokenizer.hpp"
@@ -60,6 +61,9 @@ struct ModelOptions {
   std::uint32_t min_draft_tokens = 1;
   /// Where the calibrated policy learns.
   DraftCalibrationScope draft_calibration = DraftCalibrationScope::kShared;
+  /// Appends one JSON line per verification cycle here (CycleRecord);
+  /// empty writes none.
+  std::string draft_trace_path;
 };
 
 class Session;
@@ -222,6 +226,10 @@ private:
   /// Calibrated-policy tables shared by every session ([greedy, sampled]
   /// drafts, then their siblings); guarded by mutex_.
   std::array<DraftCalibration, 4> calibration_;
+  /// Set by ModelOptions::draft_trace_path; forwards_ counts verification
+  /// forwards while tracing (guarded by mutex_).
+  std::unique_ptr<CycleTrace> trace_;
+  std::uint64_t forwards_{0};
   std::shared_ptr<SnapshotMemory> snapshot_memory_;
 
   friend class Session;
@@ -424,6 +432,8 @@ private:
     /// drafter time, for the sessions after it in a batch.
     float expected{1.0F};
     float draft_ms{0.0F};
+    /// Filled while the model traces cycles (ModelOptions::draft_trace_path).
+    std::optional<CycleRecord> trace;
     /// Set while a batch's drafter chains are still to run (DecodeBatch).
     std::unique_ptr<CycleDraft> draft;
   };
@@ -441,6 +451,11 @@ private:
   void FinishCycle(Cycle& cycle, std::span<const float> logits,
                    std::span<const std::uint32_t> argmax,
                    std::uint32_t first_hidden_row);
+  /// Records each chain row's acceptance probability and the greedy
+  /// runner-up hits in the cycle's trace, before verification.
+  void TraceRows(Cycle& cycle, std::span<const float> logits,
+                 std::span<const std::uint32_t> argmax,
+                 std::size_t chain) const;
 
   std::shared_ptr<Model> model_;
   std::unique_ptr<rocm::KvCache> cache_;

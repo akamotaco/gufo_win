@@ -169,6 +169,10 @@ static void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
       "Gemma 4 calibrated drafting: shared (learned across requests) or "
       "request (reset per request; exact seeded replay) (default: shared)",
       "Speculative", &opt.draft_calibration);
+  parser.AddOption("", "--draft-trace", "PATH",
+                   "Gemma 4 MTP: append one JSON line per verification cycle "
+                   "(prices, estimates, outcome, stage times) to PATH",
+                   "Speculative", &opt.draft_trace_path);
   parser.AddOption("", "--dspark-model", "PATH",
                    "Path to the DeepSeek V4 Flash DSpark support GGUF file",
                    "Speculative", &opt.dspark_model_path);
@@ -656,7 +660,7 @@ std::shared_ptr<models::qwen38_flash_next::Model> LoadFlashNextModel(
       (!opt.speculative_backend.empty() && opt.speculative_backend != "mtp") ||
       (opt.speculative_backend == "mtp" &&
        (opt.min_draft_tokens != 1 || !opt.draft_policy.empty() ||
-        !opt.draft_calibration.empty()))) {
+        !opt.draft_calibration.empty() || !opt.draft_trace_path.empty()))) {
     std::cerr << "Flash-Next requires ROCm and supports MTP with "
                  "--min-draft-tokens 1 and no --draft-policy\n";
     return nullptr;
@@ -924,11 +928,12 @@ static std::optional<PromptOptions> ParseTextOptions(
   if ((!opt.draft_policy.empty() && backend != "mtp" &&
        (backend != "dflash2" ||
         (opt.draft_policy != "fixed" && opt.draft_policy != "adaptive"))) ||
-      (!opt.draft_calibration.empty() && backend != "mtp")) {
+      ((!opt.draft_calibration.empty() || !opt.draft_trace_path.empty()) &&
+       backend != "mtp")) {
     if (error_msg != nullptr)
       *error_msg =
           "--draft-policy requires DFlash2 (fixed or adaptive) or MTP; "
-          "--draft-calibration requires MTP";
+          "--draft-calibration and --draft-trace require MTP";
     return std::nullopt;
   }
   if (opt.min_draft_tokens != 1 && backend == "dflash2") {

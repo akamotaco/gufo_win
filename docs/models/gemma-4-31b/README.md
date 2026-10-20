@@ -52,6 +52,16 @@ many a cycle verifies:
 policy learns across requests by default; `--draft-calibration request`
 restarts it with every request and prices a sampled cycle's drafts as if it
 ran alone, so a seeded sampled request replays exactly, batched or not.
+`--draft-trace PATH` (serve, prompt and bench) appends one JSON line per
+verification cycle: rows, copies and siblings, drafter steps, accepted and
+emitted tokens, the policy's prices, expected tokens, per-draft signals and
+acceptance estimates, the declined proposal's gain and cost, and steady-clock
+times for drafting, verification and emission. Every verified row also gets
+its acceptance probability given the rows before it (0/1 greedy, min(1, p/q)
+sampled), so a `--draft-policy fixed --draft-tokens 15` trace labels complete
+chains; `gemma4_draft_replay` (tools/gemma4/draft_replay.cpp) replays them
+and live traces through the production policy. Tracing does not change
+decoding.
 When the recent context repeats an earlier
 passage of at least 12 tokens (a rewritten file, a quoted log), the tokens that
 followed it fill the remaining draft slots and are verified like drafts (prompt

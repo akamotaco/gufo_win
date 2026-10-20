@@ -587,10 +587,12 @@ void PrintServeHelp(std::string_view program_name,
     std::string reasoning_mode = "auto";
     std::string reasoning_effort = "auto";
     std::string preserve_thinking = "auto";
+    std::int64_t reasoning_budget = -1;
     std::string speculative_backend;
     std::string dflash_model_path;
     std::string draft_policy;
     std::string draft_calibration;
+    std::string draft_trace_path;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
@@ -659,6 +661,11 @@ void PrintServeHelp(std::string_view program_name,
     parser.AddOption("", "--preserve-thinking", "MODE",
                      "Replay prior reasoning: on, off, or auto",
                      "Reasoning Defaults", &preserve_thinking);
+    parser.AddOption(
+        "", "--reasoning-budget", "N",
+        "Reasoning tokens before </think> is forced: -1 unlimited, 0 none "
+        "(default: -1)",
+        "Reasoning Defaults", &reasoning_budget);
 
     // Speculative & Hardware
     parser.AddOption("", "--speculative", "MODE",
@@ -677,6 +684,10 @@ void PrintServeHelp(std::string_view program_name,
         "Gemma 4 calibrated drafting: shared (learned across requests) or "
         "request (reset per request; exact seeded replay) (default: shared)",
         "Speculative", &draft_calibration);
+    parser.AddOption("", "--draft-trace", "PATH",
+                     "Gemma 4 MTP: append one JSON line per verification "
+                     "cycle (prices, estimates, outcome, stage times) to PATH",
+                     "Speculative", &draft_trace_path);
     parser.AddOption("", "--dspark-model", "PATH",
                      "Path to DeepSeek V4 Flash DSpark support GGUF file",
                      "Speculative", &dspark_model_path);
@@ -1147,10 +1158,12 @@ int RunServe(std::span<const char* const> args) {
     std::string reasoning_mode = "auto";
     std::string reasoning_effort = "auto";
     std::string preserve_thinking = "auto";
+    std::int64_t reasoning_budget = -1;
     std::string speculative_backend;
     std::string dflash_model_path;
     std::string draft_policy;
     std::string draft_calibration;
+    std::string draft_trace_path;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
@@ -1216,6 +1229,11 @@ int RunServe(std::span<const char* const> args) {
     llm_parser.AddOption("", "--preserve-thinking", "MODE",
                          "Replay prior reasoning: on, off, or auto",
                          "Reasoning Defaults", &preserve_thinking);
+    llm_parser.AddOption(
+        "", "--reasoning-budget", "N",
+        "Reasoning tokens before </think> is forced: -1 unlimited, 0 none "
+        "(default: -1)",
+        "Reasoning Defaults", &reasoning_budget);
     llm_parser.AddOption("", "--speculative", "MODE",
                          "HTTP draft backend: dspark, dflash2, mtp, or off",
                          "Speculative", &speculative_backend);
@@ -1232,6 +1250,11 @@ int RunServe(std::span<const char* const> args) {
         "Gemma 4 calibrated drafting: shared (learned across requests) or "
         "request (reset per request; exact seeded replay) (default: shared)",
         "Speculative", &draft_calibration);
+    llm_parser.AddOption(
+        "", "--draft-trace", "PATH",
+        "Gemma 4 MTP: append one JSON line per verification cycle (prices, "
+        "estimates, outcome, stage times) to PATH",
+        "Speculative", &draft_trace_path);
     llm_parser.AddOption("", "--dspark-model", "PATH",
                          "Path to DeepSeek V4 Flash DSpark support GGUF file",
                          "Speculative", &dspark_model_path);
@@ -1383,12 +1406,19 @@ int RunServe(std::span<const char* const> args) {
       std::cerr << "Error: speculative draft limits are invalid\n";
       return 2;
     }
-    const auto reasoning_defaults = ResolveReasoningDefaults(
+    auto reasoning_defaults = ResolveReasoningDefaults(
         reasoning_mode, reasoning_effort, preserve_thinking, &parse_err);
     if (!reasoning_defaults.has_value()) {
       std::cerr << "Error: " << parse_err << "\n";
       return 2;
     }
+    if (reasoning_budget < -1) {
+      std::cerr << "Error: --reasoning-budget must be -1 or nonnegative\n";
+      return 2;
+    }
+    if (reasoning_budget >= 0)
+      reasoning_defaults->budget_tokens =
+          static_cast<std::size_t>(reasoning_budget);
 
     server::TextSpeculativeConfig speculative_config;
     if (speculative_backend.empty() && !dspark_model_path.empty()) {
@@ -1413,14 +1443,15 @@ int RunServe(std::span<const char* const> args) {
       if ((!draft_policy.empty() && !mtp &&
            speculative_config.backend !=
                server::TextSpeculativeBackend::kDFlash) ||
-          (!draft_calibration.empty() && !mtp))
+          ((!draft_calibration.empty() || !draft_trace_path.empty()) && !mtp))
         throw std::invalid_argument(
-            "--draft-policy requires DFlash2 or MTP; --draft-calibration "
-            "requires MTP");
+            "--draft-policy requires DFlash2 or MTP; --draft-calibration and "
+            "--draft-trace require MTP");
       if (mtp) {
         // The MTP model validates its own policy names at load.
         speculative_config.mtp_draft_policy = draft_policy;
         speculative_config.mtp_draft_calibration = draft_calibration;
+        speculative_config.mtp_draft_trace_path = draft_trace_path;
       } else {
         speculative_config.dflash_policy =
             speculative::ParseDFlashDraftPolicy(draft_policy);

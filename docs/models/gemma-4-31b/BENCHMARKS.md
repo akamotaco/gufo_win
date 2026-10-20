@@ -307,3 +307,122 @@ token instead of 80).
 <!-- /bench -->
 
 ![Memory occupation](artifacts/charts/memory-q8.svg)
+
+## Verification attention kernel A/B (2026-10-19)
+
+The foldable DPP reductions compared with 04d70a14 on gfx1151, using
+production arithmetic flags. Full attention launch including merge; medians
+of seven alternating A/B rounds. Every output is byte-identical, including
+queries scaled 10× and 30×. These are per-layer kernel times.
+
+| Context | Rows | Before (µs) | After (µs) | Time change |
+| ---: | ---: | ---: | ---: | ---: |
+| 32,768 | 5 | 1749.5 | 1685.2 | -3.7% |
+| 32,768 | 8 | 2566.3 | 2415.1 | -5.9% |
+| 32,768 | 16 | 4939.0 | 4629.7 | -6.3% |
+| 65,536 | 5 | 3401.7 | 3267.9 | -3.9% |
+| 65,536 | 8 | 5033.9 | 4717.6 | -6.3% |
+| 65,536 | 16 | 10046.1 | 9405.4 | -6.4% |
+
+[Every row, depth, timing round and calibrated cost delta](artifacts/mtp-verification-2026-10-19.json).
+
+The production C1 check includes the calibrated cost tables. Native
+`gufo bench` pp2048/tg128 at d0, in ABBA order (tok/s):
+
+| Phase | Baseline 1 | Candidate 1 | Candidate 2 | Baseline 2 |
+| --- | ---: | ---: | ---: | ---: |
+| pp2048 | 575.85 | 574.21 | 575.11 | 575.23 |
+| tg128 | 31.38 | 31.43 | 31.42 | 31.37 |
+
+HTTP, two 400-token greedy answers about a frozen repository document, four
+fresh servers in ABBA order. Input is 31,290 tokens for the summary and
+31,297 for the essay; the latter restores the same 22,528-token prefix on
+every arm. Both completions are identical across every run. Throughput is
+decode-only, with the means calculated separately for each question:
+
+| Request | Baseline 1 / 2 (tok/s) | Candidate 1 / 2 (tok/s) | Decode gain |
+| --- | ---: | ---: | ---: |
+| summary | 23.41 / 23.39 | 23.63 / 23.68 | +1.1% |
+| essay | 20.44 / 20.44 | 20.62 / 20.61 | +0.8% |
+
+The first pair saves about 164 ms of decode on each answer. Cold summary
+prefill still takes 66–67 s and essay prefill about 21 s; these runs establish
+a decode gain, with little effect on total cold-request latency. Each
+request’s prefill/decode timing passes the 5% and 3 ms comparison; the raw
+usage, actual draft counts and output hashes are retained with the kernel
+evidence. This is a focused Gufo comparison against 04d70a14; the reference
+server tables above retain their original measurement dates.
+
+## MTP attention, depth ABBA (2026-10-20)
+
+UD-Q4_K_XL, production `release` binaries: `519dfe9c` (same source as
+`eb17a526`) against `422fbe4d`, including the recalibrated draft costs.
+Greedy, seed 1; fresh processes in baseline/candidate/candidate/baseline
+order. Rates below are decode-only or prefill-only, as labeled; gains use
+the two rates' means. Each request/phase is checked separately at 5% and
+3 ms in the artifact.
+
+Native `gufo bench -p 2048 -n 128 -d 16384,32768 -r 1 --verbose`.
+Prefill and decode are separate measurements; depth preparation is untimed.
+The synthetic repetitive decode exercises wide verification and prompt lookup.
+
+| Gemma 4 31B UD-Q4_K_XL MTP<br>Depth (tokens) | Phase | Baseline 1 / 2 (tok/s) | Candidate 1 / 2 (tok/s) | Gain |
+| ---: | --- | ---: | ---: | ---: |
+| 16,384 | pp2048 | 472.08 / 454.50 | 454.24 / 454.47 | -1.9% |
+| 16,384 | tg128 | 99.61 / 97.42 | 105.64 / 105.57 | +7.2% |
+| 32,768 | pp2048 | 392.43 / 392.45 | 392.17 / 392.40 | -0.0% |
+| 32,768 | tg128 | 87.36 / 87.43 | 86.99 / 86.90 | -0.5% |
+
+HTTP C1, context 40960, one short warmup per fresh server. Default-policy
+summary and essay: the original frozen ~31K-token document, 400 output
+tokens each. The code edit renames a dataclass in a supplied module after
+an archive of similar depth (512 output tokens). A separate fixed-policy
+11-draft control warms that shape with 128 output tokens, then repeats the
+same prompt for 512; the cap exercises the 9–12-row launch range with ragged lookup/tail rows.
+
+| Gemma 4 31B UD-Q4_K_XL MTP<br>Request | Baseline 1 / 2 (tok/s) | Candidate 1 / 2 (tok/s) | Gain |
+| --- | ---: | ---: | ---: |
+| Summary, default | 23.64 / 23.66 | 23.67 / 23.67 | +0.1% |
+| Essay, default | 20.34 / 20.35 | 20.64 / 20.65 | +1.5% |
+| Code edit, default | 75.97 / 75.99 | 77.43 / 77.44 | +1.9% |
+| Code edit, fixed 11 drafts | 62.51 / 62.53 | 63.55 / 63.52 | +1.6% |
+
+[All rounds, counts, hashes, timings and phase verdicts](artifacts/mtp-attention-e2e-2026-10-20.json).
+
+All HTTP texts and token/cache counts match across the four arms. Default
+code edit uses the same 41 cycles, 537 proposals and 470 accepted proposals
+on every arm. The 11-draft control uses 55 cycles and 489 proposals, including
+ragged lookup/tail rows. Its gain is below the 5% timing threshold.
+
+The native 16K decode gain passes both paired 5% / 3 ms checks; 32K decode
+is neutral. At 16K the candidate uses eight cycles rather than nine. At 32K
+both use nine, but neural proposals increase from 10 to 16 while lookup
+copies fall from 108 to 105, with the same 118 accepted proposals.
+
+Default HTTP whole-request latency changes by less than 1%: summary
+83.97 → 84.00 s, essay 40.92 → 40.63 s, code edit 27.81 → 27.68 s.
+Every paired prefill, decode, TTFT and whole-request comparison remains
+within 5% / 3 ms. **The essay maximum inter-token gap fails that check:**
+154.02 / 153.92 → 167.80 / 167.33 ms. Summary/code snapshot timings have
+mixed flags and remain inconclusive. This does not establish an overall
+latency improvement. The historical llama.cpp tables retain their original
+measurements.
+
+A separate cost-only ABBA keeps the new kernel and restores the previous
+31B verification prices in a diagnostic binary. Summary/essay schedules
+return to baseline (602 proposals / 117 cycles; 554 / 144). Essay maximum
+gap is 152.36 / 152.48 ms against matched baselines 152.10 / 153.94 ms;
+its decode gain is +0.5%, below threshold. This supports a pricing-driven
+throughput/pause tradeoff in the original candidate. The diagnostic summary
+snapshot timer flags slower in both pairs, but its 97.45–97.84 ms falls
+inside the 86.56–99.49 ms spread of four unchanged-baseline controls for
+identical snapshot bytes; attribution remains inconclusive. All observations
+are retained separately from the `422fbe4d` results; implementation is unchanged.
+
+A per-cycle trace of both price tables in one binary explains the essay gap
+([every cycle](artifacts/mtp-cycle-trace-2026-10-20.json)). At position
+31463 both draft the same seven tokens; the new prices then add two
+siblings, verify 10 rows in 164.9 / 167.4 ms and emit two tokens, where the
+old prices verify 8 rows in 152.1 / 152.3 ms and emit one. Every other
+essay cycle stays at or below ~152.7 ms. The larger maximum gap is one
+cycle delivering an extra token earlier, not a longer pause per token.

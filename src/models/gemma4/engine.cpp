@@ -274,6 +274,18 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     }
     m->draft_weights_ = std::make_unique<DraftWeights>(std::move(*draft));
   }
+  if (!options.draft_trace_path.empty()) {
+    if (!m->draft_weights_) {
+      Fail(error_msg, "gemma4 draft trace requires an MTP drafter");
+      return nullptr;
+    }
+    try {
+      m->trace_ = std::make_unique<CycleTrace>(options.draft_trace_path);
+    } catch (const std::exception& e) {
+      Fail(error_msg, e.what());
+      return nullptr;
+    }
+  }
   // Only the mixture-of-experts cycle is short enough for the smaller draft
   // head to pay (draft_vocab.hpp).
   const std::vector<TokenId> draft_order =
@@ -769,6 +781,29 @@ float TopShare(const qwen38_flash_next::MtpCandidateLogits& candidates) {
   return static_cast<float>(1.0 / total);
 }
 
+/// The two largest softmax shares among the top-64 logits.
+std::pair<float, float> TopTwoShares(
+    const qwen38_flash_next::MtpCandidateLogits& candidates) {
+  float top = -INFINITY;
+  float second = -INFINITY;
+  for (std::size_t i = 0; i < candidates.size; ++i) {
+    const float l = candidates.logits[i];
+    if (l > top) {
+      second = top;
+      top = l;
+    } else if (l > second) {
+      second = l;
+    }
+  }
+  double total = 0.0;
+  for (std::size_t i = 0; i < candidates.size; ++i) {
+    total += std::exp(static_cast<double>(candidates.logits[i] - top));
+  }
+  const double runner =
+      candidates.size > 1 ? std::exp(static_cast<double>(second - top)) : 0.0;
+  return {static_cast<float>(1.0 / total), static_cast<float>(runner / total)};
+}
+
 /// The argmax candidate, lowest token id on ties.
 std::int32_t TopToken(const qwen38_flash_next::MtpCandidateLogits& candidates) {
   std::size_t best = 0;
@@ -936,6 +971,9 @@ struct Session::CycleDraft {
                    chain_steps, alone ? DraftBatch{} : others),
         share(batch_share),
         context{*owner.pending_} {
+    if (cycle.trace) {
+      cycle.trace->step_cap = chain_steps;
+    }
     // A request's first cycle copies nothing (PromptLookup::Step).
     lookup = session.lookup_.Step(cycle.position);
     if (lookup) {
@@ -1060,8 +1098,25 @@ struct Session::CycleDraft {
           calibrated.SetOthers({.rows = share->rows - own_rows,
                                 .expected = share->expected - before});
         }
+        CycleRecord* trace = cycle.trace ? &*cycle.trace : nullptr;
+        const float estimate =
+            trace != nullptr
+                ? session.Calibration(cycle.sampled).Estimate(signal)
+                : 0.0F;
         if (!calibrated.Include(signal)) {
+          const CalibratedChain::Decision d = calibrated.LastDecision();
+          if (trace != nullptr && d.compared) {
+            trace->stop = CycleRecord::Stop{.signal = signal,
+                                            .estimate = estimate,
+                                            .gain = d.gain,
+                                            .cost = d.cost};
+          }
           return true;
+        }
+        if (trace != nullptr) {
+          const CalibratedChain::Decision d = calibrated.LastDecision();
+          trace->estimates.push_back(estimate);
+          trace->margins.push_back(d.compared ? d.gain - d.cost : 0.0F);
         }
         if (share != nullptr) {
           share->rows += 1;
@@ -1082,9 +1137,19 @@ struct Session::CycleDraft {
   }
 
   rocm::DraftProposal Propose(const qwen38_flash_next::MtpCandidateLogits& c) {
+    if (cycle.trace) {
+      ++cycle.trace->drafter_steps;
+      cycle.trace->proposal_signals.push_back(DraftSignal(c));
+      const auto [top, second] = TopTwoShares(c);
+      cycle.trace->proposal_top.push_back(top);
+      cycle.trace->proposal_margin.push_back(top - second);
+    }
     if (cycle.sampled) {
       auto proposal =
           qwen38_flash_next::SampleMtpProposal(c, draft_sampler, &draft_rng);
+      if (cycle.trace) {
+        cycle.trace->proposal_q.push_back(proposal.probability);
+      }
       if (Stop(cycle.proposals.size(), proposal.probability, c)) {
         (void)Copy();
         return rocm::DraftProposal{};
@@ -1095,6 +1160,9 @@ struct Session::CycleDraft {
       context.push_back(static_cast<std::int32_t>(proposal.token));
       return rocm::DraftProposal{
           .token = static_cast<std::int32_t>(proposal.token), .last = Copy()};
+    }
+    if (cycle.trace) {
+      cycle.trace->proposal_q.push_back(cycle.trace->proposal_top.back());
     }
     if (Stop(context.size() - 1, TopShare(c), c)) {
       (void)Copy();
@@ -1148,6 +1216,10 @@ bool Session::DecodeStep(std::size_t max_tokens,
   if (cycle.done) {
     return true;
   }
+  if (cycle.trace) {
+    cycle.trace->drafted_ns = CycleTrace::Now();
+    cycle.trace->forward = model_->forwards_++;
+  }
   auto& executor = *model_->executor_;
   const bool use_argmax =
       !cycle.sampled && sampler.config().can_use_unmodified_argmax();
@@ -1164,6 +1236,9 @@ bool Session::DecodeStep(std::size_t max_tokens,
       argmax = executor.ReadArgmax(cycle.rows.size());
     } else {
       logits = executor.ReadLogits(cycle.rows.size());
+    }
+    if (cycle.trace) {
+      cycle.trace->verified_ns = CycleTrace::Now();
     }
     FinishCycle(cycle, logits, argmax, 0);
   } catch (const std::exception& e) {
@@ -1207,6 +1282,11 @@ bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
   result->tokens.clear();
   result->stop = false;
   cycle.done = true;
+  cycle.trace.reset();
+  if (model_->trace_) {
+    cycle.trace.emplace();
+    cycle.trace->begin_ns = CycleTrace::Now();
+  }
   if (cycle.max_tokens == 0) {
     return true;
   }
@@ -1369,15 +1449,89 @@ void Session::FinishDraft(Cycle& cycle) {
       draft.TakeRow();
       cycle.siblings.push_back(alt.token);
       cycle.sibling_signals.push_back(alt.signal);
+      if (cycle.trace) {
+        cycle.trace->sibling_estimates.push_back(hits.Estimate(alt.signal));
+      }
       ++rows;
     }
     cycle.rows.insert(cycle.rows.end(), cycle.siblings.begin(),
                       cycle.siblings.end());
     cycle.expected = draft.calibrated.Expected();
     cycle.draft_ms = draft.calibrated.DraftMs();
+    if (cycle.trace) {
+      cycle.trace->priced_draft_ms = cycle.draft_ms;
+      cycle.trace->priced_verify_ms = draft.calibrated.Verify(rows);
+      cycle.trace->expected = cycle.expected;
+    }
+  }
+  if (cycle.trace) {
+    for (std::size_t i = 0; i < draft.drafts.size(); ++i) {
+      const Alternative alt =
+          i < draft.alternatives.size() ? draft.alternatives[i] : Alternative{};
+      cycle.trace->runner_ups.push_back(alt.token);
+      cycle.trace->runner_up_signals.push_back(alt.signal);
+    }
   }
   cycle.small_head = draft.small_head;
   cycle.draft.reset();
+}
+
+void Session::TraceRows(Cycle& cycle, std::span<const float> logits,
+                        std::span<const std::uint32_t> argmax,
+                        std::size_t chain) const {
+  CycleRecord& trace = *cycle.trace;
+  const std::size_t vocab = model_->VocabSize();
+  const auto target = [&](std::size_t r) {
+    if (!argmax.empty()) {
+      return static_cast<std::int32_t>(argmax[r]);
+    }
+    const auto row = logits.subspan(r * vocab, vocab);
+    return static_cast<std::int32_t>(std::ranges::max_element(row) -
+                                     row.begin());
+  };
+  for (std::size_t r = 0; r + 1 < chain; ++r) {
+    const bool beside = r < trace.runner_ups.size();
+    const std::int32_t up = beside ? trace.runner_ups[r] : -1;
+    if (!cycle.sampled) {
+      const std::int32_t t = target(r);
+      trace.row_acceptance.push_back(t == cycle.rows[r + 1] ? 1.0F : 0.0F);
+      if (beside) {
+        trace.runner_up_acceptance.push_back(up >= 0 && t == up ? 1.0F : 0.0F);
+      }
+      continue;
+    }
+    const auto& q = cycle.proposals[r];
+    const auto p =
+        cycle.sampler->Distribution(logits.subspan(r * vocab, vocab));
+    trace.row_acceptance.push_back(static_cast<float>(std::min(
+        1.0, p.probability(q.token) / static_cast<double>(q.probability))));
+    if (!beside) {
+      continue;
+    }
+    // VerifyWithSibling's second stage.
+    const auto mass = [&q](sampling::TokenId token) {
+      for (std::size_t i = 0; i < q.size; ++i) {
+        if (q.ids[i] == token) {
+          return static_cast<double>(q.probabilities[i]);
+        }
+      }
+      return 0.0;
+    };
+    double total = 0.0;
+    for (const auto& entry : p.entries()) {
+      total += std::max(entry.value - mass(entry.token), 0.0);
+    }
+    const double rest = 1.0 - static_cast<double>(q.probability);
+    double hit = 0.0;
+    if (up >= 0 && total > 0.0 && rest > 0.0) {
+      const auto sibling = static_cast<sampling::TokenId>(up);
+      const double own = mass(sibling) / rest;
+      const double residual =
+          std::max(p.probability(sibling) - mass(sibling), 0.0) / total;
+      hit = own > 0.0 ? std::min(1.0, residual / own) : 0.0;
+    }
+    trace.runner_up_acceptance.push_back(static_cast<float>(hit));
+  }
 }
 
 void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
@@ -1405,6 +1559,9 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
     return static_cast<TokenId>(
         sampler.Sample(logits.subspan(r * vocab, vocab)));
   };
+  if (cycle.trace) {
+    TraceRows(cycle, logits, argmax, chain);
+  }
   std::size_t row = 0;
   std::uint64_t accepted = 0;
   bool agrees = false;
@@ -1440,6 +1597,9 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
   if (row < siblings && row + 1 < chain && !agrees) {
     Calibration(cycle.sampled, true)
         .Observe(cycle.sibling_signals[row], sibling);
+    if (cycle.trace) {
+      cycle.trace->sibling_observed = sibling;
+    }
   }
   // An accepted sibling (the target's own token) commits in place of the
   // rejected draft, and its row's token follows.
@@ -1456,6 +1616,20 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
   } else {
     // Rows [0, row] are committed; the last emitted token becomes pending.
     tokens_.insert(tokens_.end(), rows.begin(), rows.begin() + row + 1);
+  }
+  if (cycle.trace && cycle.sampled && !logits.empty()) {
+    // The distribution the pending token was drawn from.
+    const auto p = sampler.Distribution(logits.subspan(last * vocab, vocab));
+    double top = 0.0;
+    double entropy = 0.0;
+    for (const auto& entry : p.entries()) {
+      top = std::max(top, entry.value);
+      if (entry.value > 0.0) {
+        entropy -= entry.value * std::log(entry.value);
+      }
+    }
+    cycle.trace->pending_top = static_cast<float>(top);
+    cycle.trace->pending_entropy = static_cast<float>(entropy);
   }
   const auto committed_row =
       first_hidden_row + static_cast<std::uint32_t>(last);
@@ -1489,6 +1663,9 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
         std::min(row + (row + 1 < chain ? 1 : 0), cycle.signals.size());
     for (std::size_t j = 0; j < judged; ++j) {
       calibration.Observe(cycle.signals[j], j < row || agrees);
+      if (cycle.trace) {
+        cycle.trace->observed.push_back(j < row || agrees);
+      }
     }
   }
   const std::size_t copies_kept = accepted > mtp ? accepted - mtp : 0;
@@ -1500,6 +1677,21 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
     stats_.small_head_cycles += 1;
     stats_.small_head_drafted += mtp;
     stats_.small_head_accepted += std::min(accepted, mtp);
+  }
+  if (cycle.trace) {
+    CycleRecord& trace = *cycle.trace;
+    trace.position = cycle.position;
+    trace.sampled = cycle.sampled;
+    trace.rows = static_cast<std::uint32_t>(rows.size());
+    trace.copied = static_cast<std::uint32_t>(cycle.copied);
+    trace.siblings = static_cast<std::uint32_t>(siblings);
+    trace.accepted = static_cast<std::uint32_t>(accepted);
+    trace.sibling_accepted = sibling;
+    trace.small_head = cycle.small_head;
+    trace.emitted = static_cast<std::uint32_t>(result->tokens.size());
+    trace.signals = cycle.signals;
+    trace.end_ns = CycleTrace::Now();
+    model_->trace_->Write(trace);
   }
 }
 
@@ -1603,6 +1795,15 @@ bool Session::DecodeBatch(std::span<BatchDecode> decodes) {
   if (active.empty()) {
     return ok;
   }
+  if (model.trace_) {
+    const std::int64_t drafted = CycleTrace::Now();
+    for (const std::size_t i : active) {
+      cycles[i].trace->drafted_ns = drafted;
+      cycles[i].trace->forward = model.forwards_;
+      cycles[i].trace->sessions = static_cast<std::uint32_t>(active.size());
+    }
+    ++model.forwards_;
+  }
   auto& executor = *model.executor_;
   bool use_argmax = true;
   for (const std::size_t i : active) {
@@ -1621,6 +1822,12 @@ bool Session::DecodeBatch(std::span<BatchDecode> decodes) {
       argmax = executor.ReadArgmax(tokens.size());
     } else {
       logits = executor.ReadLogits(tokens.size());
+    }
+    if (model.trace_) {
+      const std::int64_t verified = CycleTrace::Now();
+      for (const std::size_t i : active) {
+        cycles[i].trace->verified_ns = verified;
+      }
     }
     const std::size_t vocab = model.VocabSize();
     std::uint32_t row0 = 0;

@@ -69,10 +69,10 @@ public:
   [[nodiscard]] float Estimate(float signal) const noexcept;
   void Observe(float signal, bool accepted) noexcept;
   void Reset() noexcept;
-
-private:
+  /// The bin a signal falls in.
   [[nodiscard]] static std::size_t Bin(float signal) noexcept;
 
+private:
   std::array<float, kBins> accepted_{};
   std::array<float, kBins> seen_{};
 };
@@ -116,10 +116,19 @@ public:
   [[nodiscard]] float Expected() const noexcept { return expected_; }
   /// Drafter time of the steps decided so far (a stop still ran its step).
   [[nodiscard]] float DraftMs() const noexcept { return costs_.draft[steps_]; }
+  /// Price of a forward verifying `rows` of this session's rows beside the
+  /// other sessions'.
+  [[nodiscard]] float Verify(std::uint32_t rows) const noexcept;
+  /// The last Include's comparison past `min_drafts`: the expected gain of
+  /// stopping later against the cost (the chain stops when gain < cost).
+  struct Decision {
+    bool compared{false};
+    float gain{0.0F};
+    float cost{0.0F};
+  };
+  [[nodiscard]] Decision LastDecision() const noexcept { return decision_; }
 
 private:
-  [[nodiscard]] float Verify(std::uint32_t rows) const noexcept;
-
   const DraftCalibration& calibration_;
   const DraftCosts& costs_;
   std::uint32_t min_drafts_;
@@ -132,6 +141,7 @@ private:
   std::array<float, 16> accept_{};
   float survival_{1.0F};
   float expected_{1.0F};  ///< the target's own token is always emitted
+  Decision decision_;
 };
 
 }  // namespace gufo::models::gemma4
