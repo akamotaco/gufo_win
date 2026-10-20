@@ -35,6 +35,11 @@ g4::CycleRecord Sample() {
   r.margins = {0.0F, 1.5F};
   r.sibling_estimates = {0.96875F};
   r.proposal_signals = {0.5F, 0.75F, 0.25F};
+  r.proposal_top = {0.5F, 0.75F, 0.25F};
+  r.proposal_margin = {0.25F, 0.5F, 0.0F};
+  r.proposal_q = {0.5F, 0.75F, 0.25F};
+  r.pending_top = 0.75F;
+  r.pending_entropy = 1.5F;
   r.row_acceptance = {1.0F, 0.5F};
   r.runner_ups = {42, -1};
   r.runner_up_signals = {0.25F, 0.0F};
@@ -73,7 +78,9 @@ void CheckFormat() {
   Require(ups != nullptr && ups->size() == 2 &&
               v.find("runner_up_acceptance")->size() == 2 &&
               v.find("row_acceptance")->size() == 2 &&
-              v.find("proposal_signals")->size() == 3,
+              v.find("proposal_signals")->size() == 3 &&
+              v.find("proposal_q")->size() == 3 &&
+              v.member_double("pending_entropy") == 1.5,
           "row labels and runner-ups");
   Require(
       v.find("observed")->size() == 2 && v.find("sibling_observed")->is_bool(),

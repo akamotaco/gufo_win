@@ -51,6 +51,17 @@ struct CycleRecord {
   /// Every drafter proposal's signal under any policy, a declined last one
   /// included.
   std::vector<float> proposal_signals;
+  /// Per proposal, the drafter's top-1 share and top-1 minus top-2 share
+  /// among its top-64 logits, and the proposal's own probability (sampled:
+  /// q of the drawn token; greedy: the top-1 share).
+  std::vector<float> proposal_top;
+  std::vector<float> proposal_margin;
+  std::vector<float> proposal_q;
+  /// Sampled: the top probability and entropy (nats) of the request
+  /// sampler's distribution the next pending token was drawn from (-1 when
+  /// not recorded).
+  float pending_top{-1.0F};
+  float pending_entropy{-1.0F};
   /// Per verified chain row past the pending one (MTP drafts, then
   /// copies): the probability that verification accepts it given the rows
   /// before it accepted, whatever happened to them. Greedy: 1 when the

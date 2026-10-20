@@ -41,6 +41,11 @@ std::string FormatCycleRecord(const CycleRecord& r) {
   v["margins"] = Floats(r.margins);
   v["sibling_estimates"] = Floats(r.sibling_estimates);
   v["proposal_signals"] = Floats(r.proposal_signals);
+  v["proposal_top"] = Floats(r.proposal_top);
+  v["proposal_margin"] = Floats(r.proposal_margin);
+  v["proposal_q"] = Floats(r.proposal_q);
+  v["pending_top"] = static_cast<double>(r.pending_top);
+  v["pending_entropy"] = static_cast<double>(r.pending_entropy);
   v["row_acceptance"] = Floats(r.row_acceptance);
   json::Value runner_ups = json::Value::array();
   for (const std::int32_t token : r.runner_ups) {

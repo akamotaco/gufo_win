@@ -40,7 +40,6 @@ gaps. MTP verify cycles at d0 (~101 ms GPU): target verification projections
 | 5 | Global prefill attention redesign: two heads per wave over one shared LDS arena | Prefill at depth | Hard | +1.5–3% at 32K, +3–6% at 128K | Medium |
 | 6 | AR decode GEMV | Decode AR | Hard | +2–4% | Low |
 | 7 | Measure and validate MTP cycle cost estimates | Decode MTP, 31B and 26B | Medium | Bounded by the oracle replay below; the 2026-10-05 remeasured tables measured neutral | Low |
-| 8 | Benchmark acceptance calibration accuracy and benefit | Decode MTP, 31B and 26B | Medium | Bounded by the best fixed length per workload | Low |
 
 ### 1. MTP verification projections
 
@@ -153,8 +152,9 @@ Next steps, in order:
    throughput unchanged (EXPERIMENTS.md). Other target quantizations (Q8,
    QAT) and drafters keep these tables: pricing by the loaded files' bytes
    would cover them deterministically.
-2. Bound the gain first: replay recorded cycles offline with each cycle's
-   measured costs (oracle prices) and with tables perturbed by ±2/5/10%;
+2. Bound the gain first: replay labelled chains (`gemma4_draft_replay
+   simulate` over a `--draft-policy fixed --draft-tokens 15` trace) with each
+   cycle's measured costs (oracle prices) and with tables perturbed by ±2/5/10%;
    count changed decisions and their expected tokens per millisecond. Stop
    if perfect prices change little.
 3. Extend the trace to other depths, the 26B (text-dependent expert routing)
@@ -166,40 +166,6 @@ prices unchanged, then new prices as a separate scheduling change, on both
 models, with prose and high-acceptance code. Judge streaming gaps per
 emitted token (or p99 alongside tokens per cycle), not as one maximum: a
 longer cycle that emits more tokens is not a pause regression.
-
-### 8. Benchmark acceptance calibration accuracy and benefit
-
-Added 2026-10-20. Calibrated-policy replay and HTTP comparisons, including
-rejected rules, are in [EXPERIMENTS.md](EXPERIMENTS.md). The calibration
-labels accepted chain drafts and the first rejection (`engine.cpp`
-`FinishCycle`); siblings learn in their own table. Establish accuracy and the
-benefit of learning before changing the signal, bins, history weighting or
-uncertainty handling.
-
-- Bound the gain: sweep fixed draft lengths and take the best per workload.
-  If calibrated is within ~2% of that, learning has little headroom.
-- From the per-cycle trace (it records each kept draft's signal and
-  estimate), score predictions with Brier/log loss and a reliability
-  diagram, with sample counts per bin, and compare predicted against realized
-  tokens per cycle, the quantity the decision uses.
-- Test the model's two assumptions: acceptance depends on the signal bin, not
-  on draft position, and successive acceptances are independent (survival is
-  their product). Plot calibration per position and correlate consecutive
-  outcomes.
-- The policy only observes drafts it chose to verify, so deep low-signal bins
-  stay at the prior; controlled draft-length probes fill them.
-- Cover prose, code writing/editing and repetitive text on both models, short
-  and long contexts, greedy and sampled; separate fresh from shared history,
-  test transitions (code to prose and reverse) and use held-out prompts.
-- With identical prices, compare learned calibration against its frozen
-  prior, the confidence floors and fixed lengths. Offline replay is a
-  diagnostic: a changed policy changes later histories, so confirm variants
-  with matched HTTP ABBA and native runs.
-
-Report prediction accuracy separately from throughput, latency, streaming
-gaps and wasted drafts: drafting fewer tokens can raise the acceptance rate
-while slowing generation. Keep numerical quality, greedy equivalence and
-seeded sampled replay/snapshot checks for any policy change.
 
 ## Opt-in levers (quality trade, default off)
 
