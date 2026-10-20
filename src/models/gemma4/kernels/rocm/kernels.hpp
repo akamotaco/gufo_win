@@ -218,7 +218,7 @@ void GatherRows(const float* src, const std::uint32_t* index, float* dst,
 /// `from` over that of key `to` (keys at slot key % ring[l] where ring[l] >
 /// 0), widths in values per row.
 struct MoveKeyArgs {
-  static constexpr std::uint32_t kMaxLayers = 64;
+  static constexpr std::uint32_t kMaxLayers = 96;
   std::uint16_t* k[kMaxLayers];
   std::uint16_t* v[kMaxLayers];
   std::uint32_t k_width[kMaxLayers];

@@ -4,6 +4,14 @@ Changes made in this fork's Gemma 4 engine, newest first. Each entry is a brief
 summary; its pull request has the details, measurements and validation.
 Upstream Gufo's changes are in [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-20: MTP on depth-upscaled 31B targets ([#4](https://github.com/franzmoca/gufo/pull/4))
+
+- MTP decoding accepts targets of up to 96 layers instead of 64, so
+  depth-upscaled 31B models such as BeaverAI/Spectre-37B-v1a (72 layers) run
+  with the 31B drafter instead of failing at the first verification cycle:
+  greedy decode 9.8 to 18.0 tok/s on Spectre-37B-v1a Q4_K_M. 26B-A4B and 31B
+  are unchanged.
+
 ## 2026-10-19: Continuations from the component cache ([#3](https://github.com/franzmoca/gufo/pull/3))
 
 - Gemma 4 serves continuations through upstream's component cache instead of
