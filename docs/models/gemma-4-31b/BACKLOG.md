@@ -1,7 +1,7 @@
 # Gemma 4 performance backlog
 
 Open performance work for the Gemma 4 engine (31B, 31B QAT, 26B-A4B), as of
-2026-10-17 on branch `feat/gemma-perf`. Measured results, including every
+2026-10-20 on branch `feat/gemma-mtp`. Measured results, including every
 rejected attempt, are in [EXPERIMENTS.md](EXPERIMENTS.md) and the
 [26B log](../gemma-4-26b-a4b/EXPERIMENTS.md); read the matching rows before
 retrying anything listed here. Impact figures are estimates on 31B
@@ -39,8 +39,8 @@ gaps. MTP verify cycles at d0 (~101 ms GPU): target verification projections
 | 4 | Prefill projections past ~70% of the WMMA ceiling | Prefill, all depths | Hard | +2–5% | Low |
 | 5 | Global prefill attention redesign: two heads per wave over one shared LDS arena | Prefill at depth | Hard | +1.5–3% at 32K, +3–6% at 128K | Medium |
 | 6 | AR decode GEMV | Decode AR | Hard | +2–4% | Low |
-| 7 | Measure and validate MTP cycle cost estimates | Decode MTP, 31B and 26B | Medium | Unmeasured; scheduling and pause stability | Unmeasured |
-| 8 | Benchmark acceptance calibration accuracy and benefit | Decode MTP, 31B and 26B | Medium | Unmeasured | Unmeasured |
+| 7 | Measure and validate MTP cycle cost estimates | Decode MTP, 31B and 26B | Medium | Bounded by the oracle replay below; the 2026-10-05 remeasured tables measured neutral | Low |
+| 8 | Benchmark acceptance calibration accuracy and benefit | Decode MTP, 31B and 26B | Medium | Bounded by the best fixed length per workload | Low |
 
 ### 1. MTP verification projections
 
@@ -132,71 +132,73 @@ decode GEMV rows of EXPERIMENTS.md.
 
 ### 7. Measure and validate MTP cycle cost estimates
 
-Added 2026-10-20. The controller decides whether another proposal pays by
-comparing expected output with estimated draft and verification costs.
-Updating those estimates from kernel savings can change the schedule: in the
-[depth ABBA and pricing diagnostic](artifacts/mtp-attention-e2e-2026-10-20.json),
-31B essay decode improved 1.5%, but the maximum streaming gap grew from about
-154 to 168 ms. Keeping the new kernel and restoring the old dense verification
-prices restored baseline aggregate schedules and removed that gap increase in
-a separate matched ABBA. The exact cycle responsible was not traced.
+Added 2026-10-20. The controller verifies another proposal while its expected
+tokens per millisecond of extra work match the cycle's rate, using drafter
+and verification prices from `draft_policy.cpp`. Only price ratios steer it.
 
-Measure before redesigning the model:
+What is known. The essay maximum-gap flag after `422fbe4d` is one cycle that
+adds two sibling rows and emits two tokens instead of one (164.9/167.4 vs
+152.1/152.3 ms); no other cycle grows
+([per-cycle trace](artifacts/mtp-cycle-trace-2026-10-20.json)). At ~31K on
+31B, measured verification is 0.92–0.95 of its price, flat over 2–16 rows,
+and drafter steps 1.11–1.14: the table holds QAT-drafter steps; the
+standard assistant's measured 8–12% slower from 4K on and 4% faster at d0
+(EXPERIMENTS.md, 2026-10-05). Host time between cycles is ~0.02 ms. Swapping
+in those remeasured tables then measured neutral end to end.
 
-- Measure complete drafter steps and target verification forwards with the
-  actual target/drafter files, across context depths and verification widths.
-  Include prose and code, especially for the 26B's text-dependent expert
-  routing. Probe both sides of kernel launch boundaries.
-- Record per-cycle predicted and actual costs, depth, total verification rows,
-  neural steps including discarded terminal proposals, lookup copies,
-  siblings, accepted/emitted tokens and concurrency. Separate GPU durations
-  from host overhead and queueing; align cycles with streamed token gaps.
-- Evaluate prediction error on held-out workloads, especially the marginal
-  cost of one more proposal. Fit the smallest table or model that explains
-  consequential errors; preserve dispatch boundaries where interpolation
-  fails. Quantify measurement variation before adding a decision margin.
+Next steps, in order:
 
-Hold acceptance calibration constant while evaluating cost changes. First
-qualify kernel changes with prices unchanged, then qualify new prices as a
-separate scheduling change. Use matched native and HTTP ABBA on both models,
-including long-context prose and high-acceptance code. Retain every request
-and phase, apply the 5% and 3 ms rules, and inspect streaming gaps separately
-from throughput. Better cost prediction alone does not impose a pause budget;
-an explicit latency objective is a separate policy experiment. No speedup or
-online timing adaptation is assumed.
+1. Price the drafter actually loaded. Measure its step in place (the
+   per-cycle trace's drafting time over drafter steps) for each supported
+   drafter at each table depth, or key the table by drafter; qualify the
+   change alone with matched ABBA.
+2. Bound the gain first: replay recorded cycles offline with each cycle's
+   measured costs (oracle prices) and with tables perturbed by ±2/5/10%;
+   count changed decisions and their expected tokens per millisecond. Stop
+   if perfect prices change little.
+3. Extend the trace to other depths, the 26B (text-dependent expert routing)
+   and sampled decoding, probing both sides of launch boundaries; fit the
+   smallest table that explains consequential errors.
+
+Rules: hold acceptance calibration constant; qualify kernel changes with
+prices unchanged, then new prices as a separate scheduling change, on both
+models, with prose and high-acceptance code. Judge streaming gaps per
+emitted token (or p99 alongside tokens per cycle), not as one maximum: a
+longer cycle that emits more tokens is not a pause regression.
 
 ### 8. Benchmark acceptance calibration accuracy and benefit
 
-Added 2026-10-20. Existing calibrated-policy replay and HTTP comparisons are
-in [EXPERIMENTS.md](EXPERIMENTS.md), including rejected alternative rules.
-The unit tests verify learning arithmetic, while end-to-end timings combine
-acceptance estimates with cost estimates and scheduling. Establish current
-prediction accuracy and the benefit of learning before changing the signal,
-bins, history weighting or uncertainty handling.
+Added 2026-10-20. Calibrated-policy replay and HTTP comparisons, including
+rejected rules, are in [EXPERIMENTS.md](EXPERIMENTS.md). The calibration
+labels accepted chain drafts and the first rejection (`engine.cpp`
+`FinishCycle`); siblings learn in their own table. Establish accuracy and the
+benefit of learning before changing the signal, bins, history weighting or
+uncertainty handling.
 
-- Log each acceptance prediction before verification, its signal, draft
-  position and valid observed outcome. Accepted chain proposals and the first
-  rejection provide labels; later proposals must not be counted as additional
-  failures. Measure predicted versus observed acceptance, sample counts and
-  probability error, including uncertainty for sparsely observed bins.
+- Bound the gain: sweep fixed draft lengths and take the best per workload.
+  If calibrated is within ~2% of that, learning has little headroom.
+- From the per-cycle trace (it records each kept draft's signal and
+  estimate), score predictions with Brier/log loss and a reliability
+  diagram, with sample counts per bin, and compare predicted against realized
+  tokens per cycle, the quantity the decision uses.
+- Test the model's two assumptions: acceptance depends on the signal bin, not
+  on draft position, and successive acceptances are independent (survival is
+  their product). Plot calibration per position and correlate consecutive
+  outcomes.
+- The policy only observes drafts it chose to verify, so deep low-signal bins
+  stay at the prior; controlled draft-length probes fill them.
 - Cover prose, code writing/editing and repetitive text on both models, short
-  and long contexts, greedy and sampled decoding. Separate fresh calibration
-  from shared history; test transitions such as code to prose and reverse the
-  request order. Use separate development and held-out evaluation prompts.
-- With identical cost estimates, compare current learned calibration against
-  its frozen initial estimates, confidence thresholds and several fixed draft
-  lengths. Controlled draft-length probes should check positions the current
-  stopping rule rarely reaches. Offline replay is diagnostic: a changed policy
-  changes subsequent histories, so confirm useful variants with matched HTTP
-  ABBA and native measurements.
+  and long contexts, greedy and sampled; separate fresh from shared history,
+  test transitions (code to prose and reverse) and use held-out prompts.
+- With identical prices, compare learned calibration against its frozen
+  prior, the confidence floors and fixed lengths. Offline replay is a
+  diagnostic: a changed policy changes later histories, so confirm variants
+  with matched HTTP ABBA and native runs.
 
-Report prediction accuracy separately from throughput, request latency,
-streaming gaps and wasted draft work. A higher acceptance percentage alone is
-not success: drafting fewer tokens can raise that percentage while slowing
-generation. Retain numerical quality, greedy equivalence and seeded sampled
-replay/snapshot checks for any policy change; acceptance prediction must not
-relax target verification. Recent-history weighting and conservative decision
-margins remain hypotheses until these comparisons demonstrate a benefit.
+Report prediction accuracy separately from throughput, latency, streaming
+gaps and wasted drafts: drafting fewer tokens can raise the acceptance rate
+while slowing generation. Keep numerical quality, greedy equivalence and
+seeded sampled replay/snapshot checks for any policy change.
 
 ## Opt-in levers (quality trade, default off)
 

@@ -4271,6 +4271,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                             ? speculative_config.max_draft_tokens
                             : models::gemma4::kDefaultDraftTokens,
         .min_draft_tokens = speculative_config.min_draft_tokens,
+        .draft_trace_path = speculative_config.mtp_draft_trace_path,
     };
     try {
       gemma_options.draft_policy =
@@ -4334,7 +4335,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
         (speculative_config.max_draft_tokens == 0 ||
          speculative_config.min_draft_tokens != 1 ||
          !speculative_config.mtp_draft_policy.empty() ||
-         !speculative_config.mtp_draft_calibration.empty())) {
+         !speculative_config.mtp_draft_calibration.empty() ||
+         !speculative_config.mtp_draft_trace_path.empty())) {
       SetError(error,
                "Flash-Next MTP requires a positive draft limit, "
                "--min-draft-tokens 1 and no --draft-policy");

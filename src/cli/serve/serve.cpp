@@ -592,6 +592,7 @@ void PrintServeHelp(std::string_view program_name,
     std::string dflash_model_path;
     std::string draft_policy;
     std::string draft_calibration;
+    std::string draft_trace_path;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
@@ -683,6 +684,10 @@ void PrintServeHelp(std::string_view program_name,
         "Gemma 4 calibrated drafting: shared (learned across requests) or "
         "request (reset per request; exact seeded replay) (default: shared)",
         "Speculative", &draft_calibration);
+    parser.AddOption("", "--draft-trace", "PATH",
+                     "Gemma 4 MTP: append one JSON line per verification "
+                     "cycle (prices, estimates, outcome, stage times) to PATH",
+                     "Speculative", &draft_trace_path);
     parser.AddOption("", "--dspark-model", "PATH",
                      "Path to DeepSeek V4 Flash DSpark support GGUF file",
                      "Speculative", &dspark_model_path);
@@ -1158,6 +1163,7 @@ int RunServe(std::span<const char* const> args) {
     std::string dflash_model_path;
     std::string draft_policy;
     std::string draft_calibration;
+    std::string draft_trace_path;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
@@ -1244,6 +1250,11 @@ int RunServe(std::span<const char* const> args) {
         "Gemma 4 calibrated drafting: shared (learned across requests) or "
         "request (reset per request; exact seeded replay) (default: shared)",
         "Speculative", &draft_calibration);
+    llm_parser.AddOption(
+        "", "--draft-trace", "PATH",
+        "Gemma 4 MTP: append one JSON line per verification cycle (prices, "
+        "estimates, outcome, stage times) to PATH",
+        "Speculative", &draft_trace_path);
     llm_parser.AddOption("", "--dspark-model", "PATH",
                          "Path to DeepSeek V4 Flash DSpark support GGUF file",
                          "Speculative", &dspark_model_path);
@@ -1432,14 +1443,15 @@ int RunServe(std::span<const char* const> args) {
       if ((!draft_policy.empty() && !mtp &&
            speculative_config.backend !=
                server::TextSpeculativeBackend::kDFlash) ||
-          (!draft_calibration.empty() && !mtp))
+          ((!draft_calibration.empty() || !draft_trace_path.empty()) && !mtp))
         throw std::invalid_argument(
-            "--draft-policy requires DFlash2 or MTP; --draft-calibration "
-            "requires MTP");
+            "--draft-policy requires DFlash2 or MTP; --draft-calibration and "
+            "--draft-trace require MTP");
       if (mtp) {
         // The MTP model validates its own policy names at load.
         speculative_config.mtp_draft_policy = draft_policy;
         speculative_config.mtp_draft_calibration = draft_calibration;
+        speculative_config.mtp_draft_trace_path = draft_trace_path;
       } else {
         speculative_config.dflash_policy =
             speculative::ParseDFlashDraftPolicy(draft_policy);

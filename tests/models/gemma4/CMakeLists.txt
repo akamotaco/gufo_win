@@ -13,6 +13,7 @@ function(add_gemma4_test name library labels)
 endfunction()
 
 add_gemma4_test(config gufo_gemma4 "cpu")
+add_gemma4_test(cycle_trace gufo_gemma4 "cpu;speculative")
 add_gemma4_test(draft_policy gufo_gemma4 "cpu;speculative")
 add_gemma4_test(draft_vocab gufo_gemma4 "cpu;speculative")
 add_gemma4_test(tokenizer_contract gufo_gemma4 "cpu;tokenization")

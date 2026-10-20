@@ -274,6 +274,18 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
     }
     m->draft_weights_ = std::make_unique<DraftWeights>(std::move(*draft));
   }
+  if (!options.draft_trace_path.empty()) {
+    if (!m->draft_weights_) {
+      Fail(error_msg, "gemma4 draft trace requires an MTP drafter");
+      return nullptr;
+    }
+    try {
+      m->trace_ = std::make_unique<CycleTrace>(options.draft_trace_path);
+    } catch (const std::exception& e) {
+      Fail(error_msg, e.what());
+      return nullptr;
+    }
+  }
   // Only the mixture-of-experts cycle is short enough for the smaller draft
   // head to pay (draft_vocab.hpp).
   const std::vector<TokenId> draft_order =
@@ -1060,8 +1072,25 @@ struct Session::CycleDraft {
           calibrated.SetOthers({.rows = share->rows - own_rows,
                                 .expected = share->expected - before});
         }
+        CycleRecord* trace = cycle.trace ? &*cycle.trace : nullptr;
+        const float estimate =
+            trace != nullptr
+                ? session.Calibration(cycle.sampled).Estimate(signal)
+                : 0.0F;
         if (!calibrated.Include(signal)) {
+          const CalibratedChain::Decision d = calibrated.LastDecision();
+          if (trace != nullptr && d.compared) {
+            trace->stop = CycleRecord::Stop{.signal = signal,
+                                            .estimate = estimate,
+                                            .gain = d.gain,
+                                            .cost = d.cost};
+          }
           return true;
+        }
+        if (trace != nullptr) {
+          const CalibratedChain::Decision d = calibrated.LastDecision();
+          trace->estimates.push_back(estimate);
+          trace->margins.push_back(d.compared ? d.gain - d.cost : 0.0F);
         }
         if (share != nullptr) {
           share->rows += 1;
@@ -1082,6 +1111,9 @@ struct Session::CycleDraft {
   }
 
   rocm::DraftProposal Propose(const qwen38_flash_next::MtpCandidateLogits& c) {
+    if (cycle.trace) {
+      ++cycle.trace->drafter_steps;
+    }
     if (cycle.sampled) {
       auto proposal =
           qwen38_flash_next::SampleMtpProposal(c, draft_sampler, &draft_rng);
@@ -1148,6 +1180,10 @@ bool Session::DecodeStep(std::size_t max_tokens,
   if (cycle.done) {
     return true;
   }
+  if (cycle.trace) {
+    cycle.trace->drafted_ns = CycleTrace::Now();
+    cycle.trace->forward = model_->forwards_++;
+  }
   auto& executor = *model_->executor_;
   const bool use_argmax =
       !cycle.sampled && sampler.config().can_use_unmodified_argmax();
@@ -1164,6 +1200,9 @@ bool Session::DecodeStep(std::size_t max_tokens,
       argmax = executor.ReadArgmax(cycle.rows.size());
     } else {
       logits = executor.ReadLogits(cycle.rows.size());
+    }
+    if (cycle.trace) {
+      cycle.trace->verified_ns = CycleTrace::Now();
     }
     FinishCycle(cycle, logits, argmax, 0);
   } catch (const std::exception& e) {
@@ -1207,6 +1246,11 @@ bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
   result->tokens.clear();
   result->stop = false;
   cycle.done = true;
+  cycle.trace.reset();
+  if (model_->trace_) {
+    cycle.trace.emplace();
+    cycle.trace->begin_ns = CycleTrace::Now();
+  }
   if (cycle.max_tokens == 0) {
     return true;
   }
@@ -1369,12 +1413,20 @@ void Session::FinishDraft(Cycle& cycle) {
       draft.TakeRow();
       cycle.siblings.push_back(alt.token);
       cycle.sibling_signals.push_back(alt.signal);
+      if (cycle.trace) {
+        cycle.trace->sibling_estimates.push_back(hits.Estimate(alt.signal));
+      }
       ++rows;
     }
     cycle.rows.insert(cycle.rows.end(), cycle.siblings.begin(),
                       cycle.siblings.end());
     cycle.expected = draft.calibrated.Expected();
     cycle.draft_ms = draft.calibrated.DraftMs();
+    if (cycle.trace) {
+      cycle.trace->priced_draft_ms = cycle.draft_ms;
+      cycle.trace->priced_verify_ms = draft.calibrated.Verify(rows);
+      cycle.trace->expected = cycle.expected;
+    }
   }
   cycle.small_head = draft.small_head;
   cycle.draft.reset();
@@ -1501,6 +1553,21 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
     stats_.small_head_drafted += mtp;
     stats_.small_head_accepted += std::min(accepted, mtp);
   }
+  if (cycle.trace) {
+    CycleRecord& trace = *cycle.trace;
+    trace.position = cycle.position;
+    trace.sampled = cycle.sampled;
+    trace.rows = static_cast<std::uint32_t>(rows.size());
+    trace.copied = static_cast<std::uint32_t>(cycle.copied);
+    trace.siblings = static_cast<std::uint32_t>(siblings);
+    trace.accepted = static_cast<std::uint32_t>(accepted);
+    trace.sibling_accepted = sibling;
+    trace.small_head = cycle.small_head;
+    trace.emitted = static_cast<std::uint32_t>(result->tokens.size());
+    trace.signals = cycle.signals;
+    trace.end_ns = CycleTrace::Now();
+    model_->trace_->Write(trace);
+  }
 }
 
 bool Session::DecodeBatch(std::span<BatchDecode> decodes) {
@@ -1603,6 +1670,15 @@ bool Session::DecodeBatch(std::span<BatchDecode> decodes) {
   if (active.empty()) {
     return ok;
   }
+  if (model.trace_) {
+    const std::int64_t drafted = CycleTrace::Now();
+    for (const std::size_t i : active) {
+      cycles[i].trace->drafted_ns = drafted;
+      cycles[i].trace->forward = model.forwards_;
+      cycles[i].trace->sessions = static_cast<std::uint32_t>(active.size());
+    }
+    ++model.forwards_;
+  }
   auto& executor = *model.executor_;
   bool use_argmax = true;
   for (const std::size_t i : active) {
@@ -1621,6 +1697,12 @@ bool Session::DecodeBatch(std::span<BatchDecode> decodes) {
       argmax = executor.ReadArgmax(tokens.size());
     } else {
       logits = executor.ReadLogits(tokens.size());
+    }
+    if (model.trace_) {
+      const std::int64_t verified = CycleTrace::Now();
+      for (const std::size_t i : active) {
+        cycles[i].trace->verified_ns = verified;
+      }
     }
     const std::size_t vocab = model.VocabSize();
     std::uint32_t row0 = 0;

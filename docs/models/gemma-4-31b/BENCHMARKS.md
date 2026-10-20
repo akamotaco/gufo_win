@@ -418,3 +418,11 @@ snapshot timer flags slower in both pairs, but its 97.45–97.84 ms falls
 inside the 86.56–99.49 ms spread of four unchanged-baseline controls for
 identical snapshot bytes; attribution remains inconclusive. All observations
 are retained separately from the `422fbe4d` results; implementation is unchanged.
+
+A per-cycle trace of both price tables in one binary explains the essay gap
+([every cycle](artifacts/mtp-cycle-trace-2026-10-20.json)). At position
+31463 both draft the same seven tokens; the new prices then add two
+siblings, verify 10 rows in 164.9 / 167.4 ms and emit two tokens, where the
+old prices verify 8 rows in 152.1 / 152.3 ms and emit one. Every other
+essay cycle stays at or below ~152.7 ms. The larger maximum gap is one
+cycle delivering an extra token earlier, not a longer pause per token.

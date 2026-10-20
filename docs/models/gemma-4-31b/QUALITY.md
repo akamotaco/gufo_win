@@ -208,3 +208,9 @@ identical unchanged-baseline controls span 86.56–99.49 ms, encompassing its
 97.45–97.84 ms. The flag remains in the artifact and its cause is inconclusive.
 This diagnostic does not clear the original candidate's failed gap check or
 qualify a new production configuration.
+
+A per-cycle trace with identical text in all four arms locates the failed
+gap check in one essay cycle: the new prices verify two extra sibling rows
+(164.9 / 167.4 ms instead of 152.1 / 152.3 ms) and that cycle emits two
+tokens instead of one. No other essay cycle exceeds ~152.7 ms under either
+table ([trace](artifacts/mtp-cycle-trace-2026-10-20.json)).

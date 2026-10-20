@@ -218,6 +218,7 @@ bool CalibratedChain::FirstDraftCanPay() const noexcept {
 
 bool CalibratedChain::Include(float signal) noexcept {
   const std::uint32_t index = kept_;  // drafter steps so far: index + 1
+  decision_ = {};
   if (index >= cap_) {
     return false;
   }
@@ -232,8 +233,10 @@ bool CalibratedChain::Include(float signal) noexcept {
     const float next = others_.draft_ms +
                        costs_.draft[std::min(index + 2, cap_)] +
                        Verify(index + 2);
-    if (survival * current <
-        (others_.expected + expected_) * (next - current)) {
+    decision_ = {.compared = true,
+                 .gain = survival * current,
+                 .cost = (others_.expected + expected_) * (next - current)};
+    if (decision_.gain < decision_.cost) {
       return false;
     }
   }

@@ -1,6 +1,6 @@
 // Host contract for the Gemma 4 draft-length policy: option names, the
 // drafter signal, calibration learning, the cost table and the calibrated
-// chain decision.
+// chain decision (and how it is reported).
 #include "src/models/gemma4/draft_policy.hpp"
 
 #include <cmath>
@@ -116,11 +116,16 @@ void CheckChain() {
       Require(chain.Include(0.5F), "a sure chain stopped");
     }
     Require(!chain.Include(0.5F), "the cap was exceeded");
+    Require(!chain.LastDecision().compared, "the cap compared costs");
   }
   {
     g4::CalibratedChain chain(hopeless, costs, 1, 7);
     Require(chain.Include(0.5F), "the first draft was not verified");
+    Require(!chain.LastDecision().compared, "the minimum compared costs");
     Require(!chain.Include(0.5F), "a hopeless chain continued");
+    const auto stop = chain.LastDecision();
+    Require(stop.compared && stop.gain < stop.cost,
+            "the stop decision was not reported");
   }
   {
     g4::CalibratedChain chain(hopeless, costs, 3, 7);

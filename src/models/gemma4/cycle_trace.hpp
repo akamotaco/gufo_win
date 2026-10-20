@@ -1,0 +1,84 @@
+#ifndef GUFO_MODELS_GEMMA4_CYCLE_TRACE_HPP_
+#define GUFO_MODELS_GEMMA4_CYCLE_TRACE_HPP_
+
+#include <cstdint>
+#include <fstream>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace gufo::models::gemma4 {
+
+/// One MTP verification cycle of one session: what the draft policy priced
+/// and expected, what verification accepted and how long each stage took.
+/// Times are steady-clock nanoseconds; a batch's sessions share the
+/// drafting and verification stages.
+struct CycleRecord {
+  /// The forward this cycle verified in, counted per model, and the
+  /// sessions it verified.
+  std::uint64_t forward{0};
+  std::uint32_t sessions{1};
+  std::uint32_t position{0};
+  bool sampled{false};
+  /// Verified rows: the pending token, MTP drafts, copies, then siblings.
+  std::uint32_t rows{0};
+  std::uint32_t copied{0};
+  std::uint32_t siblings{0};
+  /// Drafter steps run, including a last proposal the policy declined.
+  std::uint32_t drafter_steps{0};
+  /// The chain drafted on the small head over frequent tokens.
+  bool small_head{false};
+  /// Accepted drafts and copies, whether a sibling was accepted, and the
+  /// tokens the cycle emitted.
+  std::uint32_t accepted{0};
+  bool sibling_accepted{false};
+  std::uint32_t emitted{0};
+  /// Calibrated policy: drafter and verification prices of the cycle and
+  /// the tokens it expected (zero under other policies).
+  float priced_draft_ms{0.0F};
+  float priced_verify_ms{0.0F};
+  float expected{0.0F};
+  /// Calibrated policy: each verified MTP draft's signal, its acceptance
+  /// estimate and its decision's gain minus cost (zero for the first
+  /// `min_drafts`), and each sibling's hit estimate.
+  std::vector<float> signals;
+  std::vector<float> estimates;
+  std::vector<float> margins;
+  std::vector<float> sibling_estimates;
+  /// The proposal the calibrated policy declined: its signal, estimate,
+  /// expected gain and cost (the chain stops when gain < cost).
+  struct Stop {
+    float signal{0.0F};
+    float estimate{0.0F};
+    float gain{0.0F};
+    float cost{0.0F};
+  };
+  std::optional<Stop> stop;
+  std::int64_t begin_ns{0};     ///< the cycle starts drafting
+  std::int64_t drafted_ns{0};   ///< its rows are complete
+  std::int64_t verified_ns{0};  ///< the forward's results are on the host
+  std::int64_t end_ns{0};       ///< its tokens are emitted
+};
+
+/// The record as one line of JSON (no newline).
+[[nodiscard]] std::string FormatCycleRecord(const CycleRecord& record);
+
+/// Appends one JSON line per cycle to a file (`--draft-trace`).
+class CycleTrace {
+public:
+  /// Opens `path` for appending; throws std::runtime_error if it cannot.
+  explicit CycleTrace(const std::string& path);
+  /// Writes and flushes one record; safe from concurrent sessions.
+  void Write(const CycleRecord& record);
+  /// Steady-clock nanoseconds.
+  [[nodiscard]] static std::int64_t Now() noexcept;
+
+private:
+  std::mutex mutex_;
+  std::ofstream out_;
+};
+
+}  // namespace gufo::models::gemma4
+
+#endif  // GUFO_MODELS_GEMMA4_CYCLE_TRACE_HPP_
