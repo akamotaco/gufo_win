@@ -48,11 +48,7 @@ std::string FormatCycleRecord(const CycleRecord& r) {
   }
   v["runner_ups"] = std::move(runner_ups);
   v["runner_up_signals"] = Floats(r.runner_up_signals);
-  json::Value hits = json::Value::array();
-  for (const bool hit : r.runner_up_hits) {
-    hits.push_back(hit);
-  }
-  v["runner_up_hits"] = std::move(hits);
+  v["runner_up_acceptance"] = Floats(r.runner_up_acceptance);
   json::Value observed = json::Value::array();
   for (const bool outcome : r.observed) {
     observed.push_back(outcome);

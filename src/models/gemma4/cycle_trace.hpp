@@ -59,12 +59,14 @@ struct CycleRecord {
   /// without repetition penalties) and q the proposal's probability (1 for
   /// a copy).
   std::vector<float> row_acceptance;
-  /// Per MTP draft, the drafter's alternative beside it (-1: none) and its
-  /// signal; greedy also records whether the target's argmax at that row is
-  /// the alternative.
+  /// Per MTP draft, the drafter's alternative beside it (-1: none), its
+  /// signal, and the probability that verification accepts it as the
+  /// sibling once the draft is rejected (a hit adds one token). Greedy: 1
+  /// when the target's argmax is the alternative; sampled: min(1, r/q')
+  /// with r = norm(max(p - q, 0)) and q' = q without the draft.
   std::vector<std::int32_t> runner_ups;
   std::vector<float> runner_up_signals;
-  std::vector<bool> runner_up_hits;
+  std::vector<float> runner_up_acceptance;
   /// What the calibrated policy learned: each judged MTP draft's outcome
   /// (signals[i] with observed[i]) and the sibling's, when one was judged.
   std::vector<bool> observed;

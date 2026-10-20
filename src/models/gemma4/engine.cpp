@@ -1458,23 +1458,47 @@ void Session::TraceRows(Cycle& cycle, std::span<const float> logits,
                                      row.begin());
   };
   for (std::size_t r = 0; r + 1 < chain; ++r) {
-    if (cycle.sampled) {
-      const auto& proposal = cycle.proposals[r];
-      const double p =
-          cycle.sampler->Distribution(logits.subspan(r * vocab, vocab))
-              .probability(proposal.token);
-      trace.row_acceptance.push_back(static_cast<float>(
-          std::min(1.0, p / static_cast<double>(proposal.probability))));
-    } else {
-      trace.row_acceptance.push_back(target(r) == cycle.rows[r + 1] ? 1.0F
-                                                                    : 0.0F);
+    const bool beside = r < trace.runner_ups.size();
+    const std::int32_t up = beside ? trace.runner_ups[r] : -1;
+    if (!cycle.sampled) {
+      const std::int32_t t = target(r);
+      trace.row_acceptance.push_back(t == cycle.rows[r + 1] ? 1.0F : 0.0F);
+      if (beside) {
+        trace.runner_up_acceptance.push_back(up >= 0 && t == up ? 1.0F : 0.0F);
+      }
+      continue;
     }
-  }
-  if (!cycle.sampled) {
-    for (std::size_t i = 0; i < trace.runner_ups.size() && i + 1 < chain; ++i) {
-      trace.runner_up_hits.push_back(trace.runner_ups[i] >= 0 &&
-                                     target(i) == trace.runner_ups[i]);
+    const auto& q = cycle.proposals[r];
+    const auto p =
+        cycle.sampler->Distribution(logits.subspan(r * vocab, vocab));
+    trace.row_acceptance.push_back(static_cast<float>(std::min(
+        1.0, p.probability(q.token) / static_cast<double>(q.probability))));
+    if (!beside) {
+      continue;
     }
+    // VerifyWithSibling's second stage.
+    const auto mass = [&q](sampling::TokenId token) {
+      for (std::size_t i = 0; i < q.size; ++i) {
+        if (q.ids[i] == token) {
+          return static_cast<double>(q.probabilities[i]);
+        }
+      }
+      return 0.0;
+    };
+    double total = 0.0;
+    for (const auto& entry : p.entries()) {
+      total += std::max(entry.value - mass(entry.token), 0.0);
+    }
+    const double rest = 1.0 - static_cast<double>(q.probability);
+    double hit = 0.0;
+    if (up >= 0 && total > 0.0 && rest > 0.0) {
+      const auto sibling = static_cast<sampling::TokenId>(up);
+      const double own = mass(sibling) / rest;
+      const double residual =
+          std::max(p.probability(sibling) - mass(sibling), 0.0) / total;
+      hit = own > 0.0 ? std::min(1.0, residual / own) : 0.0;
+    }
+    trace.runner_up_acceptance.push_back(static_cast<float>(hit));
   }
 }
 

@@ -38,7 +38,7 @@ g4::CycleRecord Sample() {
   r.row_acceptance = {1.0F, 0.5F};
   r.runner_ups = {42, -1};
   r.runner_up_signals = {0.25F, 0.0F};
-  r.runner_up_hits = {false, true};
+  r.runner_up_acceptance = {0.0F, 1.0F};
   r.observed = {true, false};
   r.sibling_observed = true;
   r.stop = g4::CycleRecord::Stop{
@@ -71,7 +71,7 @@ void CheckFormat() {
       "estimates");
   const auto* ups = v.find("runner_ups");
   Require(ups != nullptr && ups->size() == 2 &&
-              v.find("runner_up_hits")->size() == 2 &&
+              v.find("runner_up_acceptance")->size() == 2 &&
               v.find("row_acceptance")->size() == 2 &&
               v.find("proposal_signals")->size() == 3,
           "row labels and runner-ups");

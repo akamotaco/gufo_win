@@ -9,15 +9,18 @@
 //
 //   gemma4_draft_replay simulate [--experts] [--replicas N] [--seed S]
 //                                TRACE.jsonl...
-//     Evaluates stopping rules on complete chains: cycles of a run with
+//     Evaluates draft policies on complete chains: cycles of a run with
 //     --draft-policy fixed --draft-tokens 15 whose 15 drafter proposals were
 //     all verified (no copies). Each row's acceptance label is conditional on
-//     the rows before it, so a chain stopped after k drafts is expected to
-//     emit 1 + sum_{j<k} prod_{i<=j} a_i tokens (siblings are not modelled).
-//     Costs come from the policy's price tables. Policies: the calibrated
-//     rule learning online (sampled outcomes drawn from the labels, averaged
-//     over replicas), its frozen prior, fixed lengths 0..15 and a per-cycle
-//     oracle. Also reports how well the learned estimates predict the labels.
+//     the rows before it and each runner-up carries its sibling hit
+//     probability, so a policy's expected tokens per cycle are exact given
+//     its decisions. Costs come from the policy's price tables. Policies
+//     learn online from outcomes drawn from the labels (averaged over
+//     replicas): the production rule (with and without siblings, and
+//     frozen at its prior), position-aware and forgetting variants, fixed
+//     lengths 0..15 and a per-cycle oracle over fixed lengths. The
+//     production rule is also decided through a replica of its chain
+//     arithmetic, which must agree on every chain (exit 1 otherwise).
 //     Prints one JSON object.
 #include <algorithm>
 #include <array>
@@ -25,6 +28,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
+#include <memory>
 #include <iostream>
 #include <random>
 #include <string>
@@ -174,39 +179,195 @@ int Validate(const Options& opt) {
 // ---------------------------------------------------------------- simulate
 
 constexpr std::size_t kChain = 15;
+constexpr std::size_t kMaxRows = 16;  // a lone cycle's verification rows
 
 struct Chain {
   std::uint32_t position{0};
   bool sampled{false};
   std::array<float, kChain> signal{};
   std::array<float, kChain> accept{};  // conditional acceptance labels
+  std::array<bool, kChain> has_up{};
+  std::array<float, kChain> up_signal{};
+  std::array<float, kChain> up_accept{};  // sibling hit after a rejection
 };
 
-/// Tokens a cycle verifying k drafts is expected to emit.
-double Expected(const Chain& c, std::size_t k) {
-  double survival = 1.0;
-  double tokens = 1.0;
-  for (std::size_t j = 0; j < k; ++j) {
-    survival *= c.accept[j];
-    tokens += survival;
+/// Acceptance estimates a policy decides with, and what it learns from.
+class Estimator {
+public:
+  virtual ~Estimator() = default;
+  [[nodiscard]] virtual float Draft(float signal, std::size_t position,
+                                    bool sampled) const = 0;
+  virtual void ObserveDraft(float signal, std::size_t position, bool sampled,
+                            bool accepted) = 0;
+  [[nodiscard]] float Sibling(float signal, bool sampled) const {
+    return siblings_[sampled ? 1 : 0].Estimate(signal);
   }
-  return tokens;
-}
+  void ObserveSibling(float signal, bool sampled, bool hit) {
+    if (learn_) {
+      siblings_[sampled ? 1 : 0].Observe(signal, hit);
+    }
+  }
 
-/// Priced time of a cycle that ran `steps` drafter steps and verifies k.
-double Cost(const g4::DraftCosts& costs, std::size_t steps, std::size_t k) {
-  return costs.draft[steps] + costs.verify[k + 1];
-}
+protected:
+  explicit Estimator(bool learn) : learn_(learn) {}
+  bool learn_;
+
+private:
+  std::array<g4::DraftCalibration, 2> siblings_;
+};
+
+/// The production tables (frozen: never learns, the prior alone).
+class Production final : public Estimator {
+public:
+  explicit Production(bool learn) : Estimator(learn) {}
+  [[nodiscard]] float Draft(float signal, std::size_t, bool sampled) const override {
+    return tables_[sampled ? 1 : 0].Estimate(signal);
+  }
+  void ObserveDraft(float signal, std::size_t, bool sampled,
+                    bool accepted) override {
+    if (learn_) {
+      tables_[sampled ? 1 : 0].Observe(signal, accepted);
+    }
+  }
+  [[nodiscard]] const g4::DraftCalibration& table(bool sampled) const {
+    return tables_[sampled ? 1 : 0];
+  }
+
+private:
+  std::array<g4::DraftCalibration, 2> tables_;
+};
+
+/// Bins per draft position group (0, 1, 2-3, 4-7, 8+), each group shrunk
+/// toward the shallower group's estimate with `weight` observations, the
+/// first toward the bin midpoint (group 0 is then the production table).
+/// `half_life` > 0 forgets observations exponentially (per observation).
+class Grouped final : public Estimator {
+public:
+  Grouped(float weight, bool by_position, float half_life)
+      : Estimator(true),
+        weight_(weight),
+        by_position_(by_position),
+        decay_(half_life > 0.0F ? std::exp2(-1.0F / half_life) : 1.0F) {}
+  [[nodiscard]] float Draft(float signal, std::size_t position,
+                            bool sampled) const override {
+    const std::size_t bin = g4::DraftCalibration::Bin(signal);
+    const auto& t = tables_[sampled ? 1 : 0];
+    float estimate = (static_cast<float>(bin) + 0.5F) /
+                     static_cast<float>(g4::DraftCalibration::kBins);
+    for (std::size_t g = 0; g <= Group(position); ++g) {
+      estimate = (t.accepted[g][bin] + weight_ * estimate) /
+                 (t.seen[g][bin] + weight_);
+    }
+    return estimate;
+  }
+  void ObserveDraft(float signal, std::size_t position, bool sampled,
+                    bool accepted) override {
+    auto& t = tables_[sampled ? 1 : 0];
+    if (decay_ < 1.0F) {
+      for (std::size_t g = 0; g < kGroups; ++g) {
+        for (std::size_t b = 0; b < g4::DraftCalibration::kBins; ++b) {
+          t.accepted[g][b] *= decay_;
+          t.seen[g][b] *= decay_;
+        }
+      }
+    }
+    const std::size_t bin = g4::DraftCalibration::Bin(signal);
+    const std::size_t g = Group(position);
+    t.accepted[g][bin] += accepted ? 1.0F : 0.0F;
+    t.seen[g][bin] += 1.0F;
+  }
+
+private:
+  static constexpr std::size_t kGroups = 5;
+  [[nodiscard]] std::size_t Group(std::size_t position) const {
+    if (!by_position_) {
+      return 0;
+    }
+    return position == 0 ? 0 : position == 1 ? 1 : position < 4 ? 2
+                           : position < 8    ? 3
+                                             : 4;
+  }
+  struct Tables {
+    std::array<std::array<float, g4::DraftCalibration::kBins>, kGroups>
+        accepted{};
+    std::array<std::array<float, g4::DraftCalibration::kBins>, kGroups> seen{};
+  };
+  float weight_;
+  bool by_position_;
+  float decay_;
+  std::array<Tables, 2> tables_;
+};
+
+/// CalibratedChain's arithmetic for a lone cycle, with the estimates given.
+class ReplicaChain {
+public:
+  ReplicaChain(const g4::DraftCosts& costs, std::uint32_t min_drafts,
+               std::uint32_t cap)
+      : costs_(costs), min_drafts_(std::max(1U, min_drafts)), cap_(cap) {}
+  bool Include(float accept) {
+    const std::uint32_t index = kept_;
+    if (index >= cap_) {
+      return false;
+    }
+    steps_ = index + 1;
+    const float survival = survival_ * accept;
+    if (index >= min_drafts_) {
+      const float current = 0.0F + costs_.draft[index + 1] + Verify(index + 1);
+      const float next =
+          0.0F + costs_.draft[std::min(index + 2, cap_)] + Verify(index + 2);
+      if (survival * current < (0.0F + expected_) * (next - current)) {
+        return false;
+      }
+    }
+    reach_[kept_] = survival_;
+    accept_[kept_] = accept;
+    survival_ = survival;
+    expected_ += survival;
+    ++kept_;
+    return true;
+  }
+  bool IncludeSibling(std::uint32_t depth, std::uint32_t rows, float hit) {
+    if (depth >= kept_) {
+      return false;
+    }
+    const float gain = reach_[depth] * (1.0F - accept_[depth]) * hit;
+    const float current = 0.0F + costs_.draft[steps_] + Verify(rows);
+    const float next = current - Verify(rows) + Verify(rows + 1);
+    if (gain * current < (0.0F + expected_) * (next - current)) {
+      return false;
+    }
+    expected_ += gain;
+    return true;
+  }
+  [[nodiscard]] std::uint32_t kept() const { return kept_; }
+  [[nodiscard]] std::uint32_t steps() const { return steps_; }
+
+private:
+  [[nodiscard]] float Verify(std::uint32_t rows) const {
+    return costs_.verify[std::min<std::size_t>(rows, costs_.verify.size() - 1)];
+  }
+  const g4::DraftCosts& costs_;
+  std::uint32_t min_drafts_;
+  std::uint32_t cap_;
+  std::uint32_t kept_{0};
+  std::uint32_t steps_{0};
+  std::array<float, 16> reach_{};
+  std::array<float, 16> accept_{};
+  float survival_{1.0F};
+  float expected_{1.0F};
+};
 
 struct Tally {
   double tokens{0.0};
   double ms{0.0};
   double drafts{0.0};
+  double siblings{0.0};
   double cycles{0.0};
-  void Add(double t, double m, double d) {
+  void Add(double t, double m, double d, double s = 0.0) {
     tokens += t;
     ms += m;
     drafts += d;
+    siblings += s;
     cycles += 1.0;
   }
   [[nodiscard]] Value Json() const {
@@ -214,47 +375,93 @@ struct Tally {
     v["tokens_per_s"] = ms > 0.0 ? 1000.0 * tokens / ms : 0.0;
     v["tokens_per_cycle"] = cycles > 0.0 ? tokens / cycles : 0.0;
     v["drafts_per_cycle"] = cycles > 0.0 ? drafts / cycles : 0.0;
+    v["siblings_per_cycle"] = cycles > 0.0 ? siblings / cycles : 0.0;
     return v;
   }
 };
 
-struct Calibration {
-  // Per bin: estimates against labels; per position: the same.
-  std::array<double, 8> est{}, label{}, count{};
-  std::array<double, kChain> pos_est{}, pos_label{}, pos_count{};
-  double brier{0.0}, log_loss{0.0}, n{0.0};
-  double lag_xy{0.0}, lag_xx{0.0}, lag_yy{0.0}, lag_n{0.0};
-  void Add(std::size_t position, float signal, double e, double a) {
-    const std::size_t bin = g4::DraftCalibration::Bin(signal);
-    est[bin] += e;
-    label[bin] += a;
-    count[bin] += 1.0;
-    pos_est[position] += e;
-    pos_label[position] += a;
-    pos_count[position] += 1.0;
-    const double p = std::clamp(e, 1e-6, 1.0 - 1e-6);
-    brier += (e - a) * (e - a);
-    log_loss -= a * std::log(p) + (1.0 - a) * std::log(1.0 - p);
-    n += 1.0;
+/// One cycle under a policy: drafts, siblings, expected tokens and priced
+/// time; then learning from outcomes drawn from the labels.
+struct Outcome {
+  std::uint32_t drafts{0};
+  std::uint32_t siblings{0};
+};
+Outcome RunCycle(Estimator& estimator, const Chain& c,
+                 const g4::DraftCosts& costs, const Options& opt,
+                 bool with_siblings, std::mt19937_64* rng, Tally* tally) {
+  ReplicaChain chain(costs, opt.min_drafts, kChain);
+  while (chain.kept() < kChain &&
+         chain.Include(estimator.Draft(c.signal[chain.kept()], chain.kept(),
+                                       c.sampled))) {
   }
-  void AddLag(double r0, double r1) {
-    lag_xy += r0 * r1;
-    lag_xx += r0 * r0;
-    lag_yy += r1 * r1;
-    lag_n += 1.0;
+  const std::uint32_t k = chain.kept();
+  auto rows = k + 1;
+  std::uint32_t siblings = 0;
+  for (std::uint32_t i = 0; with_siblings && i < k && c.has_up[i] &&
+                            rows < kMaxRows;
+       ++i) {
+    if (!chain.IncludeSibling(i, rows, estimator.Sibling(c.up_signal[i],
+                                                         c.sampled))) {
+      break;
+    }
+    ++rows;
+    ++siblings;
+  }
+  double survival = 1.0;
+  double tokens = 1.0;
+  for (std::uint32_t j = 0; j < k; ++j) {
+    if (j < siblings) {
+      tokens += survival * (1.0 - c.accept[j]) * c.up_accept[j];
+    }
+    survival *= c.accept[j];
+    tokens += survival;
+  }
+  const std::uint32_t steps = k < kChain ? k + 1 : k;
+  tally->Add(tokens, costs.draft[steps] + costs.verify[rows], k, siblings);
+  std::uniform_real_distribution<double> uniform(0.0, 1.0);
+  for (std::uint32_t j = 0; j < k; ++j) {
+    const bool accepted = uniform(*rng) < c.accept[j];
+    estimator.ObserveDraft(c.signal[j], j, c.sampled, accepted);
+    if (!accepted) {
+      if (j < siblings) {
+        estimator.ObserveSibling(c.up_signal[j], c.sampled,
+                                 uniform(*rng) < c.up_accept[j]);
+      }
+      break;
+    }
+  }
+  return {k, siblings};
+}
+
+/// Estimates against labels, each row weighted by the probability that a
+/// chain reaches it (the rows a policy actually decides on).
+struct Fit {
+  std::array<double, kChain> pos_est{}, pos_label{}, pos_count{};
+  std::array<double, g4::DraftCalibration::kBins> bin_est{}, bin_label{},
+      bin_count{};
+  double brier{0.0}, n{0.0};
+  void Add(std::size_t position, float signal, double e, double a,
+           double reach) {
+    pos_est[position] += reach * e;
+    pos_label[position] += reach * a;
+    pos_count[position] += reach;
+    const std::size_t bin = g4::DraftCalibration::Bin(signal);
+    bin_est[bin] += reach * e;
+    bin_label[bin] += reach * a;
+    bin_count[bin] += reach;
+    brier += reach * (e - a) * (e - a);
+    n += reach;
   }
   [[nodiscard]] Value Json() const {
     Value v = Value::object();
-    v["labels"] = n;
-    v["brier_vs_label"] = n > 0 ? brier / n : 0.0;
-    v["log_loss"] = n > 0 ? log_loss / n : 0.0;
+    v["reach_weighted_brier"] = n > 0 ? brier / n : 0.0;
     Value bins = Value::array();
-    for (std::size_t b = 0; b < est.size(); ++b) {
+    for (std::size_t b = 0; b < bin_est.size(); ++b) {
       Value x = Value::object();
       x["bin"] = b;
-      x["count"] = count[b];
-      x["mean_estimate"] = count[b] > 0 ? est[b] / count[b] : 0.0;
-      x["mean_label"] = count[b] > 0 ? label[b] / count[b] : 0.0;
+      x["weight"] = bin_count[b];
+      x["mean_estimate"] = bin_count[b] > 0 ? bin_est[b] / bin_count[b] : 0.0;
+      x["mean_label"] = bin_count[b] > 0 ? bin_label[b] / bin_count[b] : 0.0;
       bins.push_back(std::move(x));
     }
     v["bins"] = std::move(bins);
@@ -262,14 +469,12 @@ struct Calibration {
     for (std::size_t j = 0; j < kChain; ++j) {
       Value x = Value::object();
       x["position"] = j;
-      x["count"] = pos_count[j];
+      x["weight"] = pos_count[j];
       x["mean_estimate"] = pos_count[j] > 0 ? pos_est[j] / pos_count[j] : 0.0;
       x["mean_label"] = pos_count[j] > 0 ? pos_label[j] / pos_count[j] : 0.0;
       pos.push_back(std::move(x));
     }
     v["positions"] = std::move(pos);
-    v["residual_lag1_correlation"] =
-        lag_xx > 0 && lag_yy > 0 ? lag_xy / std::sqrt(lag_xx * lag_yy) : 0.0;
     return v;
   }
 };
@@ -281,96 +486,81 @@ int Simulate(const Options& opt) {
     for (const Value& r : Read(file)) {
       const std::vector<float> s = Floats(r, "proposal_signals");
       const std::vector<float> a = Floats(r, "row_acceptance");
+      const std::vector<float> us = Floats(r, "runner_up_signals");
+      const std::vector<float> ua = Floats(r, "runner_up_acceptance");
+      const Value* ups = r.find("runner_ups");
       if (r.member_size("copied") != 0 || s.size() != kChain ||
-          a.size() != kChain) {
+          a.size() != kChain || us.size() != kChain || ua.size() != kChain ||
+          ups == nullptr || ups->size() != kChain) {
         ++skipped;
         continue;
       }
       Chain c;
       c.position = static_cast<std::uint32_t>(r.member_size("position"));
       c.sampled = r.find("sampled")->as_bool();
-      std::copy(s.begin(), s.end(), c.signal.begin());
-      std::copy(a.begin(), a.end(), c.accept.begin());
+      for (std::size_t j = 0; j < kChain; ++j) {
+        c.signal[j] = s[j];
+        c.accept[j] = a[j];
+        c.has_up[j] = ups->items()[j].as_double() >= 0.0;
+        c.up_signal[j] = us[j];
+        c.up_accept[j] = ua[j];
+      }
       chains.push_back(c);
-    }
-  }
-  std::vector<Tally> fixed(kChain + 1);
-  Tally oracle;
-  Tally learned;
-  Tally prior;
-  Calibration fit;
-  for (const Chain& c : chains) {
-    const g4::DraftCosts costs = g4::DraftCostsAt(c.position, opt.experts);
-    for (std::size_t k = 0; k <= kChain; ++k) {
-      fixed[k].Add(Expected(c, k), Cost(costs, k, k), static_cast<double>(k));
-    }
-    // The cycle's best length for its expected rate.
-    std::size_t best = 0;
-    double rate = 0.0;
-    for (std::size_t k = 0; k <= kChain; ++k) {
-      const double r = Expected(c, k) / Cost(costs, k, k);
-      if (r > rate) {
-        rate = r;
-        best = k;
-      }
-    }
-    oracle.Add(Expected(c, best), Cost(costs, best, best),
-               static_cast<double>(best));
-  }
-  const auto run_policy = [&](const g4::DraftCalibration& table,
-                              const Chain& c, const g4::DraftCosts& costs,
-                              Tally* tally) {
-    g4::CalibratedChain chain(table, costs, opt.min_drafts, kChain);
-    std::size_t k = 0;
-    while (k < kChain && chain.Include(c.signal[k])) {
-      ++k;
-    }
-    // A declined proposal still ran its drafter step.
-    const std::size_t steps = std::min(k + 1, kChain);
-    tally->Add(Expected(c, k), Cost(costs, steps, k), static_cast<double>(k));
-    return k;
-  };
-  const g4::DraftCalibration frozen;
-  std::mt19937_64 rng(opt.seed);
-  std::uniform_real_distribution<double> uniform(0.0, 1.0);
-  for (int replica = 0; replica < opt.replicas; ++replica) {
-    std::array<g4::DraftCalibration, 2> tables;  // greedy, sampled
-    for (const Chain& c : chains) {
-      const g4::DraftCosts costs = g4::DraftCostsAt(c.position, opt.experts);
-      g4::DraftCalibration& table = tables[c.sampled ? 1 : 0];
-      if (replica == 0) {
-        run_policy(frozen, c, costs, &prior);
-        // How the current table predicts every labelled row.
-        double previous = 0.0;
-        for (std::size_t j = 0; j < kChain; ++j) {
-          const double e = table.Estimate(c.signal[j]);
-          fit.Add(j, c.signal[j], e, c.accept[j]);
-          const double residual = c.accept[j] - e;
-          if (j > 0) {
-            fit.AddLag(previous, residual);
-          }
-          previous = residual;
-        }
-      }
-      const std::size_t k = run_policy(table, c, costs, &learned);
-      // Learn as FinishCycle does: verified drafts up to the first
-      // rejection, drawn from the labels.
-      for (std::size_t j = 0; j < k; ++j) {
-        const bool accepted = uniform(rng) < c.accept[j];
-        table.Observe(c.signal[j], accepted);
-        if (!accepted) {
-          break;
-        }
-      }
     }
   }
   Value out = Value::object();
   out["chains"] = chains.size();
   out["skipped_cycles"] = skipped;
   out["replicas"] = opt.replicas;
-  out["calibrated_learning"] = learned.Json();
-  out["calibrated_frozen_prior"] = prior.Json();
-  out["oracle_per_cycle"] = oracle.Json();
+
+  // Fixed lengths (no siblings, as --draft-policy fixed) and the per-cycle
+  // oracle over them.
+  std::vector<Tally> fixed(kChain + 1);
+  Tally oracle;
+  std::size_t replica_mismatches = 0;
+  {
+    Production check(true);
+    std::mt19937_64 rng(opt.seed);
+    Tally ignored;
+    for (const Chain& c : chains) {
+      const g4::DraftCosts costs = g4::DraftCostsAt(c.position, opt.experts);
+      double survival = 1.0;
+      double tokens = 1.0;
+      std::size_t best = 0;
+      double best_rate = 0.0;
+      for (std::size_t k = 0; k <= kChain; ++k) {
+        if (k > 0) {
+          survival *= c.accept[k - 1];
+          tokens += survival;
+        }
+        const double ms = costs.draft[k] + costs.verify[k + 1];
+        fixed[k].Add(tokens, ms, static_cast<double>(k));
+        if (tokens / ms > best_rate) {
+          best_rate = tokens / ms;
+          best = k;
+        }
+      }
+      double t = 1.0;
+      double sv = 1.0;
+      for (std::size_t j = 0; j < best; ++j) {
+        sv *= c.accept[j];
+        t += sv;
+      }
+      oracle.Add(t, costs.draft[best] + costs.verify[best + 1],
+                 static_cast<double>(best));
+      // The replica decides as production does.
+      g4::CalibratedChain production(check.table(c.sampled), costs,
+                                     opt.min_drafts, kChain);
+      std::uint32_t k = 0;
+      while (k < kChain && production.Include(c.signal[k])) {
+        ++k;
+      }
+      if (RunCycle(check, c, costs, opt, false, &rng, &ignored).drafts != k) {
+        ++replica_mismatches;
+      }
+    }
+  }
+  out["replica_mismatches"] = replica_mismatches;
   Value fixed_json = Value::array();
   for (std::size_t k = 0; k <= kChain; ++k) {
     Value x = fixed[k].Json();
@@ -378,9 +568,60 @@ int Simulate(const Options& opt) {
     fixed_json.push_back(std::move(x));
   }
   out["fixed"] = std::move(fixed_json);
-  out["calibration_fit"] = fit.Json();
+  out["oracle_per_cycle"] = oracle.Json();
+
+  struct Policy {
+    std::string name;
+    std::function<std::unique_ptr<Estimator>()> make;
+    bool siblings;
+  };
+  std::vector<Policy> policies = {
+      {"production", [] { return std::make_unique<Production>(true); }, true},
+      {"production_no_siblings",
+       [] { return std::make_unique<Production>(true); }, false},
+      {"production_frozen", [] { return std::make_unique<Production>(false); },
+       true},
+  };
+  for (const float w : {4.0F, 8.0F, 16.0F, 32.0F}) {
+    policies.push_back({"position_w" + std::to_string(static_cast<int>(w)),
+                        [w] { return std::make_unique<Grouped>(w, true, 0.0F); },
+                        true});
+  }
+  for (const float h : {128.0F, 512.0F, 2048.0F}) {
+    policies.push_back(
+        {"recency_h" + std::to_string(static_cast<int>(h)),
+         [h] { return std::make_unique<Grouped>(8.0F, false, h); }, true});
+    policies.push_back(
+        {"position_w8_recency_h" + std::to_string(static_cast<int>(h)),
+         [h] { return std::make_unique<Grouped>(8.0F, true, h); }, true});
+  }
+  Value results = Value::object();
+  for (const Policy& policy : policies) {
+    Tally tally;
+    Fit fit;
+    for (int replica = 0; replica < opt.replicas; ++replica) {
+      std::mt19937_64 rng(opt.seed + static_cast<std::uint64_t>(replica));
+      const auto estimator = policy.make();
+      for (const Chain& c : chains) {
+        const g4::DraftCosts costs = g4::DraftCostsAt(c.position, opt.experts);
+        if (replica == 0) {
+          double reach = 1.0;
+          for (std::size_t j = 0; j < kChain; ++j) {
+            fit.Add(j, c.signal[j], estimator->Draft(c.signal[j], j, c.sampled),
+                    c.accept[j], reach);
+            reach *= c.accept[j];
+          }
+        }
+        RunCycle(*estimator, c, costs, opt, policy.siblings, &rng, &tally);
+      }
+    }
+    Value v = tally.Json();
+    v["fit"] = fit.Json();
+    results[policy.name] = std::move(v);
+  }
+  out["policies"] = std::move(results);
   std::cout << out.dump() << '\n';
-  return 0;
+  return replica_mismatches == 0 ? 0 : 1;
 }
 
 }  // namespace
