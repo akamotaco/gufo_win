@@ -8,8 +8,10 @@
 namespace gufo::models::gemma4 {
 namespace {
 
-// Costs on gfx1151 for the dense 31B family: drafter steps measured
-// 2026-09-28 (QAT drafter), verification forwards (target rows with logits,
+// Costs on gfx1151 for the dense 31B family: drafter steps of the
+// gemma4-assistant Q8_0 drafter measured in place 2026-10-20 (drafting time
+// per drafter step over fixed-length cycles, --draft-trace), verification
+// forwards (target rows with logits,
 // median of seven) remeasured 2026-10-05 on UD-Q4_K_XL after its
 // projections moved to the WMMA kernels, whose cost barely grows with rows (a
 // row never costs less than a narrower forward: the medians differ by noise
@@ -17,8 +19,8 @@ namespace {
 // global split-attention saving of one wave per head (ten layers). Only cost
 // ratios steer the decision.
 constexpr std::array<std::uint32_t, 5> kDepths = {0, 4096, 16384, 32768, 65536};
-constexpr std::array<float, 5> kDraftStepMs = {1.95F, 2.05F, 2.40F, 2.82F,
-                                               3.66F};
+constexpr std::array<float, 5> kDraftStepMs = {1.93F, 2.39F, 2.68F, 3.13F,
+                                               4.04F};
 // Verification rows 2-16 at 4K-64K lowered 2026-10-19 by the measured
 // global split-attention savings (ten layers).
 constexpr std::array<std::array<float, 16>, 5> kVerifyMs = {{
@@ -41,8 +43,11 @@ constexpr std::array<std::array<float, 16>, 5> kVerifyMs = {{
 // several times faster per row than on the dense family.
 // Two to four rows lowered 2026-10-17 by the measured global split-attention
 // saving of one wave per head (five layers).
-constexpr std::array<float, 5> kExpertDraftStepMs = {1.81F, 2.03F, 2.25F, 2.51F,
-                                                     3.04F};
+// Drafter steps measured in place 2026-10-20 like the dense family's; the
+// small head over frequent tokens drafts 95% of ~31K prose cycles (1.78 ms
+// per step there, the full head 2.21 ms).
+constexpr std::array<float, 5> kExpertDraftStepMs = {1.25F, 1.43F, 1.63F, 1.83F,
+                                                     2.17F};
 // Verification rows 2-16 at 4K-64K lowered 2026-10-19 by the measured
 // global split-attention savings (five layers).
 constexpr std::array<std::array<float, 16>, 5> kExpertVerifyMs = {{

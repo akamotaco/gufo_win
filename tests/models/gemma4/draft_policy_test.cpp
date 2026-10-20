@@ -81,7 +81,7 @@ void CheckCosts() {
   const g4::DraftCosts shallow = g4::DraftCostsAt(0);
   Require(shallow.verify[1] == 99.5F && shallow.verify[8] == 103.9F,
           "d0 verification costs");
-  Require(std::fabs(shallow.draft[7] - 7 * 1.95F) < 1e-4F, "d0 draft steps");
+  Require(std::fabs(shallow.draft[7] - 7 * 1.93F) < 1e-4F, "d0 draft steps");
   const g4::DraftCosts mid = g4::DraftCostsAt(2048);
   Require(std::fabs(mid.verify[3] - 0.5F * (100.6F + 106.3F)) < 1e-3F,
           "interpolation between depths");
@@ -94,7 +94,7 @@ void CheckCosts() {
   // The 26B-A4B's own table: cheaper cycles whose rows cost relatively more.
   const g4::DraftCosts moe = g4::DraftCostsAt(0, true);
   Require(moe.verify[1] == 18.3F && moe.verify[8] == 31.8F &&
-              std::fabs(moe.draft[1] - 1.81F) < 1e-4F,
+              std::fabs(moe.draft[1] - 1.25F) < 1e-4F,
           "expert-model d0 costs");
   Require(moe.verify[8] / moe.verify[1] > shallow.verify[8] / shallow.verify[1],
           "expert-model rows are not relatively dearer");

@@ -148,10 +148,11 @@ in those remeasured tables then measured neutral end to end.
 
 Next steps, in order:
 
-1. Price the drafter actually loaded. Measure its step in place (the
-   per-cycle trace's drafting time over drafter steps) for each supported
-   drafter at each table depth, or key the table by drafter; qualify the
-   change alone with matched ABBA.
+1. Done 2026-10-20: drafter steps remeasured in place for the 31B assistant
+   and the 26B Unsloth drafter; prices now within ~6% of measured ratios,
+   throughput unchanged (EXPERIMENTS.md). Other target quantizations (Q8,
+   QAT) and drafters keep these tables: pricing by the loaded files' bytes
+   would cover them deterministically.
 2. Bound the gain first: replay recorded cycles offline with each cycle's
    measured costs (oracle prices) and with tables perturbed by ±2/5/10%;
    count changed decisions and their expected tokens per millisecond. Stop
