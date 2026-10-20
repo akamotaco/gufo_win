@@ -61,6 +61,10 @@ tr.miss td { color: var(--warn); }
 button { background: transparent; color: var(--muted); border: 1px solid var(--line); border-radius: 6px;
   padding: 3px 8px; cursor: pointer; font: inherit; font-size: 12px; }
 .down { color: var(--muted); font-size: 13px; margin-top: 4px; }
+.alert { border: 1px solid var(--warn); border-left-width: 4px; border-radius: 10px; padding: 10px 14px;
+  margin-bottom: 12px; background: var(--card); }
+.alert b { color: var(--warn); }
+.alert code { font-size: 12px; }
 </style>
 </head>
 <body>
@@ -69,6 +73,7 @@ button { background: transparent; color: var(--muted); border: 1px solid var(--l
     <h1>gufo monitor</h1>
     <div><span id="clock" class="muted"></span> <button id="theme">테마</button></div>
   </header>
+  <div id="tdr"></div>
   <section class="grid" id="system"></section>
   <section class="servers" id="servers"></section>
   <p class="muted" style="font-size:12px">빨간 줄: 2만 토큰 이상인데 절반 넘게 다시 prefill한 요청(캐시 미스). GPU 메모리 막대의 빨간 선: 안전 한계 93.4 GiB.</p>
@@ -132,6 +137,18 @@ function renderSystem(s) {
   spark($("c-ram"), hist.ram, 32, css("--decode"));
 }
 
+// Windows resets the GPU when one submission runs past TdrDelay (2 s unless set): docs/WINDOWS-TDR.md.
+function renderTdr(t) {
+  let msg = "";
+  if (t && t.effective < 10)
+    msg = `<b>GPU 타임아웃(TdrDelay)이 ${t.effective}초입니다${t.delay == null ? " (Windows 기본값)" : ""}.</b>
+      긴 prefill 중에 Windows가 GPU를 리셋해 서버가 <code>device_lost</code>로 멈출 수 있습니다.
+      <code>gufo_tdr.bat</code>에서 30초로 설정한 뒤 재부팅하세요. (docs/WINDOWS-TDR.md)`;
+  else if (t && t.pending_reboot)
+    msg = `<b>GPU 타임아웃 설정이 부팅 이후 바뀌었습니다.</b> 재부팅해야 TdrDelay ${t.delay}초가 적용됩니다.`;
+  $("tdr").innerHTML = msg ? `<div class="alert">${msg}</div>` : "";
+}
+
 function slotView(port, sl, now) {
   const key = port + "/" + sl.id, p = prev[key];
   const nt = sl.next_token?.[0] || {};
@@ -184,9 +201,14 @@ function serverView(sv, now) {
       <td>${fmt(r.queue_ms / 1000, 1)}</td><td>${fmt(r.ttft_ms / 1000, 1)}</td><td>${fmt(r.generated_tokens)}</td>
       <td>${fmt(r.prefill_tps)}</td><td>${fmt(r.decode_tps, 1)}</td><td class="l">${esc(r.cache_miss_reason || r.finish || "")}</td></tr>`;
   }).join("");
+  // The model file the server loaded (/props); the --servers label is only a fallback.
+  const info = sv.info || {};
+  const title = info.file || sv.name;
+  const details = [title !== sv.name ? sv.name : "", info.served || sv.model || "", "세션 " + sv.slots.length,
+    info.ctx ? "문맥 " + fmt(info.ctx / 1000) + "K" : "", info.vision ? "비전" : ""].filter(Boolean).map(esc).join(" · ");
   return `<div class="card server">
-    <h2><span class="dot" style="background:${busy ? css("--decode") : css("--idle")}"></span>${sv.port}${sv.name ? " · " + esc(sv.name) : ""}
-      <span class="muted" style="font-weight:400;font-size:12px">${esc(sv.model || "")} · 세션 ${sv.slots.length}</span></h2>
+    <h2><span class="dot" style="background:${busy ? css("--decode") : css("--idle")}"></span>${sv.port}${title ? " · " + esc(title) : ""}
+      <span class="muted" style="font-weight:400;font-size:12px">${details}</span></h2>
     <div class="tput"><span>지금 prefill ${pr != null ? fmt(pr) : "–"} tok/s</span><span>지금 decode ${dr != null ? fmt(dr, 1) : "–"} tok/s</span>
       <span>대기 요청 ${fmt(m.requests_deferred)}</span><span>MTP 채택률 ${acc != null ? fmt(acc) + "%" : "–"}</span>
       <span>KV 사용 ${fmt((m.kv_cache_usage_ratio || 0) * 100)}%</span></div>
@@ -201,6 +223,7 @@ async function tick() {
   try {
     const r = await fetch("/api", { cache: "no-store" });
     const d = await r.json();
+    renderTdr(d.tdr);
     renderSystem(d.system);
     const live = d.servers.filter((s) => s.up), off = d.servers.filter((s) => !s.up);
     $("servers").innerHTML = live.map((s) => serverView(s, d.t)).join("") +
