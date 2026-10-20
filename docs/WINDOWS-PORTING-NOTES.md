@@ -118,14 +118,31 @@ grep -rn 'syscall(SYS_\|/proc/\|/sys/\|io_uring' src                           #
   carve-out을 넘겨 할당한다. 2026-10-18 측정: Flash-Next 2세션×262K + MTP + 비전이 전용 95.3GB(한계)에 붙었고,
   요청이 시작되자 페이지 파일에 약 20MB를 썼다(Pages Output 1,396/s). 1세션×262K는 91.4GB에서 쓰기 0.
   Rulith는 `manager.py` `host_expert_layers()`에서 "carve×0.96 − 다른 프로그램 사용량"을 넘는 부분을 고정 호스트
-  메모리로 직접 옮겨 이 문제를 피했다. 지금은 `..	ool\gufo_select.py`의 사전 점검(합계 93.4GB)으로만 막는다.
+  메모리로 직접 옮겨 이 문제를 피했다. 지금은 `..\tool\gufo_select.py`의 사전 점검(합계 93.4GB)으로만 막는다.
   후보: LOCAL 여유만 보고하도록 바꾸기(체크포인트 용량·세션 판단에 미치는 영향 확인 필요).
 - [ ] Qwen3.8-27B Windows 튜닝 14커밋, Qwen3.6-A3B 4커밋 (목록은 `..\gufo-windows.md`).
 - [ ] 테스트 미포팅: `BUILD_TESTING=OFF`로만 빌드했다. 본가가 새로 쓴 테스트 코드(`tests/cli/http_server_test.cpp` 2170행 이후 등)에
   생 `::close`/`timeval` 소켓 호출이 남아 있어 `gpu-test` 프리셋은 아직 빌드되지 않을 것이다.
 - [ ] **런타임 미검증 경로**: 3.1의 디스크 캐시 함수(`readdir`, `renameat2`, `mkdirat`)는 컴파일만 확인했다.
   `--cache-disk DIR`를 켜고 체크포인트 저장·복원을 실제로 시험해야 한다(기본은 `disk_cache=off`).
-- [ ] Qwen3.8-Flash-Next를 이 Windows 빌드로 아직 돌려보지 않았다(GPU 약 89GiB, rulith 서버를 내려야 함 — 사용자 동의 필요).
+- [x] Qwen3.8-Flash-Next를 이 Windows 빌드로 돌리기: 2026-10-18부터 사용 중(측정은 README "Measured on Windows").
+- [ ] **Gemma 4 AR 디코드가 Linux보다 약 13% 느리다 (future work).** 2026-10-21 현재 빌드(`a029660d`)로 MeroMero
+  26B Q8_0을 다시 쟀다(문맥 65536, 캐시 2GiB, 1세션, `llm\tool\measure.py`):
+
+  | 프롬프트 | prefill | AR decode | MTP decode (채택률) |
+  | --- | ---: | ---: | ---: |
+  | 짧음, 512토큰 생성 | – | 40.7 | 59.4 (62%) |
+  | 2.1K | 3,064 | 39.6 | 57.7 (59%) |
+  | 8.5K | 3,112 | 39.4 | 55.8 (57%) |
+  | 31.8K | 2,602 | 36.8 | 52.4 (61%) |
+
+  2026-10-18과 오차 범위 안에서 같다(feat/gemma 294커밋 병합 전후 변화 없음). 본가 Linux 수치
+  (`docs/models/gemma-4-26b-a4b/BENCHMARKS.md`, UD-Q8_K_XL, 같은 HTTP 경로)는 AR d0 46.0, d32K 42.1이라
+  Windows가 12~14% 느리다. Linux 파일이 더 큰데도 느리고 문맥 길이와 무관하게 같은 비율이라, 커널보다
+  스텝마다 붙는 호스트 쪽 비용(실행 대기, 동기화)으로 추정한다(Flash-Next 분석 `docs/WINDOWS-DECODE-OVERHEADS.md`와 같은 성격).
+  prefill은 짧을 때만 약 19% 낮고(3,781 대 3,064) 32K는 오히려 높아(2,310 대 2,602) 전력·클럭 차이일 수 있다.
+  다음 단계: Gemma `Session` 디코드 한 스텝을 GPU 시간과 나머지로 나눠 재는 임시 계측
+  (Flash-Next의 `GUFO_DECODE_TRACE`처럼). 기대 효과는 AR 약 10%, MTP도 비슷한 비율.
 
 ## 6. 업데이트 후 확인 순서
 
