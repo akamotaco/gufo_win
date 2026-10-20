@@ -22,6 +22,16 @@ adapts the build to TheRock 10.2. Every change, conflict decision and open item
 is recorded in [docs/WINDOWS-PORTING-NOTES.md](docs/WINDOWS-PORTING-NOTES.md)
 (Korean).
 
+> [!WARNING]
+> **Windows: raise the GPU timeout (TDR) before long runs.** Windows resets the GPU
+> when submitted work takes longer than 2 seconds (`TdrDelay`). Under long prefills
+> and agent sessions this shows up as `503 GPU context lost; restart required`
+> (`device_lost`) and a "hardware problem" `LiveKernelEvent 141` in Windows, which is a
+> timeout, not a hardware fault. AMD lists driver timeouts during inference as a Windows
+> known issue in ROCm. Run `tools\windows\tdr_delay.bat set` (30 s, asks for
+> administrator rights, then reboot; `restore` puts the old values back). Linux is not
+> affected. Details: [docs/WINDOWS-TDR.md](docs/WINDOWS-TDR.md).
+
 ### Measured on Windows
 
 Gemma 4 26B-A4B Q8_0 on one Strix Halo machine (Windows 11, 96 GB GPU carve-out),
@@ -93,6 +103,8 @@ MTP uses each model's drafter):
 
 ### Memory setup on a 128 GB machine
 
+- **GPU timeout (TDR): 30 s** with `tools\windows\tdr_delay.bat set`, then reboot; the
+  2-second default resets the GPU during long runs ([docs/WINDOWS-TDR.md](docs/WINDOWS-TDR.md)).
 - **GPU carve-out (Variable Graphics Memory): 96 GB, no more.** Windows then sees about
   32 GB of RAM, and its shared-GPU-memory limit is half of that, ~16 GB. That limit is
   not a separate setting; a larger carve-out shrinks it.
