@@ -3413,7 +3413,7 @@ std::unique_ptr<ComponentCacheResources> CreateGemma4ComponentResources(
               limited->refused = now;
               return false;
             }});
-    backing->pool->GrowAhead(2);
+    backing->pool->GrowAhead(2 * backing->pool->SegmentBytes());
     backing->pool->WaitForGrowth();
     Logger::Info(
         "cache",
@@ -3422,7 +3422,9 @@ std::unique_ptr<ComponentCacheResources> CreateGemma4ComponentResources(
             " long_term_pinned_bytes=" +
             std::to_string(backing->pool->LongTermPinnedBytes()));
   };
-  result->prepare_prefill = [backing] { backing->pool->GrowAhead(2); };
+  result->prepare_prefill = [backing](std::size_t) {
+    backing->pool->GrowAhead(2 * backing->pool->SegmentBytes());
+  };
   result->can_capture = [backing](auto payloads) {
     return backing->pool->CanFit(payloads);
   };
@@ -3453,7 +3455,7 @@ std::unique_ptr<ComponentCacheResources> CreateGemma4ComponentResources(
     if (!block)
       throw cache::ResourceExhausted();
     if (request.category == cache::ResourceCategory::kBackingAssigned)
-      backing->pool->GrowAhead();
+      backing->pool->GrowAhead(backing->pool->SegmentBytes());
     auto owner = std::make_shared<hip::BackingBlock>(std::move(*block));
     return ComponentCaptureBuffer{
         owner->Bytes(),

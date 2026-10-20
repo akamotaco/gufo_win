@@ -450,6 +450,9 @@ void CommittedBackingPool::WaitForGrowth() {
   if (ahead_.joinable())
     ahead_.join();
 }
+std::size_t CommittedBackingPool::SegmentBytes() const noexcept {
+  return state_->segment_blocks * state_->block_bytes;
+}
 std::size_t CommittedBackingPool::BlockCount() const noexcept {
   return state_->committed.load(std::memory_order_acquire);
 }
