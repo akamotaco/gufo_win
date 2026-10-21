@@ -506,5 +506,66 @@
    }
   },
   "ceiling": "the decoded kernel peaks near 43 TFLOP/s (q|k 43.4, v 41.4) and GGUF down already runs 40.4, so a perfect binary16 down/o would gain ~6-7% on those shapes, ~1-1.5% of the projections beyond decoded mode (compact already +3.6-6% there)"
+ },
+ "e2e_26b_ud_q4_k_xl_compact_experts": {
+  "note": "compact copy of the Q4_K/Q5_K expert [gate | up] weights only (dense Q8_0 projections get none); gufo bench -p 2048 -n 16 -d 0, alternating",
+  "runs": [
+   {
+    "arm": "off",
+    "peak_gtt_mib": 18102,
+    "load_s": 3.16647,
+    "pp2048": 4050.75,
+    "tg16": 60.79
+   },
+   {
+    "arm": "compact",
+    "peak_gtt_mib": 27338,
+    "load_s": 3.474,
+    "pp2048": 4106.45,
+    "tg16": 60.75
+   },
+   {
+    "arm": "compact",
+    "peak_gtt_mib": 27341,
+    "load_s": 3.41139,
+    "pp2048": 4100.71,
+    "tg16": 60.72
+   },
+   {
+    "arm": "off",
+    "peak_gtt_mib": 18102,
+    "load_s": 3.12986,
+    "pp2048": 4051.91,
+    "tg16": 60.84
+   },
+   {
+    "arm": "off",
+    "peak_gtt_mib": 18102,
+    "load_s": 3.09879,
+    "pp2048": 4045.66,
+    "tg16": 60.86
+   },
+   {
+    "arm": "compact",
+    "peak_gtt_mib": 27341,
+    "load_s": 3.4093,
+    "pp2048": 4074.3,
+    "tg16": 60.75
+   },
+   {
+    "arm": "compact",
+    "peak_gtt_mib": 27338,
+    "load_s": 3.44235,
+    "pp2048": 4077.74,
+    "tg16": 60.8
+   },
+   {
+    "arm": "off",
+    "peak_gtt_mib": 18102,
+    "load_s": 3.11948,
+    "pp2048": 4049.01,
+    "tg16": 60.81
+   }
+  ]
  }
 }

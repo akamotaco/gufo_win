@@ -119,7 +119,8 @@ register loads −0.7%, a binary16 scale sidecar +1.5%), and decode cannot read
 the compact copy without ~10% more bytes per token. Binary16 copies of the
 k >= 8192 projections (down, o) stay rejected: exact K chunks, 2D launch
 regions and a register prefetch all still lose 7–55%, and their ceiling over
-compact is ~1–1.5% of the projections (EXPERIMENTS.md).
+compact is ~1–1.5% of the projections (EXPERIMENTS.md). On the 26B-A4B the
+modes copy the K-quant expert [gate | up] weights (+1.0% pp2048, +9.0 GiB).
 
 ### 5. Global prefill attention redesign
 
