@@ -143,3 +143,15 @@ instructions after their LDS load. Prefetching those fragments into registers
 costs exactly the occupancy that hides them (205 VGPRs, 7 waves/SIMD, +3.8%),
 and making the super-block half a template argument (to fold the scale gather)
 spills 187 bytes per thread.
+
+## Follow-up qualification
+
+The standalone build helper omitted `-ffast-math -fno-finite-math-only` even
+though the production translation unit uses them. The helper now supplies
+both; historical measurements above retain their original provenance.
+Fresh matched-flag controls reach 39–40 TFLOP/s. Independent WMMA scheduling,
+compact XOR-swizzled 128-token tiles and iterative-ILP scheduling did not
+produce a qualified improvement. See the [follow-up experiment](../../EXPERIMENTS.md)
+and [all measurements and candidate patches](../../artifacts/prefill-followup-2026-10-21.json).
+The follow-up totals are weighted standalone kernel times, not full inference
+measurements; production dispatch and published serving rates remain unchanged.
