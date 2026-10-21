@@ -60,6 +60,8 @@ struct TextSpeculativeConfig {
   /// selects the model's defaults.
   std::string mtp_draft_policy;
   std::string mtp_draft_calibration;
+  /// Gemma 4 MTP per-cycle trace file; empty writes none.
+  std::string mtp_draft_trace_path;
 };
 
 struct TextDiskCacheConfig {

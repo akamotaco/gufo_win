@@ -8,8 +8,10 @@
 namespace gufo::models::gemma4 {
 namespace {
 
-// Costs on gfx1151 for the dense 31B family: drafter steps measured
-// 2026-09-28 (QAT drafter), verification forwards (target rows with logits,
+// Costs on gfx1151 for the dense 31B family: drafter steps of the
+// gemma4-assistant Q8_0 drafter measured in place 2026-10-20 (drafting time
+// per drafter step over fixed-length cycles, --draft-trace), verification
+// forwards (target rows with logits,
 // median of seven) remeasured 2026-10-05 on UD-Q4_K_XL after its
 // projections moved to the WMMA kernels, whose cost barely grows with rows (a
 // row never costs less than a narrower forward: the medians differ by noise
@@ -17,19 +19,21 @@ namespace {
 // global split-attention saving of one wave per head (ten layers). Only cost
 // ratios steer the decision.
 constexpr std::array<std::uint32_t, 5> kDepths = {0, 4096, 16384, 32768, 65536};
-constexpr std::array<float, 5> kDraftStepMs = {1.95F, 2.05F, 2.40F, 2.82F,
-                                               3.66F};
+constexpr std::array<float, 5> kDraftStepMs = {1.93F, 2.39F, 2.68F, 3.13F,
+                                               4.04F};
+// Verification rows 2-16 at 4K-64K lowered 2026-10-19 by the measured
+// global split-attention savings (ten layers).
 constexpr std::array<std::array<float, 16>, 5> kVerifyMs = {{
     {99.5F, 99.8F, 100.6F, 101.4F, 102.0F, 102.8F, 103.3F, 103.9F, 109.0F,
      109.6F, 110.1F, 111.1F, 111.7F, 112.3F, 112.7F, 113.1F},
-    {104.1F, 105.2F, 106.5F, 108.0F, 108.7F, 110.6F, 111.9F, 113.3F, 122.7F,
-     123.5F, 124.4F, 125.0F, 126.1F, 127.6F, 127.6F, 130.7F},
-    {108.2F, 109.8F, 111.6F, 114.4F, 117.3F, 120.3F, 123.2F, 125.7F, 138.9F,
-     140.0F, 142.2F, 144.4F, 146.8F, 149.1F, 150.0F, 153.2F},
-    {112.5F, 115.2F, 117.7F, 121.4F, 126.3F, 130.6F, 136.0F, 140.0F, 158.3F,
-     160.4F, 163.8F, 167.0F, 170.3F, 173.5F, 175.2F, 180.1F},
-    {121.0F, 125.1F, 129.7F, 135.6F, 143.6F, 149.7F, 159.8F, 166.7F, 195.9F,
-     199.8F, 206.1F, 213.5F, 218.0F, 223.6F, 228.0F, 235.5F},
+    {104.1F, 105.1F, 106.3F, 107.9F, 108.5F, 110.3F, 111.5F, 112.8F, 120.5F,
+     121.8F, 122.6F, 123.7F, 125.2F, 126.7F, 126.8F, 129.9F},
+    {108.2F, 109.6F, 111.2F, 113.3F, 116.4F, 118.8F, 121.4F, 123.8F, 134.6F,
+     136.8F, 139.5F, 141.7F, 144.0F, 146.1F, 146.9F, 149.4F},
+    {112.5F, 114.9F, 117.2F, 119.6F, 124.6F, 128.5F, 132.7F, 136.6F, 149.7F,
+     153.8F, 157.9F, 161.1F, 164.9F, 167.6F, 169.2F, 173.8F},
+    {121.0F, 124.3F, 128.3F, 132.4F, 140.2F, 145.8F, 153.8F, 160.0F, 180.0F,
+     187.3F, 194.8F, 202.0F, 208.2F, 212.0F, 216.0F, 222.7F},
 }};
 
 // The 26B-A4B (UD-Q4_K_XL target, Unsloth Q8_0 drafter), measured
@@ -39,19 +43,24 @@ constexpr std::array<std::array<float, 16>, 5> kVerifyMs = {{
 // several times faster per row than on the dense family.
 // Two to four rows lowered 2026-10-17 by the measured global split-attention
 // saving of one wave per head (five layers).
-constexpr std::array<float, 5> kExpertDraftStepMs = {1.81F, 2.03F, 2.25F, 2.51F,
-                                                     3.04F};
+// Drafter steps measured in place 2026-10-20 like the dense family's; the
+// small head over frequent tokens drafts 95% of ~31K prose cycles (1.78 ms
+// per step there, the full head 2.21 ms).
+constexpr std::array<float, 5> kExpertDraftStepMs = {1.25F, 1.43F, 1.63F, 1.83F,
+                                                     2.17F};
+// Verification rows 2-16 at 4K-64K lowered 2026-10-19 by the measured
+// global split-attention savings (five layers).
 constexpr std::array<std::array<float, 16>, 5> kExpertVerifyMs = {{
     {18.3F, 21.1F, 23.1F, 25.4F, 27.3F, 29.1F, 30.8F, 31.8F, 33.2F, 34.4F,
      37.1F, 40.6F, 42.3F, 44.8F, 44.6F, 46.0F},
-    {19.8F, 22.8F, 25.7F, 28.1F, 30.0F, 32.8F, 34.9F, 36.4F, 37.8F, 39.5F,
-     42.5F, 46.0F, 48.9F, 51.1F, 51.0F, 52.6F},
-    {20.8F, 24.0F, 26.8F, 29.5F, 32.1F, 35.1F, 37.9F, 39.6F, 41.9F, 43.5F,
-     46.8F, 50.5F, 52.6F, 55.3F, 55.5F, 57.6F},
-    {21.7F, 25.2F, 28.3F, 31.5F, 34.7F, 37.5F, 40.2F, 42.3F, 45.8F, 47.6F,
-     50.9F, 55.4F, 58.0F, 61.2F, 61.5F, 63.6F},
-    {23.6F, 25.7F, 29.5F, 33.2F, 37.6F, 41.6F, 45.6F, 48.0F, 53.5F, 55.6F,
-     60.0F, 64.7F, 69.0F, 72.4F, 73.0F, 76.0F},
+    {19.8F, 22.8F, 25.7F, 28.0F, 30.0F, 32.7F, 34.7F, 36.2F, 37.1F, 38.9F,
+     42.0F, 45.5F, 48.6F, 50.9F, 50.8F, 52.4F},
+    {20.8F, 24.0F, 26.6F, 29.3F, 31.9F, 34.8F, 37.5F, 39.2F, 40.7F, 42.8F,
+     46.2F, 49.9F, 51.8F, 54.5F, 54.7F, 56.8F},
+    {21.7F, 25.2F, 28.0F, 31.0F, 34.3F, 36.8F, 39.4F, 41.3F, 43.6F, 46.0F,
+     49.6F, 54.0F, 56.6F, 59.7F, 59.9F, 61.8F},
+    {23.6F, 25.7F, 29.1F, 32.4F, 36.8F, 40.5F, 43.9F, 46.2F, 49.2F, 52.2F,
+     57.0F, 61.4F, 66.3F, 69.5F, 69.9F, 72.8F},
 }};
 
 }  // namespace
@@ -214,6 +223,7 @@ bool CalibratedChain::FirstDraftCanPay() const noexcept {
 
 bool CalibratedChain::Include(float signal) noexcept {
   const std::uint32_t index = kept_;  // drafter steps so far: index + 1
+  decision_ = {};
   if (index >= cap_) {
     return false;
   }
@@ -228,8 +238,10 @@ bool CalibratedChain::Include(float signal) noexcept {
     const float next = others_.draft_ms +
                        costs_.draft[std::min(index + 2, cap_)] +
                        Verify(index + 2);
-    if (survival * current <
-        (others_.expected + expected_) * (next - current)) {
+    decision_ = {.compared = true,
+                 .gain = survival * current,
+                 .cost = (others_.expected + expected_) * (next - current)};
+    if (decision_.gain < decision_.cost) {
       return false;
     }
   }

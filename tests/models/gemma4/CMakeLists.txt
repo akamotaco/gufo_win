@@ -13,6 +13,7 @@ function(add_gemma4_test name library labels)
 endfunction()
 
 add_gemma4_test(config gufo_gemma4 "cpu")
+add_gemma4_test(cycle_trace gufo_gemma4 "cpu;speculative")
 add_gemma4_test(draft_policy gufo_gemma4 "cpu;speculative")
 add_gemma4_test(draft_vocab gufo_gemma4 "cpu;speculative")
 add_gemma4_test(tokenizer_contract gufo_gemma4 "cpu;tokenization")
@@ -26,6 +27,11 @@ foreach(target gemma4_template_test gemma4_artifact_test)
     GUFO_GEMMA4_FIXTURES="${PROJECT_SOURCE_DIR}/tests/models/gemma4/fixtures")
 endforeach()
 
+# Offline replay of --draft-trace records through the production draft
+# policy (tools/gemma4/draft_replay.cpp).
+add_executable(gemma4_draft_replay EXCLUDE_FROM_ALL
+  ${PROJECT_SOURCE_DIR}/tools/gemma4/draft_replay.cpp)
+target_link_libraries(gemma4_draft_replay PRIVATE gufo_gemma4)
 add_executable(gemma4_reference_probe EXCLUDE_FROM_ALL reference_probe.cpp)
 target_link_libraries(gemma4_reference_probe PRIVATE gufo_gemma4_reference)
 set_source_files_properties(reference_probe.cpp PROPERTIES COMPILE_OPTIONS "-O2")

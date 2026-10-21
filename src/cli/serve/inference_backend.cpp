@@ -3363,14 +3363,14 @@ std::unique_ptr<ComponentCacheResources> CreateGemma4ComponentResources(
     if (plan.size() != 1)
       throw std::invalid_argument("insufficient component backing budget");
     const auto& allocation = plan.front();
-    // Equal segments of about 1 GiB that fit two of the largest payloads;
-    // pages commit as captures need them while the host keeps its reserve.
+    // Bound registration pauses with segments of about 128 MiB that fit
+    // two of the largest payloads. Prefill prepares the backing reserve.
     std::size_t largest = 0;
     for (const auto& [id, bytes] : backing->component_classes)
       largest = std::max(largest, bytes);
     const auto block = allocation.block_bytes;
     const auto target =
-        std::max<std::size_t>(std::size_t{1} << 30, 2 * largest) / block;
+        std::max<std::size_t>(std::size_t{128} << 20, 2 * largest) / block;
     const auto parts =
         std::max<std::size_t>((allocation.blocks + target - 1) / target, 1);
     const auto segment = (allocation.blocks + parts - 1) / parts * block;
@@ -3413,7 +3413,7 @@ std::unique_ptr<ComponentCacheResources> CreateGemma4ComponentResources(
               limited->refused = now;
               return false;
             }});
-    backing->pool->GrowAhead(2 * backing->pool->SegmentBytes());
+    backing->pool->GrowAhead(2ULL << 30);
     backing->pool->WaitForGrowth();
     Logger::Info(
         "cache",
@@ -3422,8 +3422,8 @@ std::unique_ptr<ComponentCacheResources> CreateGemma4ComponentResources(
             " long_term_pinned_bytes=" +
             std::to_string(backing->pool->LongTermPinnedBytes()));
   };
-  result->prepare_prefill = [backing](std::size_t) {
-    backing->pool->GrowAhead(2 * backing->pool->SegmentBytes());
+  result->prepare_prefill = [backing](std::size_t tokens) {
+    backing->pool->GrowAhead((tokens >= 512 ? 2ULL : 1ULL) << 30);
   };
   result->can_capture = [backing](auto payloads) {
     return backing->pool->CanFit(payloads);
@@ -3454,8 +3454,6 @@ std::unique_ptr<ComponentCacheResources> CreateGemma4ComponentResources(
                                  .count()));
     if (!block)
       throw cache::ResourceExhausted();
-    if (request.category == cache::ResourceCategory::kBackingAssigned)
-      backing->pool->GrowAhead(backing->pool->SegmentBytes());
     auto owner = std::make_shared<hip::BackingBlock>(std::move(*block));
     return ComponentCaptureBuffer{
         owner->Bytes(),
@@ -3471,12 +3469,13 @@ std::unique_ptr<ComponentCacheResources> CreateGemma4ComponentResources(
         }};
   };
   result->staging = [](std::size_t bytes) {
+    auto allocation = std::make_shared<hip::HostAllocations>();
     void* data = nullptr;
-    const auto status = hipHostMalloc(&data, bytes, hipHostMallocCoherent);
+    const auto status =
+        allocation->Allocate(&data, bytes, hipHostMallocCoherent);
     if (status != hipSuccess)
       throw std::runtime_error(hipGetErrorString(status));
-    auto owner = std::shared_ptr<void>(
-        data, [](void* value) { (void)hipHostFree(value); });
+    auto owner = std::shared_ptr<void>(std::move(allocation), data);
     std::memset(data, 0, bytes);
     return cache::StagingAllocation{std::move(owner),
                                     {static_cast<std::uint8_t*>(data), bytes}};
@@ -4074,7 +4073,8 @@ struct InferenceBackend::Impl {
         reasoning_end_ = runner.TokenizeControl(runner.Markup().reasoning_end);
       // Output that may open reasoning itself counts it only when it does.
       if (initial == InitialOutputState::kAuto)
-        reasoning_start_ = runner.TokenizeControl(runner.Markup().reasoning_start);
+        reasoning_start_ =
+            runner.TokenizeControl(runner.Markup().reasoning_start);
     }
 
     Result Wait(const TokenCallback& on_token,
@@ -4286,6 +4286,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
                             ? speculative_config.max_draft_tokens
                             : models::gemma4::kDefaultDraftTokens,
         .min_draft_tokens = speculative_config.min_draft_tokens,
+        .draft_trace_path = speculative_config.mtp_draft_trace_path,
     };
     try {
       gemma_options.draft_policy =
@@ -4349,7 +4350,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
         (speculative_config.max_draft_tokens == 0 ||
          speculative_config.min_draft_tokens != 1 ||
          !speculative_config.mtp_draft_policy.empty() ||
-         !speculative_config.mtp_draft_calibration.empty())) {
+         !speculative_config.mtp_draft_calibration.empty() ||
+         !speculative_config.mtp_draft_trace_path.empty())) {
       SetError(error,
                "Flash-Next MTP requires a positive draft limit, "
                "--min-draft-tokens 1 and no --draft-policy");

@@ -4,6 +4,7 @@
 add_library(gufo_gemma4 STATIC
   chat_template.cpp
   config.cpp
+  cycle_trace.cpp
   draft_policy.cpp
   draft_vocab.cpp
   tokenizer.cpp

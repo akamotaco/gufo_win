@@ -1,7 +1,7 @@
 # Gemma 4 performance backlog
 
 Open performance work for the Gemma 4 engine (31B, 31B QAT, 26B-A4B), as of
-2026-10-17 on branch `feat/gemma-perf`. Measured results, including every
+2026-10-20 on branch `feat/gemma-mtp`. Measured results, including every
 rejected attempt, are in [EXPERIMENTS.md](EXPERIMENTS.md) and the
 [26B log](../gemma-4-26b-a4b/EXPERIMENTS.md); read the matching rows before
 retrying anything listed here. Impact figures are estimates on 31B
@@ -33,24 +33,37 @@ gaps. MTP verify cycles at d0 (~101 ms GPU): target verification projections
 
 | # | Item | Area | Effort | Est. impact | Confidence |
 | ---: | --- | --- | --- | --- | --- |
-| 1 | MTP verification projections: close the 5–13% per-byte gap of the WMMA verification GEMV to the AR GEMV | Decode MTP, all depths | Hard | MTP +5–10% | Low |
+| 1 | MTP verification projections: close the 5–13% per-byte gap of the WMMA verification GEMV to the AR GEMV | Decode MTP, all depths | Very hard | MTP +0–3% | Low |
 | 2 | 8-bit KV cache | Decode at depth, memory | Very hard, quality risk | AR +5% at 32K, +14% at 128K; MTP more; about half the KV memory | Speed medium, quality unknown |
 | 3 | MTP verification attention at five or more rows | Decode MTP at depth | Hard | +2–5% at 32K, more at 128K | Low |
 | 4 | Prefill projections past ~70% of the WMMA ceiling | Prefill, all depths | Hard | +2–5% | Low |
 | 5 | Global prefill attention redesign: two heads per wave over one shared LDS arena | Prefill at depth | Hard | +1.5–3% at 32K, +3–6% at 128K | Medium |
 | 6 | AR decode GEMV | Decode AR | Hard | +2–4% | Low |
+| 7 | Measure and validate MTP cycle cost estimates | Decode MTP, 31B and 26B | Medium | Bounded by the oracle replay below; the 2026-10-05 remeasured tables measured neutral | Low |
 
 ### 1. MTP verification projections
 
 `wmma_gemv.hip.cpp`. The kernel stays 5–13% behind the AR Gemma GEMV on equal
-bytes (cold, one row: 5376×16384 247 vs 220 µs). Load-only probes cap it at
-207–217 GB/s regardless of barriers, prefetch depth, request size or DRAM
-locality; occupancy is 9–24 against the AR GEMV's 47–62. Rejected so far:
-split half-wave loads, deeper weight prefetch, software-pipelined groups. The
-remaining idea is cooperative full-line weight loads redistributed to the WMMA
-lanes (today each load instruction touches 16 cache lines). Verification must
-keep one arithmetic per format so it still equals decode bit for bit
-(`gemma4.projection_ops`).
+bytes (cold, one row: 5376×16384 247 vs 220 µs). The 2026-10-16 "16 cache
+lines per instruction" diagnosis is disproven: load-only probes at the
+kernel's launch shape measure 209–212 GB/s for every pattern — per-lane row
+loads, cooperative 4 × 128 B full lines, 16 × 32 B or 8 × 64 B pieces — and
+k-splits lose 5–10%, so the load instructions, request size and extra waves
+are all dead levers (2026-10-19, the [experiment
+log](EXPERIMENTS.md)). The cap is the walk geometry: the launch marches
+through the super-blocks column-locked, while the AR GEMV's waves walk
+contiguous k slices of four rows (225–237 GB/s; a linear stream 240). Waves
+sharing the 16-row group over contiguous ~8-super-block slabs recover
+216–225 GB/s, but the full kernel on that walk loses 3–83% everywhere except
+5376 × 16384 at one to five rows (−0.8 to −2.4%): with waves at different
+super-blocks, the shared LDS activation tile becomes per-wave L2 traffic,
+about 3.5 × the weight bytes. Per-wave LDS tiles do not fit 64 KB, so what
+remains is a walk that does not multiply A reads (unknown) or a repacked
+weight layout, which the AR GEMV shares (doubles projection memory). The
+~7% math term is untouched. Verification must keep one arithmetic per format
+so it still equals decode bit for bit (`gemma4.projection_ops`); the slab
+rewrite showed the accumulation may be restructured (slab partials in slab
+order) while keeping width invariance and the FP64 bound.
 
 ### 2. 8-bit KV cache
 
@@ -71,12 +84,21 @@ about four rows the kernel is compute-bound at ~270–300 µs per added row and
 layer at 32K, ~50% of the unpaired FP32 FMA ceiling. Paired FMAs (VOPD
 through opaque converted floats) were neutral, so the cost is the per-row score
 reductions (`ReduceScatterN`), softmax statistics (`WaveMax`, `WaveSum`) and
-the per-key `readlane` broadcasts. Rows must keep the arithmetic of
-single-row decode (the op test compares every verification row with its
+the per-key `readlane` broadcasts. On 2026-10-19, foldable DPP exchanges
+removed old-value copies from those reductions: five/eight/sixteen rows at 32K improved by 3.7/5.9/6.3%, with
+bit-identical outputs, and both draft-policy tables were adjusted from matched
+measurements through 64K ([experiment log](EXPERIMENTS.md)). On 2026-10-20,
+coalescing the hd512 score reductions across four keys and two rows per
+butterfly, folding `WaveMax` into `v_max_f32_dpp`, specializing `kStaged` for
+zero ring/64 rotated pairs, and running 9–12 rows in one block of 3–4 waves per
+head cut another 6–21% at 32K–64K (5/8/9/12/16 rows at 32K: −6.8/−7.8/−21.3/−9.1/−7.0%),
+again bit-identical. Rows must keep
+the arithmetic of single-row decode (the op test compares every verification row with its
 single-row evaluation bit for bit). The draft cost tables in
-`draft_policy.cpp` hold verification costs by rows and depth: re-measure the
-affected entries after any change (a kernel A/B at each table depth, times the
-number of global layers).
+`draft_policy.cpp` hold verification costs by rows and depth. Kernel A/B at
+each table depth, times the number of global layers, estimates the affected
+component; validate complete operation costs and any resulting scheduling
+change separately (open item 7).
 
 ### 4. Prefill projections
 
@@ -106,6 +128,44 @@ revalidate quality.
 
 Already at ~94% of the measured DRAM read bandwidth; past work is in the
 decode GEMV rows of EXPERIMENTS.md.
+
+### 7. Measure and validate MTP cycle cost estimates
+
+Added 2026-10-20. The controller verifies another proposal while its expected
+tokens per millisecond of extra work match the cycle's rate, using drafter
+and verification prices from `draft_policy.cpp`. Only price ratios steer it.
+
+What is known. The essay maximum-gap flag after `422fbe4d` is one cycle that
+adds two sibling rows and emits two tokens instead of one (164.9/167.4 vs
+152.1/152.3 ms); no other cycle grows
+([per-cycle trace](artifacts/mtp-cycle-trace-2026-10-20.json)). At ~31K on
+31B, measured verification is 0.92–0.95 of its price, flat over 2–16 rows,
+and drafter steps 1.11–1.14: the table holds QAT-drafter steps; the
+standard assistant's measured 8–12% slower from 4K on and 4% faster at d0
+(EXPERIMENTS.md, 2026-10-05). Host time between cycles is ~0.02 ms. Swapping
+in those remeasured tables then measured neutral end to end.
+
+Next steps, in order:
+
+1. Done 2026-10-20: drafter steps remeasured in place for the 31B assistant
+   and the 26B Unsloth drafter; prices now within ~6% of measured ratios,
+   throughput unchanged (EXPERIMENTS.md). Other target quantizations (Q8,
+   QAT) and drafters keep these tables: pricing by the loaded files' bytes
+   would cover them deterministically.
+2. Bound the gain first: replay labelled chains (`gemma4_draft_replay
+   simulate` over a `--draft-policy fixed --draft-tokens 15` trace) with each
+   cycle's measured costs (oracle prices) and with tables perturbed by ±2/5/10%;
+   count changed decisions and their expected tokens per millisecond. Stop
+   if perfect prices change little.
+3. Extend the trace to other depths, the 26B (text-dependent expert routing)
+   and sampled decoding, probing both sides of launch boundaries; fit the
+   smallest table that explains consequential errors.
+
+Rules: hold acceptance calibration constant; qualify kernel changes with
+prices unchanged, then new prices as a separate scheduling change, on both
+models, with prose and high-acceptance code. Judge streaming gaps per
+emitted token (or p99 alongside tokens per cycle), not as one maximum: a
+longer cycle that emits more tokens is not a pause regression.
 
 ## Opt-in levers (quality trade, default off)
 

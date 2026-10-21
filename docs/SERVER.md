@@ -182,7 +182,8 @@ every global-layer row plus the live sliding-window rows, so RAM and
 latest retained checkpoint before the change. With `--speculative mtp`, the
 `gemma4-assistant` drafter reads the target's KV and drafts up to
 `--draft-tokens`; `--draft-policy` (`calibrated` by default, `confidence` or
-`fixed`) and `--draft-calibration` choose how many a cycle verifies (see the
+`fixed`) and `--draft-calibration` choose how many a cycle verifies, and
+`--draft-trace PATH` records each cycle (see the
 [model card](models/gemma-4-31b/README.md)). Greedy
 output equals the same server's single-token decoding, but not necessarily an
 AR-only server's (different FP32 projection summation order). Reasoning appears as `reasoning_content` and Gemma
@@ -911,7 +912,6 @@ Constraints apply before target sampling in AR, DFlash2, MTP and DSpark, includi
 streaming, images and concurrent requests. Reasoning stays separate from JSON
 and counts toward the output budget. Changing the schema changes the cache prefix.
 
-
 Every schema and tool grammar uses one token vocabulary per loaded model.
 Gufo prepares it automatically while the model loads, before readiness, and
 every constrained request reuses it. This moves a one-time CPU cost from the
@@ -922,11 +922,11 @@ and `rss_delta_kib`. Runners without structured output skip preparation and
 retain ordinary text serving; vocabulary build errors still fail startup.
 Grammars and their masks are unchanged.
 
-`</think>` (Gemma 4: `<channel|>`) ends reasoning before constrained JSON. Native tools also accept an
-unquoted function header as the boundary when the model omits `</think>`.
-Bare marker mentions and quoted examples remain reasoning; markers inside
-arguments remain data. Buffered and streamed Chat Completions and Responses
-use the same boundaries.
+`</think>` (Gemma 4: `<channel|>`) ends reasoning before constrained JSON.
+Native tools also accept an unquoted function header as the boundary when the
+model omits `</think>`. Bare marker mentions and quoted examples remain
+reasoning; markers inside arguments remain data. Buffered and streamed Chat
+Completions and Responses use the same boundaries.
 
 Parse the returned content: leading whitespace is valid JSON, and stops or token
 limits can leave it incomplete. `finish_reason: "stop"` includes matched stop
