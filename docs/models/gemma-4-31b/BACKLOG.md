@@ -116,9 +116,10 @@ Load-time weight copies trade memory for this work (`--prefill-weights`,
 2026-10-21, opt-in): `compact` +3.3% pp2048 for +18.9 GiB, `decoded` +6.5% for
 +43 GiB on UD-Q4_K_XL. No variant under ~4 GiB gained reliably (direct GGUF
 register loads −0.7%, a binary16 scale sidecar +1.5%), and decode cannot read
-the compact copy without ~10% more bytes per token. Open: binary16 copies of
-the k >= 8192 projections (down, o) lose 29–62%; a raster or split that keeps
-the blocks sharing a weight tile together along k would extend `decoded`.
+the compact copy without ~10% more bytes per token. Binary16 copies of the
+k >= 8192 projections (down, o) stay rejected: exact K chunks, 2D launch
+regions and a register prefetch all still lose 7–55%, and their ceiling over
+compact is ~1–1.5% of the projections (EXPERIMENTS.md).
 
 ### 5. Global prefill attention redesign
 

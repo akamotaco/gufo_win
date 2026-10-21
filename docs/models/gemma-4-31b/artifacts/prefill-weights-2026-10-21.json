@@ -418,5 +418,93 @@
   "sidecar_split_loads": "sidecar variant with half-wave code loads exchanged by permlanex16: +0.9%"
  },
  "decoded_long_k": "binary16 copies lose 29-62% wherever k >= 8192 (down, o) at every token-tile group (1, 2, 4, 8, all); best explanation: blocks sharing a weight tile drift apart along k and each reads it from DRAM",
- "standalone_note": "predicted_chunk.decoded applies the binary16 copy to every shape that supports it, including the slow k >= 8192 ones; \"best\" takes the fastest layout per shape, which the decoded mode implements."
+ "standalone_note": "predicted_chunk.decoded applies the binary16 copy to every shape that supports it, including the slow k >= 8192 ones; \"best\" takes the fastest layout per shape, which the decoded mode implements.",
+ "decoded_long_k_followup": {
+  "note": "31B UD shapes k >= 8192 (down 5376x21504, o 5376x8192 / 5376x16384), 2048 rows, decoded vs GGUF, standalone bench best of 5-7 samples",
+  "k_chunks_exact_carry": {
+   "2688": {
+    "down_q4_k": -23.8,
+    "o_sliding": -38.2,
+    "o_global": -38.1
+   },
+   "4096": {
+    "down_q4_k": -18.6,
+    "down_q6_k": -11.6,
+    "o_sliding": -22.5,
+    "o_global": -21.9
+   },
+   "5376": {
+    "down_q4_k": -14.8,
+    "down_q6_k": -7.1,
+    "o_sliding": -27.6,
+    "o_global": -51.2
+   },
+   "8192": {
+    "down_q4_k": -23.8,
+    "o_sliding": -40.5,
+    "o_global": -42.8
+   }
+  },
+  "region_raster_rows_x_token_tiles": {
+   "all_x_19": {
+    "down_q4_k": -42.5,
+    "o_global": -52.4
+   },
+   "8x10": {
+    "down_q4_k": -40.8,
+    "o_global": -54.1
+   },
+   "10x8": {
+    "down_q4_k": -31.3,
+    "o_global": -52.8
+   },
+   "16x5": {
+    "down_q4_k": -26.8,
+    "o_global": -42.1
+   },
+   "21x4": {
+    "down_q4_k": -25.4,
+    "o_global": -38.2
+   },
+   "42x2": {
+    "down_q4_k": -25.8,
+    "o_global": -37.4
+   }
+  },
+  "full_stage_register_prefetch": {
+   "vgprs": "142 -> 207, occupancy 8 -> 7",
+   "down_q4_k": -37.4,
+   "o_global": -55.1,
+   "gate_up_q4_k": "+10.2 -> +9.0"
+  },
+  "l2_counters_down_q4_k": {
+   "gguf": {
+    "l2_hit_pct": 59.9,
+    "fabric_read_gb": 1.48
+   },
+   "compact": {
+    "l2_hit_pct": 66.5,
+    "fabric_read_gb": 0.81
+   },
+   "decoded": {
+    "l2_hit_pct": 21.9,
+    "fabric_read_gb": 2.83
+   }
+  },
+  "l2_counters_gate_up_q4_k": {
+   "gguf": {
+    "l2_hit_pct": 45.8,
+    "fabric_read_gb": 4.58
+   },
+   "compact": {
+    "l2_hit_pct": 54.4,
+    "fabric_read_gb": 2.73
+   },
+   "decoded": {
+    "l2_hit_pct": 36.1,
+    "fabric_read_gb": 5.69
+   }
+  },
+  "ceiling": "the decoded kernel peaks near 43 TFLOP/s (q|k 43.4, v 41.4) and GGUF down already runs 40.4, so a perfect binary16 down/o would gain ~6-7% on those shapes, ~1-1.5% of the projections beyond decoded mode (compact already +3.6-6% there)"
+ }
 }

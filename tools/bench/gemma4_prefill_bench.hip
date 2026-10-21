@@ -8,7 +8,8 @@
 //
 // ud and qat are the 31B UD-Q4_K_XL and QAT shape mixes; group overrides the
 // copies' token tiles per row-block sweep (0: the launcher's default); each
-// layout keeps its best time over `rounds` alternating rounds.
+// layout keeps its best time over `rounds` alternating rounds. GUFO_G4_SHAPE
+// keeps only the shapes whose name contains it (e.g. for counter profiles).
 //
 // Cold-weight reads: every shape rotates over enough copies of its matrix to
 // exceed the 32 MiB MALL, so a repeat does not read a cached tensor (the small
@@ -262,7 +263,12 @@ int main(int argc, char** argv) {
   double total[kLayoutCount] = {};
   double best_total = 0.0;
   double flops = 0.0;
+  // GUFO_G4_SHAPE: only shapes whose name contains it.
+  const char* only = std::getenv("GUFO_G4_SHAPE");
   for (const Shape& s : shapes) {
+    if (only != nullptr && std::string(s.name).find(only) == std::string::npos) {
+      continue;
+    }
     Buffers b = Setup(s, rows);
     double ms[kLayoutCount] = {1e30, 1e30, 1e30};
     for (int r = 0; r < rounds; ++r) {
