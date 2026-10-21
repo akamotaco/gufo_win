@@ -59,6 +59,10 @@ for t in "${targets[@]}"; do
     # Exact projection comparisons use the production compiler optimization level.
     compile[1]=-O2
   fi
+  if [[ "$src" -ef tools/bench/gemma4_prefill_bench.hip ]]; then
+    # Match gufo_gemma4's production prefill arithmetic and scheduling flags.
+    compile+=(-ffast-math -fno-finite-math-only)
+  fi
   native_sources=()
   if [[ "$src" -ef tools/qwen27b/dflash_gemm_bench.hip ||
         "$src" -ef tools/qwen27b/prefill_gemm_bench.hip ]]; then
