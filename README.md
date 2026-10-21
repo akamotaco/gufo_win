@@ -148,6 +148,18 @@ GPU timeout is still 2 s or changed without a reboot ([docs/WINDOWS-TDR.md](docs
 
 ![gufo monitor with Qwen3.8-Flash-Next on port 8080](assets/windows-monitor.png)
 
+### Troubleshooting
+
+- **`413 payload_too_large` after reading a few images.** Gufo accepts request bodies
+  up to 8 MiB by default, and agents such as pi resend every image of the conversation
+  with each turn, so a 1.9 MB screenshot failed once earlier images filled the rest.
+  Start the server with `--max-request-bytes 134217728` (128 MiB); `..\tool\gufo_select.py`
+  offers it as the default choice. A running server keeps its limit until restarted;
+  meanwhile a new conversation drops the earlier images.
+- **`503 device_lost` / "GPU context lost; restart required".** The Windows GPU timeout
+  (TDR, 2 s by default) reset the driver during a long kernel. Raise it to 30 s and
+  reboot: [docs/WINDOWS-TDR.md](docs/WINDOWS-TDR.md).
+
 ### Status
 
 - Working: build, `gufo diagnose`, Gemma 4 26B-A4B and 31B with and without MTP,
