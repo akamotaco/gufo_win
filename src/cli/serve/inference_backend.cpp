@@ -3118,14 +3118,14 @@ std::unique_ptr<ComponentCacheResources> CreateGemma4ComponentResources(
     if (plan.size() != 1)
       throw std::invalid_argument("insufficient component backing budget");
     const auto& allocation = plan.front();
-    // Bound registration pauses with segments of about 128 MiB that fit
-    // two of the largest payloads. Prefill prepares the backing reserve.
+    // Equal segments of about 1 GiB that fit two of the largest payloads;
+    // pages commit as captures need them while the host keeps its reserve.
     std::size_t largest = 0;
     for (const auto& [id, bytes] : backing->component_classes)
       largest = std::max(largest, bytes);
     const auto block = allocation.block_bytes;
     const auto target =
-        std::max<std::size_t>(std::size_t{128} << 20, 2 * largest) / block;
+        std::max<std::size_t>(std::size_t{1} << 30, 2 * largest) / block;
     const auto parts =
         std::max<std::size_t>((allocation.blocks + target - 1) / target, 1);
     const auto segment = (allocation.blocks + parts - 1) / parts * block;
