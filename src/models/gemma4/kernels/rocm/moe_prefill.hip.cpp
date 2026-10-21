@@ -185,9 +185,9 @@ __device__ __forceinline__ __half SaturatedHalf(float v) {
   return __float2half(fminf(fmaxf(v, -65504.0F), 65504.0F));
 }
 
-/// kPacked (dense only, PackPrefillWeights): 1 reads W as kCompact records
-/// straight into registers, without the LDS staging; 2 reads it as kDecoded
-/// binary16 fragments in place of the decode.
+/// kPacked (PackPrefillWeights): 1 reads W as kCompact records straight into
+/// registers, without the LDS staging (dense or routed); 2 reads it as
+/// kDecoded binary16 fragments in place of the decode (dense).
 /// kGeGlu: W holds fused [gate | up] rows; a block's first four waves take
 /// 64 gate rows and the last four the matching up rows (m / 2 further), and
 /// the block writes GeGLU of the binary16-rounded pair, as the separate
@@ -298,12 +298,12 @@ __global__ void __launch_bounds__(kThreads)
       return;
     }
     if constexpr (kPacked == 1) {
-      const unsigned r = matrix_row(wave * 16 + sub);
-      const unsigned safe = min(r, m - 1);
+      // Experts stack whole 16-row groups (m % 16 == 0).
+      const std::size_t r =
+          std::size_t{static_cast<std::uint32_t>(expert)} * m +
+          min(matrix_row(wave * 16 + sub), m - 1);
       const auto* src = reinterpret_cast<const uint4*>(
-          w +
-          ((std::size_t{safe / 16} * (k / kStageK) + stage) * 16 + safe % 16) *
-              kStride);
+          w + ((r / 16 * (k / kStageK) + stage) * 16 + r % 16) * kStride);
 #pragma unroll
       for (int i = 0; i < kStride / 16; ++i) {
         f_packed[i] = src[i];
@@ -1547,14 +1547,12 @@ bool LaunchDenseHalfGemm(ExpertFormat format, const void* w, const void* x,
   }
 }
 
-bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
-                          const std::int32_t* tiles, std::uint32_t n_tiles,
-                          std::uint32_t tile_rows,
-                          const std::int32_t* pad_bounds,
-                          const std::int32_t* rows_in,
-                          const std::int32_t* rows_out, float* out,
-                          void* out_half, std::uint32_t m, std::uint32_t k,
-                          hipStream_t stream, bool geglu) {
+bool LaunchRoutedHalfGemm(
+    ExpertFormat format, const void* w, const void* x,
+    const std::int32_t* tiles, std::uint32_t n_tiles, std::uint32_t tile_rows,
+    const std::int32_t* pad_bounds, const std::int32_t* rows_in,
+    const std::int32_t* rows_out, float* out, void* out_half, std::uint32_t m,
+    std::uint32_t k, hipStream_t stream, bool geglu, PrefillLayout layout) {
   if (tile_rows != kRoutedHalfTileRows || n_tiles == 0 ||
       (out == nullptr) == (out_half == nullptr) ||
       (format != ExpertFormat::kQ5_1 && format != ExpertFormat::kQ8_0 &&
@@ -1573,6 +1571,38 @@ bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
   const auto* wb = static_cast<const std::uint8_t*>(w);
   const auto* xh = static_cast<const __half*>(x);
   auto* oh = static_cast<__half*>(out_half);
+  if (layout == PrefillLayout::kCompact) {
+    if (!PrefillLayoutSupports(format, layout, k) || m % 16 != 0) {
+      return false;
+    }
+    const auto compact = [&]<ExpertFormat F>() {
+      if (geglu) {
+        RoutedHalfKQuantKernel<F, kRoutedHalfTileRows, true, false, 1>
+            <<<geglu_grid, kThreads, 0, stream>>>(
+                wb, xh, tiles, pad_bounds, rows_in, rows_out, out, oh, m, k);
+      } else {
+        RoutedHalfKQuantKernel<F, kRoutedHalfTileRows, false, false, 1>
+            <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
+                                            rows_out, out, oh, m, k);
+      }
+    };
+    switch (format) {
+      case ExpertFormat::kQ4_K:
+        compact.template operator()<ExpertFormat::kQ4_K>();
+        return true;
+      case ExpertFormat::kQ5_K:
+        compact.template operator()<ExpertFormat::kQ5_K>();
+        return true;
+      case ExpertFormat::kQ6_K:
+        compact.template operator()<ExpertFormat::kQ6_K>();
+        return true;
+      default:
+        return false;
+    }
+  }
+  if (layout != PrefillLayout::kNone) {
+    return false;
+  }
   switch (format) {
     case ExpertFormat::kQ4_K:
       if (geglu) {

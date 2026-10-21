@@ -1300,10 +1300,13 @@ bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n,
   // The Gemma routed GEMM applies GeGLU in its epilogue; Flash-Next's writes
   // [gate | up] for the separate pass.
   if (own_gate_up) {
-    if (!LaunchRoutedHalfGemm(*own_format, l.gate_up_exps.data, x_half,
-                              moe_tiles_, tiles, gate_up_rows, moe_bounds_,
-                              moe_rows_token_, moe_rows_slot_, nullptr, act,
-                              2 * width, d, stream, true)) {
+    const bool compact =
+        l.gate_up_exps.prefill_layout == PrefillLayout::kCompact;
+    if (!LaunchRoutedHalfGemm(
+            *own_format, compact ? l.gate_up_exps.prefill : l.gate_up_exps.data,
+            x_half, moe_tiles_, tiles, gate_up_rows, moe_bounds_,
+            moe_rows_token_, moe_rows_slot_, nullptr, act, 2 * width, d, stream,
+            true, l.gate_up_exps.prefill_layout)) {
       return false;
     }
   } else {

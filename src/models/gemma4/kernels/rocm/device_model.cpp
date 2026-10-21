@@ -419,6 +419,23 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
         pack(l.ffn_up);
       }
       pack(l.ffn_down);
+      // Expert [gate | up] rows stack per expert: one compact matrix, whole
+      // 16-row groups per expert.
+      DeviceTensor& e = l.gate_up_exps;
+      const auto format = PrefillFormat(e.type);
+      if (!e.empty() && format && up.ok && e.rows % 16 == 0 &&
+          PrefillLayoutSupports(*format, PrefillLayout::kCompact, e.cols)) {
+        const std::uint32_t rows = e.rows * e.experts;
+        e.prefill = up.Allocate(
+            PrefillWeightBytes(*format, PrefillLayout::kCompact, rows, e.cols),
+            "expert prefill weights");
+        if (e.prefill != nullptr) {
+          e.prefill_layout = PrefillLayout::kCompact;
+          e.prefill_format = *format;
+          up.ok = PackPrefillWeights(*format, PrefillLayout::kCompact, e.data,
+                                     e.prefill, rows, e.cols, nullptr);
+        }
+      }
     }
     if (!up.ok || hipDeviceSynchronize() != hipSuccess) {
       up.Fail("prefill weight packing failed");

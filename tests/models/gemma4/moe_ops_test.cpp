@@ -674,6 +674,49 @@ void CheckRoutedPrefill(const Format& f, std::uint32_t m, std::uint32_t k,
                                     nullptr, m, k, nullptr),
           "routed prefill GEMM rejected " + std::string(f.name));
   const auto got = Host(dy, slots * m);
+  // The compact prefill copy of all experts, bit for bit (FP32 and GeGLU).
+  if (g4k::PrefillLayoutSupports(f.format, g4k::PrefillLayout::kCompact, k)) {
+    const auto n_tiles = static_cast<std::uint32_t>(tiles.size());
+    const std::uint32_t rows = kExpertsHere * m;
+    void* packed = nullptr;
+    float* out = nullptr;
+    __half *want = nullptr, *half = nullptr;
+    HIP_CHECK(hipMalloc(
+        &packed, g4k::PrefillWeightBytes(f.format, g4k::PrefillLayout::kCompact,
+                                         rows, k)));
+    HIP_CHECK(hipMalloc(&out, slots * m * sizeof(float)));
+    HIP_CHECK(hipMalloc(&want, slots * m));
+    HIP_CHECK(hipMalloc(&half, slots * m));
+    Require(
+        g4k::PackPrefillWeights(f.format, g4k::PrefillLayout::kCompact, dw,
+                                packed, rows, k, nullptr) &&
+            g4k::LaunchRoutedHalfGemm(f.format, packed, dx, dtiles, n_tiles,
+                                      kTile, bounds, rows_token, rows_slot, out,
+                                      nullptr, m, k, nullptr, false,
+                                      g4k::PrefillLayout::kCompact) &&
+            (!gate_up ||
+             (g4k::LaunchRoutedHalfGemm(f.format, dw, dx, dtiles, n_tiles,
+                                        kTile, bounds, rows_token, rows_slot,
+                                        nullptr, want, m, k, nullptr, true) &&
+              g4k::LaunchRoutedHalfGemm(f.format, packed, dx, dtiles, n_tiles,
+                                        kTile, bounds, rows_token, rows_slot,
+                                        nullptr, half, m, k, nullptr, true,
+                                        g4k::PrefillLayout::kCompact))),
+        std::string(f.name) + ": compact routed prefill rejected");
+    Require(Host(out, slots * m) == got,
+            std::string(f.name) + ": compact routed prefill differs");
+    if (gate_up) {
+      const auto a = Host(want, slots * m / 2);
+      const auto b = Host(half, slots * m / 2);
+      Require(std::memcmp(a.data(), b.data(), a.size() * 2) == 0,
+              std::string(f.name) + ": compact routed GeGLU differs");
+    }
+    for (void* p : {packed, static_cast<void*>(out), static_cast<void*>(want),
+                    static_cast<void*>(half)}) {
+      HIP_CHECK(hipFree(p));
+    }
+    std::cout << "routed prefill " << f.name << ": compact copy identical\n";
+  }
   // Gate/up with GeGLU in the epilogue: the bytes the separate binary16 pass
   // makes of the binary16 [gate | up] rows.
   if (gate_up) {

@@ -145,13 +145,16 @@ inline constexpr std::uint32_t kRoutedHalfTileRows = 112;
 /// tiles); returns false
 /// for others. With `geglu` (a K-quant, Q4_0, Q8_0 or binary16 fused
 /// [gate | up] W, binary16 output) row r of `out_half` holds the m / 2 values
-/// GeGluPackedHalf would make of the binary16 pair.
+/// GeGluPackedHalf would make of the binary16 pair. `layout` kCompact reads
+/// W as a K-quant's compact prefill copy of all experts' rows (m % 16 == 0),
+/// with the same results.
 [[nodiscard]] bool LaunchRoutedHalfGemm(
     ExpertFormat format, const void* w, const void* x,
     const std::int32_t* tiles, std::uint32_t n_tiles, std::uint32_t tile_rows,
     const std::int32_t* pad_bounds, const std::int32_t* rows_in,
     const std::int32_t* rows_out, float* out, void* out_half, std::uint32_t m,
-    std::uint32_t k, hipStream_t stream, bool geglu = false);
+    std::uint32_t k, hipStream_t stream, bool geglu = false,
+    PrefillLayout layout = PrefillLayout::kNone);
 
 /// Dense prefill projection over binary16 activation rows `x` ([rows][k])
 /// for Q4_K, Q5_K, Q6_K (the routed GEMM's arithmetic over an identity

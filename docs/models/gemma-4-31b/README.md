@@ -112,9 +112,11 @@ which decoding keeps reading:
 
 `decoded` also serves the QAT (Q4_0, +3.6%) and UD-Q8_K_XL (Q8_0, +3.8%)
 quants. Prefill logits are bit-identical to `off` in both modes on all three
-31B quants. Prompts under 512 tokens skip the binary16 copies. Neither mode
-copies anything on the 26B-A4B UD and QAT quants: their dense projections are
-Q8_0 or 2816 wide, where binary16 copies measured 1-2% slower.
+31B quants. Prompts under 512 tokens skip the binary16 copies. On the
+26B-A4B both modes copy only the K-quant expert [gate | up] weights, in the
+compact layout (UD-Q4_K_XL: +1.0% pp2048 for +9.0 GiB). Its dense projections
+are Q8_0 or 2816 wide, where binary16 copies measured 1-2% slower, and the QAT
+quant's Q4_0 experts get no copy.
 
 ## Tools and artifacts
 
