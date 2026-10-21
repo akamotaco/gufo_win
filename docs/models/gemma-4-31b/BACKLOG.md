@@ -342,9 +342,6 @@ an NPU load.
   the round.
 - The branch is pushed to the `fork` remote (franzmoca/gufo) with no pull
   request yet; its title follows [the release policy](../../RELEASING.md).
-- `gemma4.target` fails on 26B QAT UD-Q4_K_XL at "sync between lookahead
-  stops diverges" (before its MTP section), identically at 03b61436 and
-  later; investigate the continuation path on that model.
 
 ## Methods that worked
 

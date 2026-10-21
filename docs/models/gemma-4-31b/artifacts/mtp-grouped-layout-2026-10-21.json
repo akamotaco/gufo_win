@@ -1640,5 +1640,5 @@
    }
   ]
  },
- "target_26b_qat_preexisting_failure": "gemma4.target on 26B QAT fails at \"sync between lookahead stops diverges\" before its MTP section, identically (prefill mean KL 9.68749e-06) at 03b61436, a03dc1b5 and the grouped tree"
+ "target_26b_qat": "gemma4.target failed on 26B QAT at \"sync between lookahead stops diverges\" before its MTP section (also at 03b61436); the check compared a decode row with a prefill row on an ill-conditioned prompt and was fixed to a prefill+decode reference (bit-identical). After the fix gemma4.target passes on 26B QAT with its drafter, covering the grouped layout there."
 }
