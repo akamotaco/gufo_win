@@ -3363,14 +3363,14 @@ std::unique_ptr<ComponentCacheResources> CreateGemma4ComponentResources(
     if (plan.size() != 1)
       throw std::invalid_argument("insufficient component backing budget");
     const auto& allocation = plan.front();
-    // Bound registration pauses with segments of about 128 MiB that fit
-    // two of the largest payloads. Prefill prepares the backing reserve.
+    // Equal segments of about 1 GiB that fit two of the largest payloads;
+    // pages commit as captures need them while the host keeps its reserve.
     std::size_t largest = 0;
     for (const auto& [id, bytes] : backing->component_classes)
       largest = std::max(largest, bytes);
     const auto block = allocation.block_bytes;
     const auto target =
-        std::max<std::size_t>(std::size_t{128} << 20, 2 * largest) / block;
+        std::max<std::size_t>(std::size_t{1} << 30, 2 * largest) / block;
     const auto parts =
         std::max<std::size_t>((allocation.blocks + target - 1) / target, 1);
     const auto segment = (allocation.blocks + parts - 1) / parts * block;
@@ -3413,7 +3413,7 @@ std::unique_ptr<ComponentCacheResources> CreateGemma4ComponentResources(
               limited->refused = now;
               return false;
             }});
-    backing->pool->GrowAhead(2ULL << 30);
+    backing->pool->GrowAhead(2 * backing->pool->SegmentBytes());
     backing->pool->WaitForGrowth();
     Logger::Info(
         "cache",
@@ -3422,8 +3422,8 @@ std::unique_ptr<ComponentCacheResources> CreateGemma4ComponentResources(
             " long_term_pinned_bytes=" +
             std::to_string(backing->pool->LongTermPinnedBytes()));
   };
-  result->prepare_prefill = [backing](std::size_t tokens) {
-    backing->pool->GrowAhead((tokens >= 512 ? 2ULL : 1ULL) << 30);
+  result->prepare_prefill = [backing](std::size_t) {
+    backing->pool->GrowAhead(2 * backing->pool->SegmentBytes());
   };
   result->can_capture = [backing](auto payloads) {
     return backing->pool->CanFit(payloads);
@@ -3454,6 +3454,8 @@ std::unique_ptr<ComponentCacheResources> CreateGemma4ComponentResources(
                                  .count()));
     if (!block)
       throw cache::ResourceExhausted();
+    if (request.category == cache::ResourceCategory::kBackingAssigned)
+      backing->pool->GrowAhead(backing->pool->SegmentBytes());
     auto owner = std::make_shared<hip::BackingBlock>(std::move(*block));
     return ComponentCaptureBuffer{
         owner->Bytes(),
