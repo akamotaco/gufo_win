@@ -824,7 +824,9 @@ void Executor::Forward(std::span<const Segment> segments,
     // A fused projection leaves [q | k | v] or [q | k] rows in k_; QkvPost
     // reads them strided and writes packed queries to q_. At WMMA decode
     // widths [q | k] stays split (64 and 32 blocks fit one wave of blocks
-    // each; 96 spills into a second).
+    // each; 96 spills into a second), and the split pair measures faster: a
+    // fused 12288-row launch of 96 eight-wave blocks walks at 180 GB/s against
+    // 190 GB/s for the pair, MTP tg128 d0 31.41 -> 31.21 tok/s.
     const bool wmma_qkv =
         n <= kSplitRows && (model_.has_draft() || n >= 6) &&
         WmmaGemvSupports(L.attn_qkv.type, L.attn_qkv.rows, L.attn_qkv.cols);
