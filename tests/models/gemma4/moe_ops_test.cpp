@@ -825,6 +825,44 @@ void CheckRoutedPrefill(const Format& f, std::uint32_t m, std::uint32_t k,
   }
 }
 
+/// The dense prefill GEMM over the grouped layout (MTP targets) against its
+/// FP32 rows `want` and fused GeGLU rows `want_half`, bit for bit.
+void CheckGroupedPrefill(const Format& f, const void* dw, const void* dx,
+                         const std::vector<float>& want,
+                         const std::vector<__half>& want_half,
+                         std::uint32_t rows, std::uint32_t m, std::uint32_t k) {
+  if (!g4k::GroupedLayoutSupports(f.type, m, k)) {
+    return;
+  }
+  const std::string name = std::string(f.name) + " grouped " +
+                           std::to_string(m) + "x" + std::to_string(k) +
+                           " at " + std::to_string(rows) + " rows";
+  const std::size_t bytes = std::size_t{m} * (k / f.block) * f.bytes;
+  void* dg = nullptr;
+  float* out = nullptr;
+  __half* out_half = nullptr;
+  HIP_CHECK(hipMalloc(&dg, bytes));
+  HIP_CHECK(hipMalloc(&out, std::size_t{rows} * m * 4));
+  HIP_CHECK(hipMalloc(&out_half, std::size_t{rows} * m));
+  Require(g4k::GroupWeights(f.type, dw, dg, m, k, nullptr) &&
+              g4k::LaunchDenseHalfGemm(f.format, dg, dx, out, nullptr, rows, m,
+                                       k, nullptr, false, true) &&
+              g4k::LaunchDenseHalfGemm(f.format, dg, dx, nullptr, out_half,
+                                       rows, m, k, nullptr, true, true),
+          name + ": rejected");
+  const auto got = Host(out, std::size_t{rows} * m);
+  const auto got_half = Host(out_half, std::size_t{rows} * m / 2);
+  Require(std::memcmp(want.data(), got.data(), want.size() * 4) == 0,
+          name + ": differs from GGUF rows");
+  Require(
+      std::memcmp(want_half.data(), got_half.data(), want_half.size() * 2) == 0,
+      name + ": GeGLU differs from GGUF rows");
+  for (void* p : {dg, static_cast<void*>(out), static_cast<void*>(out_half)}) {
+    HIP_CHECK(hipFree(p));
+  }
+  std::cout << name << ": identical\n";
+}
+
 /// Every prefill copy of w (PrefillLayout) against the dense GEMM's FP32
 /// rows `want` and fused GeGLU rows `want_half`, bit for bit.
 void CheckPackedPrefill(const Format& f, const void* dw, const void* dx,
@@ -943,6 +981,9 @@ void CheckDensePrefill(const Format& f, std::uint32_t m, std::uint32_t k,
             std::string(f.name) + ": dense GeGLU differs from routed at " +
                 std::to_string(rows) + " rows");
     CheckPackedPrefill(f, dw, dx, b, bh, rows, m, k);
+    if (!q8) {
+      CheckGroupedPrefill(f, dw, dx, b, bh, rows, m, k);
+    }
     for (void* p :
          {static_cast<void*>(dx), static_cast<void*>(dids),
           static_cast<void*>(dtiles), static_cast<void*>(dbounds),
@@ -1017,6 +1058,7 @@ void CheckDenseBlockwise(const Format& f, std::uint32_t m, std::uint32_t k,
             name + ": dense GeGLU differs from the separate pass at " +
                 std::to_string(rows) + " rows");
     CheckPackedPrefill(f, dw, dx, got, b, rows, m, k);
+    CheckGroupedPrefill(f, dw, dx, got, b, rows, m, k);
     std::cout << "dense prefill " << name << ", " << rows << " rows: error "
               << worst << "\n";
     for (void* p : {static_cast<void*>(dx), static_cast<void*>(dy),

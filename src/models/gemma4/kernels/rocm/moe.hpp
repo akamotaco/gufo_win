@@ -167,7 +167,8 @@ inline constexpr std::uint32_t kRoutedHalfTileRows = 112;
                                        const void* x, float* out,
                                        void* out_half, std::uint32_t rows,
                                        std::uint32_t m, std::uint32_t k,
-                                       hipStream_t stream, bool geglu = false);
+                                       hipStream_t stream, bool geglu = false,
+                                       bool grouped = false);
 
 /// Entries of a routed tile map of `rows`-row tiles that any routing of
 /// `slots` assignments over `experts` 16-padded buckets fits in.

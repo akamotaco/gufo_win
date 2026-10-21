@@ -39,6 +39,14 @@ std::optional<ExpertFormat> PrefillFormat(core::GgmlType type) {
   }
 }
 
+/// Bytes of a grouped-layout format's matrix (256-value super-blocks).
+std::size_t GroupedBytes(const DeviceTensor& t) {
+  const std::size_t super = t.type == core::GgmlType::kQ5_K   ? 176
+                            : t.type == core::GgmlType::kQ6_K ? 210
+                                                              : 144;
+  return std::size_t{t.rows} * (t.cols / 256) * super;
+}
+
 /// The prefill copy of a dense projection with k inputs under `mode`.
 PrefillLayout ChoosePrefillLayout(PrefillWeights mode, ExpertFormat format,
                                   std::uint32_t k) {
@@ -441,6 +449,84 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
       up.Fail("prefill weight packing failed");
       return nullptr;
     }
+  }
+  // With a drafter every decode width runs the WMMA projections, which read
+  // the grouped layout 2-10% faster; prefill's GEMMs (and the copies above,
+  // packed from GGUF rows) read it too. Only projections WmmaProjection
+  // takes at every width are reordered, and a fused tensor only when each
+  // view starts a 128-row group, so the views stay grouped matrices.
+  if (draft != nullptr && m->half_prefill_) {
+    const auto eligible = [](const DeviceTensor& t) {
+      return !t.empty() && t.experts == 1 && t.cols >= 2048 &&
+             GroupedLayoutSupports(t.type, t.rows, t.cols);
+    };
+    std::size_t widest = 0;
+    for (const DeviceLayer& l : m->layers_) {
+      for (const DeviceTensor* t :
+           {&l.attn_qkv, &l.attn_q, &l.attn_k, &l.attn_v, &l.attn_output,
+            &l.ffn_gate_up, &l.ffn_gate, &l.ffn_up, &l.ffn_down}) {
+        if (eligible(*t)) {
+          widest = std::max(widest, GroupedBytes(*t));
+        }
+      }
+    }
+    void* scratch = nullptr;
+    if (widest != 0 && hipMalloc(&scratch, widest) != hipSuccess) {
+      up.Fail("grouped weight scratch allocation failed");
+      return nullptr;
+    }
+    const auto group = [&](DeviceTensor& t,
+                           std::initializer_list<DeviceTensor*> views) {
+      if (!eligible(t)) {
+        return;
+      }
+      for (const DeviceTensor* v : views) {
+        if (!v->empty() && v->rows % 128 != 0) {
+          return;
+        }
+      }
+      const std::size_t bytes = GroupedBytes(t);
+      if (!GroupWeights(t.type, t.data, scratch, t.rows, t.cols, nullptr) ||
+          hipMemcpyAsync(t.data, scratch, bytes, hipMemcpyDeviceToDevice,
+                         nullptr) != hipSuccess) {
+        up.ok = false;
+        return;
+      }
+      t.grouped = true;
+      for (DeviceTensor* v : views) {
+        v->grouped = !v->empty();
+      }
+    };
+    for (DeviceLayer& l : m->layers_) {
+      if (!l.attn_qkv.empty()) {
+        const bool separate_v =
+            l.attn_qkv.rows == l.attn_q.rows + l.attn_k.rows;
+        if (separate_v) {
+          group(l.attn_qkv, {&l.attn_q, &l.attn_k});
+          group(l.attn_v, {});
+        } else {
+          group(l.attn_qkv, {&l.attn_q, &l.attn_k, &l.attn_v});
+        }
+      } else {
+        group(l.attn_q, {});
+        group(l.attn_k, {});
+        group(l.attn_v, {});
+      }
+      group(l.attn_output, {});
+      if (!l.ffn_gate_up.empty()) {
+        group(l.ffn_gate_up, {&l.ffn_gate, &l.ffn_up});
+      } else {
+        group(l.ffn_gate, {});
+        group(l.ffn_up, {});
+      }
+      group(l.ffn_down, {});
+    }
+    if (hipDeviceSynchronize() != hipSuccess || !up.ok) {
+      (void)hipFree(scratch);
+      up.Fail("grouping weights failed");
+      return nullptr;
+    }
+    (void)hipFree(scratch);
   }
   if (!up.halves.empty()) {
     // Every BF16 weight from 2^-17 to 65504 in magnitude is a binary16 value;

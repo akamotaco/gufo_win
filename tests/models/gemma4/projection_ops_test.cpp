@@ -445,6 +445,26 @@ void CheckWmmaShape(const Format& f, std::uint32_t m, std::uint32_t k,
                         std::size_t{width} * m * 4) == 0,
             name + ": width " + std::to_string(width) + " differs");
   }
+  // The grouped layout (MTP targets) at every width, bit for bit.
+  if (g4k::GroupedLayoutSupports(f.type, m, k)) {
+    std::uint8_t* dg = nullptr;
+    HIP_CHECK(hipMalloc(&dg, w.size()));
+    Require(g4k::GroupWeights(f.type, dw, dg, m, k, nullptr),
+            name + ": grouping rejected");
+    for (std::uint32_t width = 1; width <= kRows; ++width) {
+      HIP_CHECK(hipMemset(dy, 0xFF, std::size_t{width} * m * sizeof(float)));
+      Require(g4k::LaunchWmmaGemv(f.type, dg, dx, dy, width, m, k, scratch,
+                                  nullptr, false, true),
+              name + " grouped rejected");
+      HIP_CHECK(hipMemcpy(part.data(), dy, std::size_t{width} * m * 4,
+                          hipMemcpyDeviceToHost));
+      Require(std::memcmp(part.data(), full.data(),
+                          std::size_t{width} * m * 4) == 0,
+              name + ": grouped width " + std::to_string(width) + " differs");
+    }
+    HIP_CHECK(hipFree(dg));
+    std::cout << name << ": grouped layout identical at every width\n";
+  }
   const std::size_t row_bytes = k / f.block * f.bytes;
   std::vector<float> row(k);
   double worst = 0.0;

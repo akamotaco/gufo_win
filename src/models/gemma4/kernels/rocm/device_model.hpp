@@ -22,6 +22,8 @@ struct DeviceTensor {
   void* prefill{nullptr};
   PrefillLayout prefill_layout{PrefillLayout::kNone};
   ExpertFormat prefill_format{ExpertFormat::kQ4_K};
+  /// `data` holds the grouped layout (wmma_gemv.hpp), not GGUF rows.
+  bool grouped{false};
   core::GgmlType type{core::GgmlType::kF32};
   std::uint32_t cols{0};
   std::uint32_t rows{0};

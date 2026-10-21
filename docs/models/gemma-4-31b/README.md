@@ -76,8 +76,11 @@ copies stop at a stop token. Requests report proposed and accepted copies as
 `lookup_n` / `lookup_n_accepted`. `--sessions N` serves up to N concurrent requests; up to eight
 decode in one forward. The drafter attends to the target's own KV cache,
 so it adds no per-session cache.
-Greedy speculative output equals single-token decoding of the same
-configuration token for token; an AR-only server uses a faster one-row
+With a drafter loaded, the target's projection weights are reordered at
+load into 128-row groups that the verification kernel reads as one stream
+(same bytes and results; MTP tg128 +3.4% on the 31B quants, about 0.3 s
+more load time). Greedy speculative output equals single-token decoding of
+the same configuration token for token; an AR-only server uses a faster one-row
 projection kernel with a different FP32 summation order, so long greedy
 completions of the two configurations can differ. Sampled requests verify
 drafts by p/q rejection, so emitted tokens follow the target distribution.

@@ -557,12 +557,17 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
         return;
       }
       if (const auto format = DenseHalfFormat(w.type);
-          format && LaunchDenseHalfGemm(*format, w.data, xq, y, nullptr, rows,
-                                        w.rows, w.cols, stream_)) {
+          format &&
+          LaunchDenseHalfGemm(*format, w.data, xq, y, nullptr, rows, w.rows,
+                              w.cols, stream_, false, w.grouped)) {
         return;
       }
       hip::LaunchQuantizeActivationQ8_1FromFp32(x, q8_, rows, w.cols, stream_);
       xq = q8_;
+    }
+    if (w.grouped) {
+      throw std::runtime_error(
+          "gemma4 grouped weights reached a row-order GEMM");
     }
     hip::LaunchBatchedQuantGEMMPreQuantized(w.type, w.data, xq, y, rows, w.rows,
                                             w.cols, stream_);
@@ -580,8 +585,12 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
   // autoregressive rows from six on, where it is faster.
   if (WmmaProjection(w, rows) &&
       LaunchWmmaGemv(w.type, w.data, x, y, rows, w.rows, w.cols, wmma_, stream_,
-                     packed)) {
+                     packed, w.grouped)) {
     return;
+  }
+  // DeviceModel::Upload groups only weights the WMMA projections take.
+  if (w.grouped) {
+    throw std::runtime_error("gemma4 grouped weights reached a row-order GEMV");
   }
   if (rows > 1) {
     // Gemma's K-quant shapes lie outside the Qwen-tuned dispatch; the
@@ -999,7 +1008,7 @@ void Executor::Forward(std::span<const Segment> segments,
          (gate_up_half &&
           LaunchDenseHalfGemm(*gate_up_half, L.ffn_gate_up.data, fq, nullptr,
                               gate_, n, L.ffn_gate_up.rows, L.ffn_gate_up.cols,
-                              stream_, true)))) {
+                              stream_, true, L.ffn_gate_up.grouped)))) {
       // The GEMM writes GeGLU of each binary16 [gate | up] pair into the
       // (free) gate rows as the down projection's binary16 input.
       gq = gate_;
