@@ -782,6 +782,50 @@ void CheckRoutedPrefill(const Format& f, std::uint32_t m, std::uint32_t k,
   }
 }
 
+/// Every prefill copy of w (PrefillLayout) against the dense GEMM's FP32
+/// rows `want` and fused GeGLU rows `want_half`, bit for bit.
+void CheckPackedPrefill(const Format& f, const void* dw, const void* dx,
+                        const std::vector<float>& want,
+                        const std::vector<__half>& want_half,
+                        std::uint32_t rows, std::uint32_t m, std::uint32_t k) {
+  for (const auto layout :
+       {g4k::PrefillLayout::kCompact, g4k::PrefillLayout::kDecoded}) {
+    if (!g4k::PrefillLayoutSupports(f.format, layout, k)) {
+      continue;
+    }
+    const std::string name =
+        std::string(f.name) +
+        (layout == g4k::PrefillLayout::kCompact ? " compact" : " decoded") +
+        " " + std::to_string(m) + "x" + std::to_string(k) + " at " +
+        std::to_string(rows) + " rows";
+    void* packed = nullptr;
+    float* out = nullptr;
+    __half* out_half = nullptr;
+    HIP_CHECK(
+        hipMalloc(&packed, g4k::PrefillWeightBytes(f.format, layout, m, k)));
+    HIP_CHECK(hipMalloc(&out, std::size_t{rows} * m * 4));
+    HIP_CHECK(hipMalloc(&out_half, std::size_t{rows} * m));
+    Require(
+        g4k::PackPrefillWeights(f.format, layout, dw, packed, m, k, nullptr) &&
+            g4k::LaunchPackedPrefillGemm(f.format, layout, packed, dx, out,
+                                         nullptr, rows, m, k, nullptr) &&
+            g4k::LaunchPackedPrefillGemm(f.format, layout, packed, dx, nullptr,
+                                         out_half, rows, m, k, nullptr, true),
+        name + ": rejected");
+    const auto got = Host(out, std::size_t{rows} * m);
+    const auto got_half = Host(out_half, std::size_t{rows} * m / 2);
+    Require(std::memcmp(want.data(), got.data(), want.size() * 4) == 0,
+            name + ": differs from the dense GEMM");
+    Require(std::memcmp(want_half.data(), got_half.data(),
+                        want_half.size() * 2) == 0,
+            name + ": GeGLU differs from the dense GEMM");
+    for (void* p :
+         {packed, static_cast<void*>(out), static_cast<void*>(out_half)}) {
+      HIP_CHECK(hipFree(p));
+    }
+  }
+}
+
 /// The dense binary16 prefill GEMM (dense models' K-quant projections)
 /// against the routed GEMM over an identity routing, bit for bit, with FP32
 /// and fused-GeGLU outputs, at row counts that end inside a token tile and
@@ -791,7 +835,12 @@ void CheckDensePrefill(const Format& f, std::uint32_t m, std::uint32_t k,
   constexpr std::uint32_t kTile = g4k::kRoutedHalfTileRows;
   const auto w = RandomMatrix(f, m, k, rng);
   auto* dw = Device(w.data(), w.size());
-  for (const std::uint32_t rows : {1U, 97U, 300U}) {
+  const std::vector<std::uint32_t> row_counts =
+      f.format == g4k::ExpertFormat::kQ4_K
+          ? std::vector<std::uint32_t>{1,   8,   9,   32,  33,  97,  111,
+                                       112, 113, 300, 511, 512, 513, 2048}
+          : std::vector<std::uint32_t>{1, 97, 300, 513};
+  for (const std::uint32_t rows : row_counts) {
     const auto x = Normal(std::size_t{rows} * k, 1.0F, rng);
     std::vector<__half> xh(x.size());
     for (std::size_t i = 0; i < x.size(); ++i) {
@@ -818,17 +867,28 @@ void CheckDensePrefill(const Format& f, std::uint32_t m, std::uint32_t k,
     HIP_CHECK(hipMalloc(&dense, std::size_t{rows} * m * 4));
     HIP_CHECK(hipMalloc(&routed_half, std::size_t{rows} * m));
     HIP_CHECK(hipMalloc(&dense_half, std::size_t{rows} * m));
+    // Q8_0 has no dense GEMM here (Flash-Next's serves it): its prefill copy
+    // is held to the routed GEMM alone.
+    const bool q8 = f.format == g4k::ExpertFormat::kQ8_0;
     Require(g4k::LaunchRoutedHalfGemm(f.format, dw, dx, dtiles, n_tiles, kTile,
                                       dbounds, dids, dids, routed, nullptr, m,
                                       k, nullptr) &&
-                g4k::LaunchDenseHalfGemm(f.format, dw, dx, dense, nullptr, rows,
-                                         m, k, nullptr) &&
                 g4k::LaunchRoutedHalfGemm(f.format, dw, dx, dtiles, n_tiles,
                                           kTile, dbounds, dids, dids, nullptr,
-                                          routed_half, m, k, nullptr, true) &&
-                g4k::LaunchDenseHalfGemm(f.format, dw, dx, nullptr, dense_half,
-                                         rows, m, k, nullptr, true),
-            "dense prefill GEMM rejected " + std::string(f.name));
+                                          routed_half, m, k, nullptr, true),
+            "routed prefill GEMM rejected " + std::string(f.name));
+    Require(
+        q8 || (g4k::LaunchDenseHalfGemm(f.format, dw, dx, dense, nullptr, rows,
+                                        m, k, nullptr) &&
+               g4k::LaunchDenseHalfGemm(f.format, dw, dx, nullptr, dense_half,
+                                        rows, m, k, nullptr, true)),
+        "dense prefill GEMM rejected " + std::string(f.name));
+    if (q8) {
+      HIP_CHECK(hipMemcpy(dense, routed, std::size_t{rows} * m * 4,
+                          hipMemcpyDeviceToDevice));
+      HIP_CHECK(hipMemcpy(dense_half, routed_half, std::size_t{rows} * m,
+                          hipMemcpyDeviceToDevice));
+    }
     const auto a = Host(routed, std::size_t{rows} * m);
     const auto b = Host(dense, std::size_t{rows} * m);
     Require(std::memcmp(a.data(), b.data(), a.size() * 4) == 0,
@@ -839,6 +899,7 @@ void CheckDensePrefill(const Format& f, std::uint32_t m, std::uint32_t k,
     Require(std::memcmp(ah.data(), bh.data(), ah.size() * 2) == 0,
             std::string(f.name) + ": dense GeGLU differs from routed at " +
                 std::to_string(rows) + " rows");
+    CheckPackedPrefill(f, dw, dx, b, bh, rows, m, k);
     for (void* p :
          {static_cast<void*>(dx), static_cast<void*>(dids),
           static_cast<void*>(dtiles), static_cast<void*>(dbounds),
@@ -862,7 +923,7 @@ void CheckDenseBlockwise(const Format& f, std::uint32_t m, std::uint32_t k,
   const auto w = RandomMatrix(f, m, k, rng);
   auto* dw = Device(w.data(), w.size());
   const std::size_t row_bytes = k / f.block * f.bytes;
-  for (const std::uint32_t rows : {1U, 97U, 300U}) {
+  for (const std::uint32_t rows : {1U, 97U, 300U, 513U}) {
     const auto x = Normal(std::size_t{rows} * k, 1.0F, rng);
     std::vector<__half> xh(x.size());
     for (std::size_t i = 0; i < x.size(); ++i) {
@@ -912,6 +973,7 @@ void CheckDenseBlockwise(const Format& f, std::uint32_t m, std::uint32_t k,
     Require(std::memcmp(a.data(), b.data(), a.size() * 2) == 0,
             name + ": dense GeGLU differs from the separate pass at " +
                 std::to_string(rows) + " rows");
+    CheckPackedPrefill(f, dw, dx, got, b, rows, m, k);
     std::cout << "dense prefill " << name << ", " << rows << " rows: error "
               << worst << "\n";
     for (void* p : {static_cast<void*>(dx), static_cast<void*>(dy),
@@ -1056,7 +1118,7 @@ int main() {
       CheckRoutedPrefill(f, kHidden, kWidth, false, rng);
     }
     // A fused gate/up of 2 x 1000 rows: partial row blocks both ways.
-    for (const Format& f : {q4k, q5k, q6k}) {
+    for (const Format& f : {q4k, q5k, q6k, q80}) {
       CheckDensePrefill(f, 2000, kHidden, rng);
     }
     for (const Format& f : {q40, q50}) {

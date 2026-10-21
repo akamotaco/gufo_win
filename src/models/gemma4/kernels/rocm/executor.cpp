@@ -492,6 +492,19 @@ std::optional<ExpertFormat> DenseHalfFormat(core::GgmlType type) {
   }
 }
 
+/// Whether a prefill of `rows` reads w's prefill copy: binary16 weights
+/// only pay from 512 rows, where the weight reads stop dominating.
+bool PackedPrefill(const DeviceTensor& w, std::uint32_t rows) {
+  switch (w.prefill_layout) {
+    case PrefillLayout::kCompact:
+      return true;
+    case PrefillLayout::kDecoded:
+      return rows >= 512;
+    default:
+      return false;
+  }
+}
+
 /// Decode and verification projections on the routed GEMV's dense mode
 /// (LaunchDenseGemv): Q5_0, which no other GEMV decodes, and Q4_0 rows the
 /// Gemma GEMVs cannot split into 256-value groups (the 26B-A4B's 2112-wide
@@ -528,6 +541,12 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
   }
   if (rows > kSplitRows) {
     if (half_prefill_) {
+      if (PackedPrefill(w, rows) &&
+          LaunchPackedPrefillGemm(w.prefill_format, w.prefill_layout, w.prefill,
+                                  xq, y, nullptr, rows, w.rows, w.cols,
+                                  stream_)) {
+        return;
+      }
       // Binary16 activations: Q8_0, Q4_0 and K-quant weights decode to
       // binary16 in the WMMA GEMMs; other formats keep the W8A8 route on their
       // own Q8_1 rows.
@@ -969,11 +988,18 @@ void Executor::Forward(std::span<const Segment> segments,
     const float* down_in = gate_;
     WmmaPackOut down_pack{};
     const auto gate_up_half = DenseHalfFormat(L.ffn_gate_up.type);
-    if (!L.ffn_gate_up.empty() && half && gate_up_half &&
+    const bool gate_up_packed = PackedPrefill(L.ffn_gate_up, n);
+    if (!L.ffn_gate_up.empty() && half && (gate_up_half || gate_up_packed) &&
         half_only({&L.ffn_down}) &&
-        LaunchDenseHalfGemm(*gate_up_half, L.ffn_gate_up.data, fq, nullptr,
-                            gate_, n, L.ffn_gate_up.rows, L.ffn_gate_up.cols,
-                            stream_, true)) {
+        ((gate_up_packed &&
+          LaunchPackedPrefillGemm(
+              L.ffn_gate_up.prefill_format, L.ffn_gate_up.prefill_layout,
+              L.ffn_gate_up.prefill, fq, nullptr, gate_, n, L.ffn_gate_up.rows,
+              L.ffn_gate_up.cols, stream_, true)) ||
+         (gate_up_half &&
+          LaunchDenseHalfGemm(*gate_up_half, L.ffn_gate_up.data, fq, nullptr,
+                              gate_, n, L.ffn_gate_up.rows, L.ffn_gate_up.cols,
+                              stream_, true)))) {
       // The GEMM writes GeGLU of each binary16 [gate | up] pair into the
       // (free) gate rows as the down projection's binary16 input.
       gq = gate_;

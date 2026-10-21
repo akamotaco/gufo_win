@@ -100,6 +100,22 @@ Prompt snapshots feed the RAM and `--cache-disk` prompt caches; a trimmed or
 edited history re-prefills from the latest retained checkpoint before the
 change, so dropping the oldest messages costs a full prefill.
 
+`--prefill-weights` (serve, prompt and bench) trades memory for prefill speed
+by keeping a second copy of the dense projections next to the GGUF weights,
+which decoding keeps reading:
+
+| Mode | Copy | 31B UD-Q4_K_XL memory | pp2048 d0 |
+| --- | --- | ---: | ---: |
+| `off` (default) | none | 22.0 GiB | 581 tok/s |
+| `compact` | K-quant codes with binary16 scales in the GEMM's register order | +18.9 GiB | +3.3% |
+| `decoded` | binary16 weights for the 5376-wide inputs, `compact` elsewhere | +43.0 GiB | +6.5% |
+
+`decoded` also serves the QAT (Q4_0, +3.6%) and UD-Q8_K_XL (Q8_0, +3.8%)
+quants. Prefill logits are bit-identical to `off` in both modes on all three
+31B quants. Prompts under 512 tokens skip the binary16 copies. Neither mode
+copies anything on the 26B-A4B UD and QAT quants: their dense projections are
+Q8_0 or 2816 wide, where binary16 copies measured 1-2% slower.
+
 ## Tools and artifacts
 
 Tests live in `tests/models/gemma4` (`gemma4.*` in CTest; set

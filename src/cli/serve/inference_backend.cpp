@@ -4292,6 +4292,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       gemma_options.draft_calibration =
           models::gemma4::ParseDraftCalibrationScope(
               speculative_config.mtp_draft_calibration);
+      gemma_options.prefill_weights =
+          models::gemma4::ParsePrefillWeightsOption(gemma_prefill_weights_);
     } catch (const std::invalid_argument& e) {
       SetError(error, e.what());
       return false;

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <initializer_list>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -18,6 +19,45 @@
 
 namespace gufo::models::gemma4::rocm {
 namespace {
+
+std::optional<ExpertFormat> PrefillFormat(core::GgmlType type) {
+  switch (type) {
+    case core::GgmlType::kQ4_K:
+      return ExpertFormat::kQ4_K;
+    case core::GgmlType::kQ5_K:
+      return ExpertFormat::kQ5_K;
+    case core::GgmlType::kQ6_K:
+      return ExpertFormat::kQ6_K;
+    case core::GgmlType::kQ4_0:
+      return ExpertFormat::kQ4_0;
+    case core::GgmlType::kQ5_0:
+      return ExpertFormat::kQ5_0;
+    case core::GgmlType::kQ8_0:
+      return ExpertFormat::kQ8_0;
+    default:
+      return std::nullopt;
+  }
+}
+
+/// The prefill copy of a dense projection with k inputs under `mode`.
+PrefillLayout ChoosePrefillLayout(PrefillWeights mode, ExpertFormat format,
+                                  std::uint32_t k) {
+  // Binary16 copies pay only on the 31B's 5376-wide inputs (pp2048,
+  // 2026-10-21). From 8192 the blocks sharing a weight tile drift apart along
+  // k and each reads it from DRAM (down, o: -29 to -62%); at the 26B-A4B's
+  // 2816 they lose 1-2% (Flash-Next's tuned Q8_0 GEMM, Q4_0).
+  const bool decoded =
+      PrefillLayoutSupports(format, PrefillLayout::kDecoded, k) && k > 4096 &&
+      k < 8192;
+  if (mode == PrefillWeights::kDecoded && decoded) {
+    return PrefillLayout::kDecoded;
+  }
+  if (mode != PrefillWeights::kOff &&
+      PrefillLayoutSupports(format, PrefillLayout::kCompact, k)) {
+    return PrefillLayout::kCompact;
+  }
+  return PrefillLayout::kNone;
+}
 
 /// Quantized GEMM kernels read whole 256-element k-iterations and may
 /// over-read the last row; every upload carries a zeroed tail so those reads
@@ -241,7 +281,8 @@ DeviceModel::~DeviceModel() {
 std::unique_ptr<DeviceModel> DeviceModel::Upload(
     const ModelWeights& weights, const core::GgufReader& reader,
     const DraftWeights* draft, const core::GgufReader* draft_reader,
-    std::span<const std::int32_t> draft_order, std::string* error_msg) {
+    std::span<const std::int32_t> draft_order, PrefillWeights prefill_weights,
+    std::string* error_msg) {
   std::unique_ptr<DeviceModel> m(new DeviceModel());
   m->config_ = weights.config;
   m->vocab_ = weights.vocab_size;
@@ -335,6 +376,53 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     m->half_prefill_ = all;
     if (all) {
       m->max_half_cols_ = std::max(m->max_half_cols_, widest);
+    }
+  }
+  if (m->half_prefill_ && prefill_weights != PrefillWeights::kOff) {
+    const auto pack = [&](DeviceTensor& t) {
+      const auto format = PrefillFormat(t.type);
+      if (t.empty() || !format || !up.ok) {
+        return;
+      }
+      const PrefillLayout layout =
+          ChoosePrefillLayout(prefill_weights, *format, t.cols);
+      if (layout == PrefillLayout::kNone) {
+        return;
+      }
+      t.prefill =
+          up.Allocate(PrefillWeightBytes(*format, layout, t.rows, t.cols),
+                      "prefill weights");
+      if (t.prefill != nullptr) {
+        t.prefill_layout = layout;
+        t.prefill_format = *format;
+        up.ok = PackPrefillWeights(*format, layout, t.data, t.prefill, t.rows,
+                                   t.cols, nullptr);
+      }
+    };
+    // The tensors prefill projects: fused ones, not their views.
+    for (DeviceLayer& l : m->layers_) {
+      if (!l.attn_qkv.empty()) {
+        pack(l.attn_qkv);
+        if (l.attn_qkv.rows == l.attn_q.rows + l.attn_k.rows) {
+          pack(l.attn_v);
+        }
+      } else {
+        pack(l.attn_q);
+        pack(l.attn_k);
+        pack(l.attn_v);
+      }
+      pack(l.attn_output);
+      if (!l.ffn_gate_up.empty()) {
+        pack(l.ffn_gate_up);
+      } else {
+        pack(l.ffn_gate);
+        pack(l.ffn_up);
+      }
+      pack(l.ffn_down);
+    }
+    if (!up.ok || hipDeviceSynchronize() != hipSuccess) {
+      up.Fail("prefill weight packing failed");
+      return nullptr;
     }
   }
   if (!up.halves.empty()) {

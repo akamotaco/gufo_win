@@ -9,6 +9,8 @@
 #include <vector>
 
 #include "src/core/gguf_reader.hpp"
+#include "src/models/gemma4/kernels/rocm/moe.hpp"
+#include "src/models/gemma4/prefill_weights.hpp"
 #include "src/models/gemma4/weights.hpp"
 
 namespace gufo::models::gemma4::rocm {
@@ -16,6 +18,10 @@ namespace gufo::models::gemma4::rocm {
 /// One weight resident in device memory, still in its GGUF encoding.
 struct DeviceTensor {
   void* data{nullptr};
+  /// Prefill copy (PrefillWeights); `data` stays the decode source.
+  void* prefill{nullptr};
+  PrefillLayout prefill_layout{PrefillLayout::kNone};
+  ExpertFormat prefill_format{ExpertFormat::kQ4_K};
   core::GgmlType type{core::GgmlType::kF32};
   std::uint32_t cols{0};
   std::uint32_t rows{0};
@@ -68,7 +74,7 @@ public:
   [[nodiscard]] static std::unique_ptr<DeviceModel> Upload(
       const ModelWeights& weights, const core::GgufReader& reader,
       const DraftWeights* draft, const core::GgufReader* draft_reader,
-      std::span<const std::int32_t> draft_order,
+      std::span<const std::int32_t> draft_order, PrefillWeights prefill_weights,
       std::string* error_msg = nullptr);
 
   [[nodiscard]] const Config& config() const noexcept { return config_; }
