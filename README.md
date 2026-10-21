@@ -156,6 +156,11 @@ GPU timeout is still 2 s or changed without a reboot ([docs/WINDOWS-TDR.md](docs
   Start the server with `--max-request-bytes 134217728` (128 MiB); `..\tool\gufo_select.py`
   offers it as the default choice. A running server keeps its limit until restarted;
   meanwhile a new conversation drops the earlier images.
+- **`400 request image byte budget exceeded`.** Upstream also caps all images of one
+  request at 20 MiB, which about ten resent screenshots exceed. This build raises that
+  total to 256 MiB (`src/core/image.hpp`), so `--max-request-bytes` is the real bound:
+  128 MiB holds about 96 MB of images (base64 adds a third). Single images keep the
+  20 MiB limit. Checked with 18 PNGs (22 MiB, 29 MiB request) on Gemma 4 26B.
 - **`503 device_lost` / "GPU context lost; restart required".** The Windows GPU timeout
   (TDR, 2 s by default) reset the driver during a long kernel. Raise it to 30 s and
   reboot: [docs/WINDOWS-TDR.md](docs/WINDOWS-TDR.md).
