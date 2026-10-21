@@ -33,7 +33,7 @@ gaps. MTP verify cycles at d0 (~101 ms GPU): target verification projections
 
 | # | Item | Area | Effort | Est. impact | Confidence |
 | ---: | --- | --- | --- | --- | --- |
-| 1 | MTP verification projections: close the 5–13% per-byte gap of the WMMA verification GEMV to the AR GEMV | Decode MTP, all depths | Very hard | MTP +0–3% | Low |
+| 1 | MTP verification projections: close the remaining gap of the WMMA verification GEMV to the AR GEMV (after the 2026-10-21 grouped layout) | Decode MTP, all depths | Very hard | MTP +0–2% | Low |
 | 2 | 8-bit KV cache | Decode at depth, memory | Very hard, quality risk | AR +5% at 32K, +14% at 128K; MTP more; about half the KV memory | Speed medium, quality unknown |
 | 3 | MTP verification attention at five or more rows | Decode MTP at depth | Hard | +2–5% at 32K, more at 128K | Low |
 | 4 | Prefill projections past ~70% of the WMMA ceiling | Prefill, all depths | Hard | +2–5% | Low |
@@ -60,7 +60,12 @@ super-blocks, the shared LDS activation tile becomes per-wave L2 traffic,
 about 3.5 × the weight bytes. Per-wave LDS tiles do not fit 64 KB, so what
 remains is a walk that does not multiply A reads (unknown) or a repacked
 weight layout, which the AR GEMV shares (doubles projection memory). The
-~7% math term is untouched. Verification must keep one arithmetic per format
+~7% math term is untouched. 2026-10-21: the repacked layout landed at no
+memory cost by replacing the GGUF order whenever a drafter is loaded (the
+AR GEMV is then unused): 128-row groups storing each super-block's rows back
+to back lift the walk to 220–230 GB/s, the kernel 0–9% per shape, MTP tg128
++3.4% at d0 (EXPERIMENTS.md). What remains is the math term and the last
+~2–5% to the AR walk. Verification must keep one arithmetic per format
 so it still equals decode bit for bit (`gemma4.projection_ops`); the slab
 rewrite showed the accumulation may be restructured (slab partials in slab
 order) while keeping width invariance and the FP64 bound.
@@ -337,6 +342,9 @@ an NPU load.
   the round.
 - The branch is pushed to the `fork` remote (franzmoca/gufo) with no pull
   request yet; its title follows [the release policy](../../RELEASING.md).
+- `gemma4.target` fails on 26B QAT UD-Q4_K_XL at "sync between lookahead
+  stops diverges" (before its MTP section), identically at 03b61436 and
+  later; investigate the continuation path on that model.
 
 ## Methods that worked
 
