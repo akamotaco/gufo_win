@@ -552,12 +552,17 @@ int main() {
             std::max_element(logits.begin(), logits.end()) - logits.begin());
         if (stop == 5) {
           // A Sync between stops keeps the rows it shares with the lookahead
-          // and evaluates its last token again.
+          // and evaluates its last token again, as a decode row: the
+          // reference prefills the rest and decodes that token too. (Against
+          // a prefill row of the same token, this repetitive prompt's
+          // near-ties flip expert routing at some positions.)
           auto between = model->CreateSession(0, &error);
           const auto mid =
               std::span<const g4::TokenId>(long_prompt).first(head.size() + 12);
           auto reference = model->CreateSession(0, &error);
-          Require(between && reference && reference->Sync(mid, &error) &&
+          Require(between && reference &&
+                      reference->Sync(mid.first(mid.size() - 1), &error) &&
+                      reference->Evaluate(mid.back(), &error) &&
                       between->Sync(head, {}, {}, &error, tail, stops) &&
                       between->Sync(mid, &error) &&
                       between->Position() == mid.size() &&
@@ -565,6 +570,8 @@ int main() {
                   "sync between lookahead stops: " + error);
           const Stats kept = Compare(as_vector(reference->Logits()),
                                      as_vector(between->Logits()), vocab);
+          std::cout << "sync between lookahead stops: mean KL " << kept.mean_kl
+                    << ", top-1 " << kept.top1 << "/" << kept.rows << '\n';
           Require(kept.top1 == 1 && kept.mean_kl < limits.decode,
                   "sync between lookahead stops diverges");
         }
