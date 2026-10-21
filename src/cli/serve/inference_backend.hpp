@@ -89,6 +89,11 @@ public:
   InferenceBackend(InferenceBackend&&) = delete;
   InferenceBackend& operator=(InferenceBackend&&) = delete;
 
+  /// Gemma 4 --prefill-weights mode for the next load (empty is off).
+  void set_gemma_prefill_weights(std::string mode) {
+    gemma_prefill_weights_ = std::move(mode);
+  }
+
   /// Loads weights from a GGUF file. Returns false and sets *error on failure.
   bool load(const std::string& model_path, std::string* error,
             std::uint32_t max_context = 0, std::size_t session_count = 1,
@@ -152,6 +157,8 @@ public:
   [[nodiscard]] bool ready() const override;
   [[nodiscard]] bool device_lost() const override;
   [[nodiscard]] bool supports_images() const override;
+  [[nodiscard]] std::string model_path() const override;
+  [[nodiscard]] std::string build_info() const override;
   [[nodiscard]] SamplingDefaults sampling_defaults() const override;
   [[nodiscard]] std::uint32_t max_context() const override;
   [[nodiscard]] std::vector<SessionState> session_states() const override;
@@ -160,6 +167,8 @@ public:
       const ChatRequest& request) const override;
   [[nodiscard]] OutputMarkup output_markup() const override;
   void set_model_id(const std::string& model_id);
+  void set_served_artifact(const std::string& model_path,
+                           const std::string& build_info);
   void set_sampling_defaults(std::size_t max_tokens,
                              const sampling::SamplingConfig& sampling,
                              sampling::SamplingOverrides supplied =
@@ -209,6 +218,7 @@ public:
 private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
+  std::string gemma_prefill_weights_;
 };
 
 }  // namespace gufo::server

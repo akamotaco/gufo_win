@@ -294,7 +294,7 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
           : std::vector<TokenId>{};
   m->device_ = rocm::DeviceModel::Upload(
       *m->weights_, *m->reader_, m->draft_weights_.get(),
-      m->draft_reader_.get(), draft_order, &error);
+      m->draft_reader_.get(), draft_order, options.prefill_weights, &error);
   if (!m->device_) {
     Fail(error_msg, error);
     return nullptr;

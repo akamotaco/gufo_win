@@ -105,6 +105,33 @@ void MoeRoute(const MoeRouteArgs& args, hipStream_t stream);
                                    std::uint32_t m, std::uint32_t k,
                                    hipStream_t stream);
 
+/// Prefill-only copies of dense weights, kept beside the GGUF data that
+/// decode reads. Both produce the products of LaunchDenseHalfGemm bit for
+/// bit. kCompact (Q4_K, Q5_K, Q6_K): each stage's codes with binary16 scales
+/// in the GEMM's register order, 80 (Q4_K) or 112 bytes per 128 values.
+/// kDecoded (also Q4_0, Q5_0, Q8_0): the binary16 weights, 2 bytes per
+/// value. Q8_0 replaces Flash-Next's DenseF16Gemm, another kernel (it
+/// matched the 31B UD-Q8_K_XL's prefill logits bit for bit).
+enum class PrefillLayout : std::uint32_t { kNone, kCompact, kDecoded };
+
+[[nodiscard]] bool PrefillLayoutSupports(ExpertFormat format,
+                                         PrefillLayout layout, std::uint32_t k);
+[[nodiscard]] std::size_t PrefillWeightBytes(ExpertFormat format,
+                                             PrefillLayout layout,
+                                             std::uint32_t m, std::uint32_t k);
+/// Fills `packed` (PrefillWeightBytes) from GGUF weights [m][k].
+[[nodiscard]] bool PackPrefillWeights(ExpertFormat format, PrefillLayout layout,
+                                      const void* w, void* packed,
+                                      std::uint32_t m, std::uint32_t k,
+                                      hipStream_t stream);
+/// LaunchDenseHalfGemm over packed weights. `group`: token tiles per
+/// row-block sweep, 0 for the layout's default.
+[[nodiscard]] bool LaunchPackedPrefillGemm(
+    ExpertFormat format, PrefillLayout layout, const void* w, const void* x,
+    float* out, void* out_half, std::uint32_t rows, std::uint32_t m,
+    std::uint32_t k, hipStream_t stream, bool geglu = false,
+    std::uint32_t group = 0);
+
 /// Bucket rows per tile of LaunchRoutedHalfGemm's tile maps.
 inline constexpr std::uint32_t kRoutedHalfTileRows = 112;
 
@@ -118,13 +145,16 @@ inline constexpr std::uint32_t kRoutedHalfTileRows = 112;
 /// tiles); returns false
 /// for others. With `geglu` (a K-quant, Q4_0, Q8_0 or binary16 fused
 /// [gate | up] W, binary16 output) row r of `out_half` holds the m / 2 values
-/// GeGluPackedHalf would make of the binary16 pair.
+/// GeGluPackedHalf would make of the binary16 pair. `layout` kCompact reads
+/// W as a K-quant's compact prefill copy of all experts' rows (m % 16 == 0),
+/// with the same results.
 [[nodiscard]] bool LaunchRoutedHalfGemm(
     ExpertFormat format, const void* w, const void* x,
     const std::int32_t* tiles, std::uint32_t n_tiles, std::uint32_t tile_rows,
     const std::int32_t* pad_bounds, const std::int32_t* rows_in,
     const std::int32_t* rows_out, float* out, void* out_half, std::uint32_t m,
-    std::uint32_t k, hipStream_t stream, bool geglu = false);
+    std::uint32_t k, hipStream_t stream, bool geglu = false,
+    PrefillLayout layout = PrefillLayout::kNone);
 
 /// Dense prefill projection over binary16 activation rows `x` ([rows][k])
 /// for Q4_K, Q5_K, Q6_K (the routed GEMM's arithmetic over an identity
@@ -137,7 +167,8 @@ inline constexpr std::uint32_t kRoutedHalfTileRows = 112;
                                        const void* x, float* out,
                                        void* out_half, std::uint32_t rows,
                                        std::uint32_t m, std::uint32_t k,
-                                       hipStream_t stream, bool geglu = false);
+                                       hipStream_t stream, bool geglu = false,
+                                       bool grouped = false);
 
 /// Entries of a routed tile map of `rows`-row tiles that any routing of
 /// `slots` assignments over `experts` 16-padded buckets fits in.

@@ -33,7 +33,7 @@ gaps. MTP verify cycles at d0 (~101 ms GPU): target verification projections
 
 | # | Item | Area | Effort | Est. impact | Confidence |
 | ---: | --- | --- | --- | --- | --- |
-| 1 | MTP verification projections: close the 5–13% per-byte gap of the WMMA verification GEMV to the AR GEMV | Decode MTP, all depths | Very hard | MTP +0–3% | Low |
+| 1 | MTP verification projections: close the remaining gap of the WMMA verification GEMV to the AR GEMV (after the 2026-10-21 grouped layout) | Decode MTP, all depths | Very hard | MTP +0–2% | Low |
 | 2 | 8-bit KV cache | Decode at depth, memory | Very hard, quality risk | AR +5% at 32K, +14% at 128K; MTP more; about half the KV memory | Speed medium, quality unknown |
 | 3 | MTP verification attention at five or more rows | Decode MTP at depth | Hard | +2–5% at 32K, more at 128K | Low |
 | 4 | Prefill projections past ~70% of the WMMA ceiling | Prefill, all depths | Hard | +2–5% | Low |
@@ -60,7 +60,12 @@ super-blocks, the shared LDS activation tile becomes per-wave L2 traffic,
 about 3.5 × the weight bytes. Per-wave LDS tiles do not fit 64 KB, so what
 remains is a walk that does not multiply A reads (unknown) or a repacked
 weight layout, which the AR GEMV shares (doubles projection memory). The
-~7% math term is untouched. Verification must keep one arithmetic per format
+~7% math term is untouched. 2026-10-21: the repacked layout landed at no
+memory cost by replacing the GGUF order whenever a drafter is loaded (the
+AR GEMV is then unused): 128-row groups storing each super-block's rows back
+to back lift the walk to 220–230 GB/s, the kernel 0–9% per shape, MTP tg128
++3.4% at d0 (EXPERIMENTS.md). What remains is the math term and the last
+~2–5% to the AR walk. Verification must keep one arithmetic per format
 so it still equals decode bit for bit (`gemma4.projection_ops`); the slab
 rewrite showed the accumulation may be restructured (slab partials in slab
 order) while keeping width invariance and the FP64 bound.
@@ -111,6 +116,16 @@ twice. Rejected: 128-token tiles (three blocks per WGP), unpadded XOR-swizzled
 activation rows (registers), 16-wave 256-row blocks, a cross-half decode swap,
 scale-conversion splits for Q5_K and Q6_K (registers). A real gain probably
 needs a different decode scheme.
+
+Load-time weight copies trade memory for this work (`--prefill-weights`,
+2026-10-21, opt-in): `compact` +3.3% pp2048 for +18.9 GiB, `decoded` +6.5% for
++43 GiB on UD-Q4_K_XL. No variant under ~4 GiB gained reliably (direct GGUF
+register loads −0.7%, a binary16 scale sidecar +1.5%), and decode cannot read
+the compact copy without ~10% more bytes per token. Binary16 copies of the
+k >= 8192 projections (down, o) stay rejected: exact K chunks, 2D launch
+regions and a register prefetch all still lose 7–55%, and their ceiling over
+compact is ~1–1.5% of the projections (EXPERIMENTS.md). On the 26B-A4B the
+modes copy the K-quant expert [gate | up] weights (+1.0% pp2048, +9.0 GiB).
 
 ### 5. Global prefill attention redesign
 

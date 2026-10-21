@@ -4,6 +4,23 @@ Changes made in this fork's Gemma 4 engine, newest first. Each entry is a brief
 summary; its pull request has the details, measurements and validation.
 Upstream Gufo's changes are in [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-21: Faster MTP decoding and opt-in prefill weight copies ([#6](https://github.com/franzmoca/gufo/pull/6))
+
+- With an MTP drafter loaded, the target's projection weights are reordered
+  at load into 128-row groups that the verification kernel reads as one
+  stream. It uses the same bytes and gives the same results, at about 0.3 s
+  more load time. MTP decode tg128 is +3.4% on 31B UD-Q4_K_XL and QAT and
+  +1.0% on 26B QAT, with prefill unchanged.
+- `--prefill-weights off|compact|decoded` (serve, prompt and bench; default
+  `off`) keeps load-time prefill copies of the dense projections beside the
+  GGUF weights. On 31B UD-Q4_K_XL pp2048, `compact` is +3.3% for +18.9 GiB
+  and `decoded` is +6.5% for +43 GiB (QAT +3.6%, UD-Q8_K_XL +3.8%). On the
+  26B-A4B, both modes copy the expert gate/up weights: +1.0% for +9.0 GiB.
+  Prefill results are bit-identical in every mode.
+- `gemma4.target`'s between-lookahead-stops check now compares against a
+  matching decode row, so it passes on 26B QAT.
+- Synced with upstream main through gufo-org/gufo#686 (0.19.0).
+
 ## 2026-10-20: Faster MTP attention at depth and a per-cycle draft trace ([#5](https://github.com/franzmoca/gufo/pull/5))
 
 - MTP verification attention folds its reductions into DPP additions and

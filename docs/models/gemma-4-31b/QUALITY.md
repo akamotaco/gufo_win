@@ -214,3 +214,13 @@ gap check in one essay cycle: the new prices verify two extra sibling rows
 (164.9 / 167.4 ms instead of 152.1 / 152.3 ms) and that cycle emits two
 tokens instead of one. No other essay cycle exceeds ~152.7 ms under either
 table ([trace](artifacts/mtp-cycle-trace-2026-10-20.json)).
+
+The rejected paired-head wave64 probe (October 20) preserves output bits across
+64 global-attention cells (rows 1–16, depths 16K/32K, both target head layouts),
+also at 10× and 30× query scales. Eight independent FP64 cases, including
+derived keys and deep verification, have maximum error 4.91e-6 against the
+unchanged 2e-5 limit; each row also matches its single-row evaluation. The
+selective production-binary probe preserves responses and draft/acceptance
+counts on six HTTP requests across 31B and 26B, including seeded sampling.
+These are probe results; production attention remains unchanged.
+[Raw evidence](artifacts/wave64-global-verification-2026-10-20.json).

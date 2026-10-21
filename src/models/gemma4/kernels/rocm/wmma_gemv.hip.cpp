@@ -360,7 +360,7 @@ __device__ __forceinline__ v8f Wmma(v16h a, v16h b, v8f c) {
 /// 0-7 and rows 8-15 their lo parts; otherwise a hi tile and a lo tile.
 /// Grid: (row blocks of 16 kWaves rows, splits); each split covers
 /// `per_split` super-blocks and writes partials unless it is the only one.
-template<WmmaFormat F, bool kPacked, int kWaves>
+template<WmmaFormat F, bool kPacked, int kWaves, bool kGrouped = false>
 __global__ void __launch_bounds__(32 * kWaves)
     GemvKernel(const std::uint8_t* __restrict__ w, Pack pack,
                float* __restrict__ y, std::uint32_t rows, std::uint32_t m,
@@ -390,7 +390,17 @@ __global__ void __launch_bounds__(32 * kWaves)
   const int sb1 =
       min(sb0 + static_cast<int>(per_split), static_cast<int>(k / kSuper));
   const int last = static_cast<int>(rows) - 1;
+  // kGrouped: the grouped layout (wmma_gemv.hpp).
+  const std::uint32_t g_row = live ? row : m - 1;
+  const std::uint32_t g_rows = min(128U, m - g_row / 128 * 128);
+  const std::uint8_t* g_base =
+      w + (std::size_t{g_row / 128} * 128 * (k / kSuper) + g_row % 128) *
+              Format::kSuperBytes;
   const auto super = [&](int sb) {
+    if constexpr (kGrouped) {
+      return g_base + std::size_t{static_cast<unsigned>(sb)} * g_rows *
+                          Format::kSuperBytes;
+    }
     return w_row + std::size_t{static_cast<unsigned>(sb)} * Format::kSuperBytes;
   };
   // Activation chunk c = tid + kBlockThreads j: tile row c / 32, eight
@@ -636,6 +646,74 @@ bool WmmaGemvSupports(core::GgmlType type, std::uint32_t m,
   return FormatOf(type).has_value() && m > 0 && k > 0 && k % kSuper == 0;
 }
 
+namespace {
+
+int SuperBytes(WmmaFormat f) {
+  switch (f) {
+    case WmmaFormat::kQ4_K:
+      return Fmt<WmmaFormat::kQ4_K>::kSuperBytes;
+    case WmmaFormat::kQ5_K:
+      return Fmt<WmmaFormat::kQ5_K>::kSuperBytes;
+    case WmmaFormat::kQ6_K:
+      return Fmt<WmmaFormat::kQ6_K>::kSuperBytes;
+    case WmmaFormat::kQ4_0:
+      return Fmt<WmmaFormat::kQ4_0>::kSuperBytes;
+  }
+  return 0;
+}
+
+/// One thread per 16-byte piece of the source, in source order (coalesced
+/// reads; each super-block's pieces land together). Q6_K super-blocks are
+/// 210 bytes, so a piece is 2-byte aligned: it moves as eight 16-bit words.
+__global__ void GroupKernel(const std::uint16_t* __restrict__ src,
+                            std::uint16_t* __restrict__ dst, std::uint32_t m,
+                            std::uint32_t supers, std::uint32_t words,
+                            std::size_t pieces) {
+  const std::size_t p = std::size_t{blockIdx.x} * blockDim.x + threadIdx.x;
+  if (p >= pieces) {
+    return;
+  }
+  const std::size_t first = p * 8;  // word index in the source
+  const std::size_t total = std::size_t{m} * supers * words;
+#pragma unroll
+  for (std::uint32_t i = 0; i < 8; ++i) {
+    const std::size_t at = first + i;
+    if (at >= total) {
+      return;
+    }
+    const std::size_t block = at / words;  // row * supers + sb
+    const auto r = static_cast<std::uint32_t>(block / supers);
+    const auto sb = static_cast<std::uint32_t>(block % supers);
+    const std::uint32_t rows = min(128U, m - r / 128 * 128);
+    const std::size_t to = (std::size_t{r / 128} * 128 * supers +
+                            std::size_t{sb} * rows + r % 128) *
+                               words +
+                           at % words;
+    dst[to] = src[at];
+  }
+}
+
+}  // namespace
+
+bool GroupedLayoutSupports(core::GgmlType type, std::uint32_t m,
+                           std::uint32_t k) noexcept {
+  return WmmaGemvSupports(type, m, k);
+}
+
+bool GroupWeights(core::GgmlType type, const void* src, void* dst,
+                  std::uint32_t m, std::uint32_t k, hipStream_t stream) {
+  if (!GroupedLayoutSupports(type, m, k)) {
+    return false;
+  }
+  const auto words =
+      static_cast<std::uint32_t>(SuperBytes(*FormatOf(type)) / 2);
+  const std::size_t pieces = (std::size_t{m} * (k / kSuper) * words + 7) / 8;
+  GroupKernel<<<static_cast<unsigned>((pieces + 255) / 256), 256, 0, stream>>>(
+      static_cast<const std::uint16_t*>(src), static_cast<std::uint16_t*>(dst),
+      m, k / kSuper, words, pieces);
+  return true;
+}
+
 WmmaPackOut WmmaPackOf(void* scratch, std::uint32_t k) noexcept {
   const Pack p = PackOf(scratch, k);
   return {.hi = p.hi, .lo = p.lo, .inv = p.inv, .sums = p.sums, .k = k};
@@ -652,7 +730,7 @@ std::size_t WmmaGemvScratchBytes(std::uint32_t max_k) noexcept {
 bool LaunchWmmaGemv(core::GgmlType type, const void* w, const float* x,
                     float* y, std::uint32_t rows, std::uint32_t m,
                     std::uint32_t k, void* scratch, hipStream_t stream,
-                    bool packed) {
+                    bool packed, bool grouped) {
   if (!WmmaGemvSupports(type, m, k) || rows == 0 || rows > kWmmaGemvRows) {
     return false;
   }
@@ -670,8 +748,13 @@ bool LaunchWmmaGemv(core::GgmlType type, const void* w, const float* x,
   const auto* wb = static_cast<const std::uint8_t*>(w);
   const auto launch = [&]<WmmaFormat F>() {
     const auto go = [&]<bool kPacked, int kWaves>() {
-      GemvKernel<F, kPacked, kWaves><<<grid, 32 * kWaves, 0, stream>>>(
-          wb, pack, y, rows, m, k, per_split);
+      if (grouped) {
+        GemvKernel<F, kPacked, kWaves, true><<<grid, 32 * kWaves, 0, stream>>>(
+            wb, pack, y, rows, m, k, per_split);
+      } else {
+        GemvKernel<F, kPacked, kWaves><<<grid, 32 * kWaves, 0, stream>>>(
+            wb, pack, y, rows, m, k, per_split);
+      }
     };
     if (rows <= 8) {
       waves == 2   ? go.template operator()<true, 2>()

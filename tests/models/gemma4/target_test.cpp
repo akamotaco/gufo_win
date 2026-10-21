@@ -552,12 +552,17 @@ int main() {
             std::max_element(logits.begin(), logits.end()) - logits.begin());
         if (stop == 5) {
           // A Sync between stops keeps the rows it shares with the lookahead
-          // and evaluates its last token again.
+          // and evaluates its last token again, as a decode row: the
+          // reference prefills the rest and decodes that token too. (Against
+          // a prefill row of the same token, this repetitive prompt's
+          // near-ties flip expert routing at some positions.)
           auto between = model->CreateSession(0, &error);
           const auto mid =
               std::span<const g4::TokenId>(long_prompt).first(head.size() + 12);
           auto reference = model->CreateSession(0, &error);
-          Require(between && reference && reference->Sync(mid, &error) &&
+          Require(between && reference &&
+                      reference->Sync(mid.first(mid.size() - 1), &error) &&
+                      reference->Evaluate(mid.back(), &error) &&
                       between->Sync(head, {}, {}, &error, tail, stops) &&
                       between->Sync(mid, &error) &&
                       between->Position() == mid.size() &&
@@ -565,6 +570,8 @@ int main() {
                   "sync between lookahead stops: " + error);
           const Stats kept = Compare(as_vector(reference->Logits()),
                                      as_vector(between->Logits()), vocab);
+          std::cout << "sync between lookahead stops: mean KL " << kept.mean_kl
+                    << ", top-1 " << kept.top1 << "/" << kept.rows << '\n';
           Require(kept.top1 == 1 && kept.mean_kl < limits.decode,
                   "sync between lookahead stops diverges");
         }
@@ -610,12 +617,58 @@ int main() {
                 << lp.top1 << "/" << lp.rows << '\n';
     }
 
+    // Prefill weight copies (--prefill-weights) over one 2048-row forward of
+    // the conversation, which every copy serves (binary16 from 512 rows):
+    // K-quant and Q4_0 copies reproduce the GGUF GEMMs bit for bit; a Q8_0
+    // copy replaces Flash-Next's GEMM, a different kernel, so it is held to
+    // the prefill envelope when it rounds differently.
+    model.reset();
+    {
+      std::vector<float> want;
+      for (const auto mode :
+           {g4::PrefillWeights::kOff, g4::PrefillWeights::kCompact,
+            g4::PrefillWeights::kDecoded}) {
+        g4::ModelOptions copy_options;
+        copy_options.max_context = options.max_context;
+        copy_options.prefill_weights = mode;
+        auto copied = g4::Model::Load(path, copy_options, &error);
+        Require(copied != nullptr, error);
+        const auto conversation = ConversationTokens(*copied);
+        const auto got = GpuLogits(*copied, conversation, conversation.size());
+        if (mode == g4::PrefillWeights::kOff) {
+          want = got;
+          continue;
+        }
+        const char* name =
+            mode == g4::PrefillWeights::kCompact ? "compact" : "decoded";
+        if (got == want) {
+          std::cout << "prefill weights " << name << ": bit-identical\n";
+          continue;
+        }
+        const Stats st = Compare(want, got, vocab);
+        std::cout << "prefill weights " << name << ": mean KL " << st.mean_kl
+                  << ", max " << st.max_kl << ", top-1 " << st.top1 << "/"
+                  << st.rows << '\n';
+        const auto bound = g4::ModelWeights::Bind(copied->reader(), &error);
+        Require(bound.has_value(), error);
+        bool q8 = false;
+        for (const auto& l : bound->layers) {
+          for (const auto* t : {&l.attn_q, &l.attn_k, &l.attn_v, &l.attn_output,
+                                &l.ffn_gate, &l.ffn_up, &l.ffn_down}) {
+            q8 = q8 || t->type == gufo::core::GgmlType::kQ8_0;
+          }
+        }
+        Require(q8 && st.mean_kl < limits.prefill,
+                std::string("prefill weights ") + name +
+                    " differ from the GGUF GEMMs");
+      }
+    }
+
     if (draft == nullptr || *draft == '\0') {
       std::cout
           << "note: GUFO_GEMMA4_MTP_MODEL not set; speculation unchecked\n";
       return;
     }
-    model.reset();
     options.mtp_model_path = draft;
     // The longest chain the engine allows: 16-row verification.
     options.draft_tokens = g4::rocm::kMaxDraftTokens;

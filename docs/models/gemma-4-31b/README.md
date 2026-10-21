@@ -76,8 +76,11 @@ copies stop at a stop token. Requests report proposed and accepted copies as
 `lookup_n` / `lookup_n_accepted`. `--sessions N` serves up to N concurrent requests; up to eight
 decode in one forward. The drafter attends to the target's own KV cache,
 so it adds no per-session cache.
-Greedy speculative output equals single-token decoding of the same
-configuration token for token; an AR-only server uses a faster one-row
+With a drafter loaded, the target's projection weights are reordered at
+load into 128-row groups that the verification kernel reads as one stream
+(same bytes and results; MTP tg128 +3.4% on the 31B quants, about 0.3 s
+more load time). Greedy speculative output equals single-token decoding of
+the same configuration token for token; an AR-only server uses a faster one-row
 projection kernel with a different FP32 summation order, so long greedy
 completions of the two configurations can differ. Sampled requests verify
 drafts by p/q rejection, so emitted tokens follow the target distribution.
@@ -99,6 +102,24 @@ to the 17.5 GiB of weights.
 Prompt snapshots feed the RAM and `--cache-disk` prompt caches; a trimmed or
 edited history re-prefills from the latest retained checkpoint before the
 change, so dropping the oldest messages costs a full prefill.
+
+`--prefill-weights` (serve, prompt and bench) trades memory for prefill speed
+by keeping a second copy of the dense projections next to the GGUF weights,
+which decoding keeps reading:
+
+| Mode | Copy | 31B UD-Q4_K_XL memory | pp2048 d0 |
+| --- | --- | ---: | ---: |
+| `off` (default) | none | 22.0 GiB | 581 tok/s |
+| `compact` | K-quant codes with binary16 scales in the GEMM's register order | +18.9 GiB | +3.3% |
+| `decoded` | binary16 weights for the 5376-wide inputs, `compact` elsewhere | +43.0 GiB | +6.5% |
+
+`decoded` also serves the QAT (Q4_0, +3.6%) and UD-Q8_K_XL (Q8_0, +3.8%)
+quants. Prefill logits are bit-identical to `off` in both modes on all three
+31B quants. Prompts under 512 tokens skip the binary16 copies. On the
+26B-A4B both modes copy only the K-quant expert [gate | up] weights, in the
+compact layout (UD-Q4_K_XL: +1.0% pp2048 for +9.0 GiB). Its dense projections
+are Q8_0 or 2816 wide, where binary16 copies measured 1-2% slower, and the QAT
+quant's Q4_0 experts get no copy.
 
 ## Tools and artifacts
 

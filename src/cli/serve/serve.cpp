@@ -593,6 +593,7 @@ void PrintServeHelp(std::string_view program_name,
     std::string draft_policy;
     std::string draft_calibration;
     std::string draft_trace_path;
+    std::string prefill_weights;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
@@ -629,6 +630,13 @@ void PrintServeHelp(std::string_view program_name,
                      "BF16 vision sidecar for Qwen3.8 or Gemma 4 "
                      "(auto-discovered beside model)",
                      "Model", &vision_model_path);
+    parser.AddOption(
+        "", "--prefill-weights", "MODE",
+        "Gemma 4 dense prefill weights, kept beside the GGUF ones for decode: "
+        "off, compact (K-quant codes with binary16 scales; about one more "
+        "copy of the weights) or decoded (binary16 where it pays; about 2.3 "
+        "copies) (default: off)",
+        "Model", &prefill_weights);
     parser.AddOption("", "--image-tokens", "N",
                      "Gemma 4 soft tokens per image: 70, 140, 280, 560 or "
                      "1120 (default: 280)",
@@ -1164,6 +1172,7 @@ int RunServe(std::span<const char* const> args) {
     std::string draft_policy;
     std::string draft_calibration;
     std::string draft_trace_path;
+    std::string prefill_weights;
     std::string dspark_model_path;
     std::string mtp_model_path;
     std::string vision_model_path;
@@ -1201,6 +1210,13 @@ int RunServe(std::span<const char* const> args) {
                          "BF16 vision sidecar for Qwen3.8 or Gemma 4 "
                          "(auto-discovered beside model)",
                          "Model", &vision_model_path);
+    llm_parser.AddOption(
+        "", "--prefill-weights", "MODE",
+        "Gemma 4 dense prefill weights, kept beside the GGUF ones for decode: "
+        "off, compact (K-quant codes with binary16 scales; about one more "
+        "copy of the weights) or decoded (binary16 where it pays; about 2.3 "
+        "copies) (default: off)",
+        "Model", &prefill_weights);
     llm_parser.AddOption("", "--image-tokens", "N",
                          "Gemma 4 soft tokens per image: 70, 140, 280, 560 or "
                          "1120 (default: 280)",
@@ -1488,6 +1504,7 @@ int RunServe(std::span<const char* const> args) {
     // Answer 503 `Loading model` on the port meanwhile, as llama-server does,
     // so supervisors see a loading server rather than a refused connection.
     server::LoadingResponder loading(host, port);
+    backend->set_gemma_prefill_weights(prefill_weights);
     const bool load_ok = backend->load(
         model, &err, max_context, session_count,
         server::TextPrefillPolicy{
@@ -1524,6 +1541,9 @@ int RunServe(std::span<const char* const> args) {
       return 1;
     }
     backend->set_model_id(served_model_name);
+    // As `gufo --version` prints it; CMake defines both for this target.
+    backend->set_served_artifact(model,
+                                 GUFO_RELEASE_VERSION " (" GUFO_REVISION ")");
     backend->set_sampling_defaults(
         max_tokens < 0 ? 0 : static_cast<std::size_t>(max_tokens),
         sampling_config, SamplingOptionsSupplied(llm_parser));

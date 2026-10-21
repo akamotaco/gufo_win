@@ -19,6 +19,7 @@
 #include "src/models/gemma4/cycle_trace.hpp"
 #include "src/models/gemma4/draft_policy.hpp"
 #include "src/models/gemma4/draft_vocab.hpp"
+#include "src/models/gemma4/prefill_weights.hpp"
 #include "src/models/gemma4/tokenizer.hpp"
 #include "src/models/qwen38_flash_next/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
@@ -64,6 +65,8 @@ struct ModelOptions {
   /// Appends one JSON line per verification cycle here (CycleRecord);
   /// empty writes none.
   std::string draft_trace_path;
+  /// Prefill copies of the dense projections (memory for prefill speed).
+  PrefillWeights prefill_weights = PrefillWeights::kOff;
 };
 
 class Session;
