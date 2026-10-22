@@ -347,7 +347,7 @@ struct LeaseState final : MutationGuard {
     CheckStop();
     if (spill && spill->reassignment_batch_size > 1) {
       PrepareBatchedReassignment();
-      borrowed_end.clear();
+      borrowed.clear();
       CheckStop();
       return;
     }

@@ -11,8 +11,15 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
-#include <iphlpapi.h>
+// gufo_win: no iphlpapi.h. Nothing here calls it, and with the POSIX compat
+// headers its windot11.h GUID declarations fail to compile.
 // clang-format on
+// Linux shutdown() names, which websocket.cpp uses.
+#ifndef SHUT_RD
+#define SHUT_RD SD_RECEIVE
+#define SHUT_WR SD_SEND
+#define SHUT_RDWR SD_BOTH
+#endif
 #else
 #include <arpa/inet.h>
 #include <fcntl.h>

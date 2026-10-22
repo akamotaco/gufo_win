@@ -89,11 +89,10 @@ WebSocket::WebSocket(int fd, std::string buffered)
   // Bound backpressure from a client that stops consuming audio. Read timeout
   // stays at the server's idle timeout.
   (void)net::SetSendTimeout(fd_, 5'000);
-  timeval idle{};
-  socklen_t idle_size = sizeof(idle);
-  if (::getsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &idle, &idle_size) == 0)
-    idle_ = std::chrono::seconds(idle.tv_sec) +
-            std::chrono::microseconds(idle.tv_usec);
+  // gufo_win: SO_RCVTIMEO is a DWORD of milliseconds on Winsock, not a
+  // timeval; the net leaf reads either form.
+  if (const auto idle_ms = net::SocketRecvTimeoutMs(fd_); idle_ms >= 0)
+    idle_ = std::chrono::milliseconds(idle_ms);
   last_send_ = std::chrono::steady_clock::now().time_since_epoch().count();
   reader_ = std::jthread([this] { ReadLoop(); });
 }
