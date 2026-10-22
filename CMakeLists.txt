@@ -172,6 +172,8 @@ if (ENGINE_ENABLE_HIP)
 endif()
 
 add_library(gufo_core STATIC
+  src/core/platform/net.cpp
+  src/core/platform/os_info.cpp
   src/core/image.cpp
   src/core/crypto/sha256.cpp
   src/core/gguf_reader.cpp
@@ -233,6 +235,7 @@ if (ENGINE_ENABLE_HIP)
     src/models/minimax_h3/sampling.hip
     src/models/minimax_h3/video_vae.hip
     src/models/minimax_h3/attention.hip
+    src/core/hip/snapshot_copy.hip
     src/core/hip/weight_upload.cpp
     src/core/speculative/speculative_verifier.cpp
   )
@@ -251,7 +254,7 @@ endif()
 add_library(gufo_llm_cli STATIC
   src/cli/bench/bench.cpp
   src/cli/prompt/prompt.cpp)
-target_link_libraries(gufo_llm_cli PUBLIC gufo_core)
+target_link_libraries(gufo_llm_cli PUBLIC gufo_core gufo_qwen38_flash_next)
 if(ENGINE_ENABLE_HIP)
   target_sources(gufo_llm_cli PRIVATE src/cli/prompt/gemma4_prompt.cpp)
   target_link_libraries(gufo_llm_cli PUBLIC gufo_deepseek_v4_flash

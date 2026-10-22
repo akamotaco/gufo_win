@@ -4,6 +4,7 @@ add_library(gufo_qwen38_flash_next STATIC
   config.cpp
   continuation_layout.cpp
   ngram.cpp
+  rope_scaling.cpp
   weights.cpp)
 
 target_include_directories(gufo_qwen38_flash_next PUBLIC ${PROJECT_SOURCE_DIR})
@@ -51,7 +52,6 @@ if (ENGINE_ENABLE_HIP)
   set(QFN_HIP_SOURCES
     continuation_adapter.cpp
     ${QFN_ROCM_DIR}/kernels.hip.cpp
-    ${QFN_ROCM_DIR}/snapshot_copy.hip
     ${QFN_ROCM_DIR}/w8a8_wave64.hip
     ${QFN_ROCM_DIR}/blaslt.cpp
     ${QFN_ROCM_DIR}/device_model.cpp
