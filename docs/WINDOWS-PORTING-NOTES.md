@@ -143,6 +143,20 @@ grep -rn 'syscall(SYS_\|/proc/\|/sys/\|io_uring' src                           #
   prefill은 짧을 때만 약 19% 낮고(3,781 대 3,064) 32K는 오히려 높아(2,310 대 2,602) 전력·클럭 차이일 수 있다.
   다음 단계: Gemma `Session` 디코드 한 스텝을 GPU 시간과 나머지로 나눠 재는 임시 계측
   (Flash-Next의 `GUFO_DECODE_TRACE`처럼). 기대 효과는 AR 약 10%, MTP도 비슷한 비율.
+  2026-10-23 후보 검토(차이는 AR 기준 토큰당 약 2.9 ms = 24.6 대 21.7 ms):
+  - 기각: HIP graph 디코드. 작은 의존 커널 800개 마이크로벤치에서 eager 1.19 µs/커널(CPU 제출 0.7~0.8 µs),
+    graph 1.14~1.24 µs/커널로 차이가 없다. Windows 실행 비용도 작아서 Linux에서 내린 기각
+    (`docs/models/gemma-4-31b/EXPERIMENTS.md`)이 Windows에도 그대로 맞는다.
+  - 기각: Windows 전원 모드. 26B MTP를 균형 조정 → 최고 성능 → 균형 조정 순으로 쟀다. 디코드는
+    59.8/60.5/60.8(짧은 문맥), 52.0/51.9/52.2(31K), 2K prefill은 3,029/3,064/3,033으로 오차 범위다.
+  - 일부만: 왕복 지연. 커널+`hipStreamSynchronize` 41.7 µs, +이벤트 동기화 40.4 µs, +고정 메모리
+    `hipMemcpyAsync`+동기화 56.4 µs, +일반 메모리 `hipMemcpy` D2H 64.2 µs. 토큰당 대여섯 번이면
+    0.3~0.6 ms라 2.9 ms를 다 설명하지 못한다.
+  - 남은 후보: 커널 자체 시간(Windows ROCm(TheRock) 빌드와 Linux ROCm·드라이버 차이). 레이어나 커널
+    단위 GPU 시간을 재서 Linux 수치와 비교해야 한다.
+  - 같은 날 확인: 병합된 Linux 전용 경로(io_uring 장기 고정, THP 해제, 2 MiB 정렬 매핑)는 Windows에서
+    꺼져 있지만 손해가 없다(`hipHostRegister`/`hipHostMalloc`이 직접 고정한다). Windows와 실제로 맞지
+    않은 것은 Gemma 캐시 128 MiB 세그먼트뿐이었고, 1 GiB로 유지했다(`1caf84f8`).
 
 ## 6. 업데이트 후 확인 순서
 
