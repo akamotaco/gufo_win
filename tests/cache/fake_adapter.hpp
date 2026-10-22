@@ -1,6 +1,7 @@
 #ifndef GUFO_CACHE_TESTING_FAKE_ADAPTER_HPP_
 #define GUFO_CACHE_TESTING_FAKE_ADAPTER_HPP_
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -107,6 +108,9 @@ public:
   // Window rows a continuation reads, from the ring; throws if any of them
   // were evicted or never loaded.
   [[nodiscard]] std::vector<Token> WindowTokens(const Slot&) const;
+  [[nodiscard]] std::size_t Invalidations() const noexcept {
+    return invalidations_.load(std::memory_order_relaxed);
+  }
 
 private:
   [[nodiscard]] Completion SubmitRead(const Slot&, Stream&,
@@ -118,6 +122,7 @@ private:
   bool in_place_{false};
   bool fail_allocation_{false};
   bool fail_transfer_{false};
+  std::atomic<std::size_t> invalidations_{};
   Rows prefill_pass_rows_{2048};
 };
 

@@ -426,3 +426,13 @@ siblings, verify 10 rows in 164.9 / 167.4 ms and emit two tokens, where the
 old prices verify 8 rows in 152.1 / 152.3 ms and emit one. Every other
 essay cycle stays at or below ~152.7 ms. The larger maximum gap is one
 cycle delivering an extra token earlier, not a longer pause per token.
+
+The October 20 paired-head wave64 experiment did not establish an end-to-end
+gain. Its selected global-verification shapes improve in isolation, while
+other widths regress; the narrow HTTP dispatch has only inconclusive
+−0.7 to +0.3% per-request decode-rate changes across 31B and 26B. The
+production tables above remain unchanged. See the
+[experiment evidence](artifacts/wave64-global-verification-2026-10-20.json).
+The standard C1 MTP control at d16384 (one repetition per arm) reports
+pp2048 473.13 → 454.43 tok/s and tg128 98.84 → 98.66 tok/s. This single pair
+is inconclusive and does not replace the qualified benchmark tables.

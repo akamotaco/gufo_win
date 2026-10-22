@@ -492,6 +492,19 @@ std::optional<ExpertFormat> DenseHalfFormat(core::GgmlType type) {
   }
 }
 
+/// Whether a prefill of `rows` reads w's prefill copy: binary16 weights
+/// only pay from 512 rows, where the weight reads stop dominating.
+bool PackedPrefill(const DeviceTensor& w, std::uint32_t rows) {
+  switch (w.prefill_layout) {
+    case PrefillLayout::kCompact:
+      return true;
+    case PrefillLayout::kDecoded:
+      return rows >= 512;
+    default:
+      return false;
+  }
+}
+
 /// Decode and verification projections on the routed GEMV's dense mode
 /// (LaunchDenseGemv): Q5_0, which no other GEMV decodes, and Q4_0 rows the
 /// Gemma GEMVs cannot split into 256-value groups (the 26B-A4B's 2112-wide
@@ -528,6 +541,12 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
   }
   if (rows > kSplitRows) {
     if (half_prefill_) {
+      if (PackedPrefill(w, rows) &&
+          LaunchPackedPrefillGemm(w.prefill_format, w.prefill_layout, w.prefill,
+                                  xq, y, nullptr, rows, w.rows, w.cols,
+                                  stream_)) {
+        return;
+      }
       // Binary16 activations: Q8_0, Q4_0 and K-quant weights decode to
       // binary16 in the WMMA GEMMs; other formats keep the W8A8 route on their
       // own Q8_1 rows.
@@ -538,12 +557,17 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
         return;
       }
       if (const auto format = DenseHalfFormat(w.type);
-          format && LaunchDenseHalfGemm(*format, w.data, xq, y, nullptr, rows,
-                                        w.rows, w.cols, stream_)) {
+          format &&
+          LaunchDenseHalfGemm(*format, w.data, xq, y, nullptr, rows, w.rows,
+                              w.cols, stream_, false, w.grouped)) {
         return;
       }
       hip::LaunchQuantizeActivationQ8_1FromFp32(x, q8_, rows, w.cols, stream_);
       xq = q8_;
+    }
+    if (w.grouped) {
+      throw std::runtime_error(
+          "gemma4 grouped weights reached a row-order GEMM");
     }
     hip::LaunchBatchedQuantGEMMPreQuantized(w.type, w.data, xq, y, rows, w.rows,
                                             w.cols, stream_);
@@ -561,8 +585,12 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
   // autoregressive rows from six on, where it is faster.
   if (WmmaProjection(w, rows) &&
       LaunchWmmaGemv(w.type, w.data, x, y, rows, w.rows, w.cols, wmma_, stream_,
-                     packed)) {
+                     packed, w.grouped)) {
     return;
+  }
+  // DeviceModel::Upload groups only weights the WMMA projections take.
+  if (w.grouped) {
+    throw std::runtime_error("gemma4 grouped weights reached a row-order GEMV");
   }
   if (rows > 1) {
     // Gemma's K-quant shapes lie outside the Qwen-tuned dispatch; the
@@ -824,7 +852,9 @@ void Executor::Forward(std::span<const Segment> segments,
     // A fused projection leaves [q | k | v] or [q | k] rows in k_; QkvPost
     // reads them strided and writes packed queries to q_. At WMMA decode
     // widths [q | k] stays split (64 and 32 blocks fit one wave of blocks
-    // each; 96 spills into a second).
+    // each; 96 spills into a second), and the split pair measures faster: a
+    // fused 12288-row launch of 96 eight-wave blocks walks at 180 GB/s against
+    // 190 GB/s for the pair, MTP tg128 d0 31.41 -> 31.21 tok/s.
     const bool wmma_qkv =
         n <= kSplitRows && (model_.has_draft() || n >= 6) &&
         WmmaGemvSupports(L.attn_qkv.type, L.attn_qkv.rows, L.attn_qkv.cols);
@@ -967,11 +997,18 @@ void Executor::Forward(std::span<const Segment> segments,
     const float* down_in = gate_;
     WmmaPackOut down_pack{};
     const auto gate_up_half = DenseHalfFormat(L.ffn_gate_up.type);
-    if (!L.ffn_gate_up.empty() && half && gate_up_half &&
+    const bool gate_up_packed = PackedPrefill(L.ffn_gate_up, n);
+    if (!L.ffn_gate_up.empty() && half && (gate_up_half || gate_up_packed) &&
         half_only({&L.ffn_down}) &&
-        LaunchDenseHalfGemm(*gate_up_half, L.ffn_gate_up.data, fq, nullptr,
-                            gate_, n, L.ffn_gate_up.rows, L.ffn_gate_up.cols,
-                            stream_, true)) {
+        ((gate_up_packed &&
+          LaunchPackedPrefillGemm(
+              L.ffn_gate_up.prefill_format, L.ffn_gate_up.prefill_layout,
+              L.ffn_gate_up.prefill, fq, nullptr, gate_, n, L.ffn_gate_up.rows,
+              L.ffn_gate_up.cols, stream_, true)) ||
+         (gate_up_half &&
+          LaunchDenseHalfGemm(*gate_up_half, L.ffn_gate_up.data, fq, nullptr,
+                              gate_, n, L.ffn_gate_up.rows, L.ffn_gate_up.cols,
+                              stream_, true, L.ffn_gate_up.grouped)))) {
       // The GEMM writes GeGLU of each binary16 [gate | up] pair into the
       // (free) gate rows as the down projection's binary16 input.
       gq = gate_;
@@ -1272,10 +1309,13 @@ bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n,
   // The Gemma routed GEMM applies GeGLU in its epilogue; Flash-Next's writes
   // [gate | up] for the separate pass.
   if (own_gate_up) {
-    if (!LaunchRoutedHalfGemm(*own_format, l.gate_up_exps.data, x_half,
-                              moe_tiles_, tiles, gate_up_rows, moe_bounds_,
-                              moe_rows_token_, moe_rows_slot_, nullptr, act,
-                              2 * width, d, stream, true)) {
+    const bool compact =
+        l.gate_up_exps.prefill_layout == PrefillLayout::kCompact;
+    if (!LaunchRoutedHalfGemm(
+            *own_format, compact ? l.gate_up_exps.prefill : l.gate_up_exps.data,
+            x_half, moe_tiles_, tiles, gate_up_rows, moe_bounds_,
+            moe_rows_token_, moe_rows_slot_, nullptr, act, 2 * width, d, stream,
+            true, l.gate_up_exps.prefill_layout)) {
       return false;
     }
   } else {

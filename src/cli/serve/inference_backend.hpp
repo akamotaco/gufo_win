@@ -89,6 +89,11 @@ public:
   InferenceBackend(InferenceBackend&&) = delete;
   InferenceBackend& operator=(InferenceBackend&&) = delete;
 
+  /// Gemma 4 --prefill-weights mode for the next load (empty is off).
+  void set_gemma_prefill_weights(std::string mode) {
+    gemma_prefill_weights_ = std::move(mode);
+  }
+
   /// Loads weights from a GGUF file. Returns false and sets *error on failure.
   bool load(const std::string& model_path, std::string* error,
             std::uint32_t max_context = 0, std::size_t session_count = 1,
@@ -213,6 +218,7 @@ public:
 private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
+  std::string gemma_prefill_weights_;
 };
 
 }  // namespace gufo::server

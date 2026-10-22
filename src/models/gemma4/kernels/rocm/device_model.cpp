@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <initializer_list>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -18,6 +19,53 @@
 
 namespace gufo::models::gemma4::rocm {
 namespace {
+
+std::optional<ExpertFormat> PrefillFormat(core::GgmlType type) {
+  switch (type) {
+    case core::GgmlType::kQ4_K:
+      return ExpertFormat::kQ4_K;
+    case core::GgmlType::kQ5_K:
+      return ExpertFormat::kQ5_K;
+    case core::GgmlType::kQ6_K:
+      return ExpertFormat::kQ6_K;
+    case core::GgmlType::kQ4_0:
+      return ExpertFormat::kQ4_0;
+    case core::GgmlType::kQ5_0:
+      return ExpertFormat::kQ5_0;
+    case core::GgmlType::kQ8_0:
+      return ExpertFormat::kQ8_0;
+    default:
+      return std::nullopt;
+  }
+}
+
+/// Bytes of a grouped-layout format's matrix (256-value super-blocks).
+std::size_t GroupedBytes(const DeviceTensor& t) {
+  const std::size_t super = t.type == core::GgmlType::kQ5_K   ? 176
+                            : t.type == core::GgmlType::kQ6_K ? 210
+                                                              : 144;
+  return std::size_t{t.rows} * (t.cols / 256) * super;
+}
+
+/// The prefill copy of a dense projection with k inputs under `mode`.
+PrefillLayout ChoosePrefillLayout(PrefillWeights mode, ExpertFormat format,
+                                  std::uint32_t k) {
+  // Binary16 copies pay only on the 31B's 5376-wide inputs (pp2048,
+  // 2026-10-21). From 8192 the blocks sharing a weight tile drift apart along
+  // k and each reads it from DRAM (down, o: -29 to -62%); at the 26B-A4B's
+  // 2816 they lose 1-2% (Flash-Next's tuned Q8_0 GEMM, Q4_0).
+  const bool decoded =
+      PrefillLayoutSupports(format, PrefillLayout::kDecoded, k) && k > 4096 &&
+      k < 8192;
+  if (mode == PrefillWeights::kDecoded && decoded) {
+    return PrefillLayout::kDecoded;
+  }
+  if (mode != PrefillWeights::kOff &&
+      PrefillLayoutSupports(format, PrefillLayout::kCompact, k)) {
+    return PrefillLayout::kCompact;
+  }
+  return PrefillLayout::kNone;
+}
 
 /// Quantized GEMM kernels read whole 256-element k-iterations and may
 /// over-read the last row; every upload carries a zeroed tail so those reads
@@ -241,7 +289,8 @@ DeviceModel::~DeviceModel() {
 std::unique_ptr<DeviceModel> DeviceModel::Upload(
     const ModelWeights& weights, const core::GgufReader& reader,
     const DraftWeights* draft, const core::GgufReader* draft_reader,
-    std::span<const std::int32_t> draft_order, std::string* error_msg) {
+    std::span<const std::int32_t> draft_order, PrefillWeights prefill_weights,
+    std::string* error_msg) {
   std::unique_ptr<DeviceModel> m(new DeviceModel());
   m->config_ = weights.config;
   m->vocab_ = weights.vocab_size;
@@ -336,6 +385,148 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     if (all) {
       m->max_half_cols_ = std::max(m->max_half_cols_, widest);
     }
+  }
+  if (m->half_prefill_ && prefill_weights != PrefillWeights::kOff) {
+    const auto pack = [&](DeviceTensor& t) {
+      const auto format = PrefillFormat(t.type);
+      if (t.empty() || !format || !up.ok) {
+        return;
+      }
+      const PrefillLayout layout =
+          ChoosePrefillLayout(prefill_weights, *format, t.cols);
+      if (layout == PrefillLayout::kNone) {
+        return;
+      }
+      t.prefill =
+          up.Allocate(PrefillWeightBytes(*format, layout, t.rows, t.cols),
+                      "prefill weights");
+      if (t.prefill != nullptr) {
+        t.prefill_layout = layout;
+        t.prefill_format = *format;
+        up.ok = PackPrefillWeights(*format, layout, t.data, t.prefill, t.rows,
+                                   t.cols, nullptr);
+      }
+    };
+    // The tensors prefill projects: fused ones, not their views.
+    for (DeviceLayer& l : m->layers_) {
+      if (!l.attn_qkv.empty()) {
+        pack(l.attn_qkv);
+        if (l.attn_qkv.rows == l.attn_q.rows + l.attn_k.rows) {
+          pack(l.attn_v);
+        }
+      } else {
+        pack(l.attn_q);
+        pack(l.attn_k);
+        pack(l.attn_v);
+      }
+      pack(l.attn_output);
+      if (!l.ffn_gate_up.empty()) {
+        pack(l.ffn_gate_up);
+      } else {
+        pack(l.ffn_gate);
+        pack(l.ffn_up);
+      }
+      pack(l.ffn_down);
+      // Expert [gate | up] rows stack per expert: one compact matrix, whole
+      // 16-row groups per expert.
+      DeviceTensor& e = l.gate_up_exps;
+      const auto format = PrefillFormat(e.type);
+      if (!e.empty() && format && up.ok && e.rows % 16 == 0 &&
+          PrefillLayoutSupports(*format, PrefillLayout::kCompact, e.cols)) {
+        const std::uint32_t rows = e.rows * e.experts;
+        e.prefill = up.Allocate(
+            PrefillWeightBytes(*format, PrefillLayout::kCompact, rows, e.cols),
+            "expert prefill weights");
+        if (e.prefill != nullptr) {
+          e.prefill_layout = PrefillLayout::kCompact;
+          e.prefill_format = *format;
+          up.ok = PackPrefillWeights(*format, PrefillLayout::kCompact, e.data,
+                                     e.prefill, rows, e.cols, nullptr);
+        }
+      }
+    }
+    if (!up.ok || hipDeviceSynchronize() != hipSuccess) {
+      up.Fail("prefill weight packing failed");
+      return nullptr;
+    }
+  }
+  // With a drafter every decode width runs the WMMA projections, which read
+  // the grouped layout 2-10% faster; prefill's GEMMs (and the copies above,
+  // packed from GGUF rows) read it too. Only projections WmmaProjection
+  // takes at every width are reordered, and a fused tensor only when each
+  // view starts a 128-row group, so the views stay grouped matrices.
+  if (draft != nullptr && m->half_prefill_) {
+    const auto eligible = [](const DeviceTensor& t) {
+      return !t.empty() && t.experts == 1 && t.cols >= 2048 &&
+             GroupedLayoutSupports(t.type, t.rows, t.cols);
+    };
+    std::size_t widest = 0;
+    for (const DeviceLayer& l : m->layers_) {
+      for (const DeviceTensor* t :
+           {&l.attn_qkv, &l.attn_q, &l.attn_k, &l.attn_v, &l.attn_output,
+            &l.ffn_gate_up, &l.ffn_gate, &l.ffn_up, &l.ffn_down}) {
+        if (eligible(*t)) {
+          widest = std::max(widest, GroupedBytes(*t));
+        }
+      }
+    }
+    void* scratch = nullptr;
+    if (widest != 0 && hipMalloc(&scratch, widest) != hipSuccess) {
+      up.Fail("grouped weight scratch allocation failed");
+      return nullptr;
+    }
+    const auto group = [&](DeviceTensor& t,
+                           std::initializer_list<DeviceTensor*> views) {
+      if (!eligible(t)) {
+        return;
+      }
+      for (const DeviceTensor* v : views) {
+        if (!v->empty() && v->rows % 128 != 0) {
+          return;
+        }
+      }
+      const std::size_t bytes = GroupedBytes(t);
+      if (!GroupWeights(t.type, t.data, scratch, t.rows, t.cols, nullptr) ||
+          hipMemcpyAsync(t.data, scratch, bytes, hipMemcpyDeviceToDevice,
+                         nullptr) != hipSuccess) {
+        up.ok = false;
+        return;
+      }
+      t.grouped = true;
+      for (DeviceTensor* v : views) {
+        v->grouped = !v->empty();
+      }
+    };
+    for (DeviceLayer& l : m->layers_) {
+      if (!l.attn_qkv.empty()) {
+        const bool separate_v =
+            l.attn_qkv.rows == l.attn_q.rows + l.attn_k.rows;
+        if (separate_v) {
+          group(l.attn_qkv, {&l.attn_q, &l.attn_k});
+          group(l.attn_v, {});
+        } else {
+          group(l.attn_qkv, {&l.attn_q, &l.attn_k, &l.attn_v});
+        }
+      } else {
+        group(l.attn_q, {});
+        group(l.attn_k, {});
+        group(l.attn_v, {});
+      }
+      group(l.attn_output, {});
+      if (!l.ffn_gate_up.empty()) {
+        group(l.ffn_gate_up, {&l.ffn_gate, &l.ffn_up});
+      } else {
+        group(l.ffn_gate, {});
+        group(l.ffn_up, {});
+      }
+      group(l.ffn_down, {});
+    }
+    if (hipDeviceSynchronize() != hipSuccess || !up.ok) {
+      (void)hipFree(scratch);
+      up.Fail("grouping weights failed");
+      return nullptr;
+    }
+    (void)hipFree(scratch);
   }
   if (!up.halves.empty()) {
     // Every BF16 weight from 2^-17 to 65504 in magnitude is a binary16 value;

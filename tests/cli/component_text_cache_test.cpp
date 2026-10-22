@@ -313,6 +313,39 @@ void InPassCapturePreservesBoundaryAndLiveTail() {
     independent.Invalidate();
   }
 }
+void ColdAcquireResetsOnce() {
+  auto runner = std::make_shared<Runner>();
+  ComponentTextCache cache(runner, 1, 1 << 22, {});
+  const std::vector<TextRunnerToken> prompt{1, 2, 3};
+  auto first = cache.Acquire(prompt, {}, {}, true, 0, true);
+  assert(runner->adapter->Invalidations() == 1);
+  auto& state = dynamic_cast<State&>(first->state());
+  runner->adapter->Append(state.slot, prompt, prompt);
+  (void)first->Commit(prompt, {}, prompt);
+  auto second = cache.Acquire(prompt, {}, {}, false, 0, true);
+  assert(!second->cache_hit());
+  assert(runner->adapter->Invalidations() == 2);
+}
+void FailedRestoreResetsOnce() {
+  auto runner = std::make_shared<Runner>();
+  ComponentTextCache cache(runner, 2, 1 << 22, {});
+  const std::vector<TextRunnerToken> prompt{1, 2, 3};
+  auto source = cache.Acquire(prompt, {}, {}, true, 0, true);
+  auto& state = dynamic_cast<State&>(source->state());
+  runner->adapter->Append(state.slot, prompt, prompt);
+  assert(source->TryReserveSnapshot(source->CaptureBytes(), prompt.size(),
+                                    false, SnapshotPurpose::kContinuation, {}));
+  assert(source->PublishSnapshot(prompt, source->Capture(), false));
+  const auto before = runner->adapter->Invalidations();
+  runner->adapter->FailNextTransfer();
+  auto failed = cache.Acquire(prompt, {}, {}, true, 0, true);
+  assert(!failed->cache_hit());
+  assert(runner->adapter->Invalidations() == before + 2);
+  auto& cold = dynamic_cast<State&>(failed->state());
+  runner->adapter->Append(cold.slot, prompt, prompt);
+  assert(runner->adapter->RecurrentHash(cold.slot) ==
+         runner->adapter->RecurrentHash(state.slot));
+}
 void RestoreFromBusyBorrowedSource() {
   auto runner = std::make_shared<Runner>();
   ComponentTextCache cache(runner, 2, 1 << 22, {});
@@ -467,6 +500,47 @@ void CancelledPrefillKeepsCompletedSteps() {
     auto resend = pool.Acquire(prompt, {}, {}, {}, true, 0);
     assert(resend.cached_prompt_tokens() == (partial ? 16 : 0));
     resend.Invalidate();
+  }
+}
+void PrefillLookaheadReachesTheNextFrontier() {
+  class LookaheadRunner final : public Runner {
+  public:
+    struct Step {
+      std::size_t frontier, end;
+    };
+    mutable std::vector<Step> steps;
+    mutable const TextRunnerState* state{};
+    TextPrefillStep Prefill(TextRunnerState& state,
+                            std::span<const TextRunnerToken> prompt,
+                            std::size_t offset,
+                            std::size_t budget) const override {
+      const auto ahead = state.prefill_lookahead();
+      assert(ahead.empty() || ahead.data() == prompt.data() + prompt.size());
+      steps.push_back({prompt.size(), prompt.size() + ahead.size()});
+      this->state = &state;
+      return Runner::Prefill(state, prompt, offset, budget);
+    }
+  };
+  auto runner = std::make_shared<LookaheadRunner>();
+  TextRunnerPool pool(runner, 1);
+  std::vector<TextRunnerToken> prompt(4000);
+  std::iota(prompt.begin(), prompt.end(), 10);
+  auto request = pool.Acquire(prompt);
+  while (!request.Prefill(1024).decode_ready) {
+  }
+  assert(runner->state && runner->state->prefill_lookahead().empty());
+  // A grid checkpoint splits the prompt; every step looks ahead exactly to
+  // the frontier after its own.
+  assert(runner->steps.front().frontier < prompt.size());
+  for (std::size_t i = 0; i < runner->steps.size(); ++i) {
+    const auto [frontier, end] = runner->steps[i];
+    auto next = prompt.size();
+    for (std::size_t j = i + 1; j < runner->steps.size(); ++j)
+      if (runner->steps[j].frontier > frontier) {
+        next = runner->steps[j].frontier;
+        break;
+      }
+    assert(end == (frontier == prompt.size() ? frontier : next));
   }
 }
 void BackingPreparationFollowsCaptures() {
@@ -1622,6 +1696,33 @@ void SwipeRestoresInPlace() {
     cold.Invalidate();
   }
 }
+// Cancellation between selection and restore still resets a retained slot
+// before exposing a cold lease. Otherwise its old rows survive at position 0.
+void CancelledInPlaceRestoreResetsRetainedRows() {
+  auto runner = std::make_shared<Runner>();
+  runner->in_place = true;
+  ComponentTextCache cache(runner, 1, 1 << 22, {});
+  const std::vector<TextRunnerToken> prompt{1, 2, 3};
+  auto first = cache.Acquire(prompt, {}, {}, true, 0, true);
+  auto& state = dynamic_cast<State&>(first->state());
+  runner->adapter->Append(state.slot, prompt, prompt);
+  assert(first->TryReserveSnapshot(first->CaptureBytes(), prompt.size(), false,
+                                   SnapshotPurpose::kContinuation, {}));
+  assert(first->PublishSnapshot(prompt, first->Capture(), false));
+  auto history = prompt;
+  history.push_back(4);
+  runner->adapter->Append(state.slot, std::span(history).last(1),
+                          std::span(history).last(1));
+  (void)first->Commit(prompt, {}, history);
+  const auto before = runner->adapter->Invalidations();
+  int checks = 0;
+  auto cancelled =
+      cache.Acquire(prompt, [&] { return ++checks > 1; }, {}, true, 0, true);
+  assert(cancelled && !cancelled->cache_hit());
+  assert(runner->adapter->Invalidations() == before + 1);
+  auto& cold = dynamic_cast<State&>(cancelled->state());
+  assert(runner->adapter->Positions(cold.slot).front().valid_rows == 0);
+}
 // A live slot whose tokens and inputs extend a checkpoint another slot
 // captured computed those rows itself: they need not equal the checkpoint's,
 // and its history does not hold them. Restoring that checkpoint into it loads
@@ -1684,9 +1785,12 @@ int main() {
   PublishedResidentCheckpointKeepsDiskStep();
   CancelledPrefillKeepsCompletedSteps();
   BackingPreparationFollowsCaptures();
+  PrefillLookaheadReachesTheNextFrontier();
   CompletedCancelledPromptGetsARetrySnapshot();
   BudgetUsesAllocatedSlotsInsteadOfLazyStateClaim();
   InPassCapturePreservesBoundaryAndLiveTail();
+  ColdAcquireResetsOnce();
+  FailedRestoreResetsOnce();
   RestoreFromBusyBorrowedSource();
   ImageAfterCachedTextPrefixCaptures();
   ColdAssignmentPrefersPreservedSlot();
@@ -1713,6 +1817,7 @@ int main() {
   WindowRowsReuseAndBranches();
   WindowedDeepRowsSurviveDiskRestart();
   SwipeRestoresInPlace();
+  CancelledInPlaceRestoreResetsRetainedRows();
   SharedPrefixRestoresRows(true);
   SharedPrefixRestoresRows(false);
 }

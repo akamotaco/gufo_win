@@ -2935,14 +2935,17 @@ public:
     const std::size_t next_position = offset + consumed;
     const auto prefix = QwenFlashNextEngineTokens(prompt.first(next_position));
     // The next step most likely takes the same budget; its n-gram rows are
-    // read during this one and used only if it does.
-    const std::size_t after = prompt.size() - next_position;
-    const auto next = QwenFlashNextEngineTokens(prompt.subspan(
-        next_position,
-        std::min<std::size_t>({max_input_tokens, after,
-                               after <= model_->PrefillThroughCapacity()
-                                   ? model_->PrefillThroughCapacity()
-                                   : model_->PrefillCapacity()})));
+    // read during this one and used for the tokens it shares. A step ending
+    // at a cache frontier continues into the pool's lookahead.
+    const auto rest = next_position == prompt.size()
+                          ? state.prefill_lookahead()
+                          : prompt.subspan(next_position);
+    const std::size_t after = rest.size();
+    const auto next = QwenFlashNextEngineTokens(rest.subspan(
+        0, std::min<std::size_t>({max_input_tokens, after,
+                                  after <= model_->PrefillThroughCapacity()
+                                      ? model_->PrefillThroughCapacity()
+                                      : model_->PrefillCapacity()})));
     std::string error;
     // A HIP error pending here was returned to earlier work, which handled
     // it, and was left as the thread's last error; the quantize kernel's
@@ -3213,6 +3216,14 @@ public:
   [[nodiscard]] std::size_t CheckpointPosition(
       const TextRunnerState& state) const override {
     return RequireQwenFlashNextState(state).position();
+  }
+
+  [[nodiscard]] TextRunnerNgramRows NgramRows(
+      const TextRunnerState& state) const override {
+    const auto totals =
+        RequireQwenFlashNextState(state).session().NgramRowTotals();
+    return {totals.rows, totals.dedup_rows, totals.cache_hits,
+            totals.disk_reads};
   }
 
 private:
@@ -4296,6 +4307,8 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       gemma_options.draft_calibration =
           models::gemma4::ParseDraftCalibrationScope(
               speculative_config.mtp_draft_calibration);
+      gemma_options.prefill_weights =
+          models::gemma4::ParsePrefillWeightsOption(gemma_prefill_weights_);
     } catch (const std::invalid_argument& e) {
       SetError(error, e.what());
       return false;

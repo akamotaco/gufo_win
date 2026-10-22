@@ -49,14 +49,31 @@ struct WmmaPackOut {
 /// reductions up to `max_k`.
 [[nodiscard]] std::size_t WmmaGemvScratchBytes(std::uint32_t max_k) noexcept;
 
+/// Grouped weight layout: the same 256-value super-blocks as GGUF (Q4_0:
+/// eight blocks), reordered so a 128-row group stores super-block s of all
+/// its rows back to back, then s + 1; group g starts at row 128 g's GGUF
+/// offset, and the last group is as tall as its rows. The verification walk
+/// (eight waves of 16 rows in lockstep over the super-blocks) then reads
+/// one contiguous stream per block instead of one per row: 210 -> 220-230
+/// GB/s, while the prefill GEMMs read it as before. Same bytes, same
+/// results.
+[[nodiscard]] bool GroupedLayoutSupports(core::GgmlType type, std::uint32_t m,
+                                         std::uint32_t k) noexcept;
+/// Reorders GGUF rows `src` [m][k] into the grouped layout at `dst` (another
+/// allocation of the same size).
+[[nodiscard]] bool GroupWeights(core::GgmlType type, const void* src, void* dst,
+                                std::uint32_t m, std::uint32_t k,
+                                hipStream_t stream);
+
 /// Y [rows][m] = W X^T for X [rows][k] (1 <= rows <= kWmmaGemvRows). `scratch`
 /// holds WmmaGemvScratchBytes. Returns false without launching for
-/// unsupported types, shapes or widths.
+/// unsupported types, shapes or widths. `grouped`: W is in the grouped
+/// layout (same results).
 [[nodiscard]] bool LaunchWmmaGemv(core::GgmlType type, const void* w,
                                   const float* x, float* y, std::uint32_t rows,
                                   std::uint32_t m, std::uint32_t k,
                                   void* scratch, hipStream_t stream,
-                                  bool packed = false);
+                                  bool packed = false, bool grouped = false);
 
 }  // namespace gufo::models::gemma4::rocm
 

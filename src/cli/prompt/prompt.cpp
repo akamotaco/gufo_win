@@ -97,6 +97,13 @@ static void RegisterTextOptions(ArgParser& parser, PromptOptions& opt,
   // Model
   parser.AddOption("-m", "--model", "PATH", "Path to GGUF model file", "Model",
                    &opt.model_path);
+  parser.AddOption(
+      "", "--prefill-weights", "MODE",
+      "Gemma 4 dense prefill weights, kept beside the GGUF ones for decode: "
+      "off, compact (K-quant codes with binary16 scales; about one more "
+      "copy of the weights) or decoded (binary16 where it pays; about 2.3 "
+      "copies) (default: off)",
+      "Model", &opt.prefill_weights);
   RegisterImageOptions(parser, opt);
 
   // Prompt & Formatting

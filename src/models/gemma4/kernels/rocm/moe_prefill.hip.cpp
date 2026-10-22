@@ -185,12 +185,15 @@ __device__ __forceinline__ __half SaturatedHalf(float v) {
   return __float2half(fminf(fmaxf(v, -65504.0F), 65504.0F));
 }
 
+/// kPacked (PackPrefillWeights): 1 reads W as kCompact records straight into
+/// registers, without the LDS staging (dense or routed); 2 reads it as
+/// kDecoded binary16 fragments in place of the decode (dense).
 /// kGeGlu: W holds fused [gate | up] rows; a block's first four waves take
 /// 64 gate rows and the last four the matching up rows (m / 2 further), and
 /// the block writes GeGLU of the binary16-rounded pair, as the separate
 /// GeGluPackedHalf pass would, into `out_half` rows of width m / 2.
 template<ExpertFormat F, int kTileTokens, bool kGeGlu = false,
-         bool kDense = false>
+         bool kDense = false, int kPacked = 0, bool kGrouped = false>
 __global__ void __launch_bounds__(kThreads)
     RoutedHalfKQuantKernel(const std::uint8_t* __restrict__ w,
                            const __half* __restrict__ x,
@@ -277,10 +280,21 @@ __global__ void __launch_bounds__(kThreads)
       kGeGlu ? row_block * (kRowsPerBlock / 2) + f_row % (kRowsPerBlock / 2) <
                    half_m
              : f_global < m;
+  // kGrouped (dense): the grouped layout (wmma_gemv.hpp), a super-block's
+  // rows of a 128-row group back to back; f_step is the bytes from one
+  // super-block of the row to the next.
+  const std::uint32_t f_mrow = f_live ? f_global : m - 1;
+  const std::uint32_t f_group_rows = min(128U, m - f_mrow / 128 * 128);
   const std::uint8_t* f_ptr =
-      w + (std::size_t{static_cast<std::uint32_t>(expert)} * m +
-           (f_live ? f_global : m - 1)) *
-              row_bytes;
+      kGrouped
+          ? w + (std::size_t{f_mrow / 128} * 128 * (k / 256) + f_mrow % 128) *
+                    kBlockBytes<F>
+          : w + (std::size_t{static_cast<std::uint32_t>(expert)} * m + f_mrow) *
+                    row_bytes;
+  const std::size_t f_step =
+      kGrouped ? std::size_t{f_group_rows} * kBlockBytes<F> : kBlockBytes<F>;
+  // kPacked 1: the stage's StageRecord, loaded straight from global memory.
+  uint4 f_packed[kPacked == 1 ? kStride / 16 : 1];
   uint4 f_code0;
   uint4 f_code1;
   uint4 f_code2;
@@ -289,7 +303,23 @@ __global__ void __launch_bounds__(kThreads)
   float f_d = 0.0F;
   int f_half = 0;
   const auto fetch_weights = [&](int stage) {
-    const std::uint8_t* block = f_ptr + (stage / 2) * kBlockBytes<F>;
+    if constexpr (kPacked == 2) {
+      return;
+    }
+    if constexpr (kPacked == 1) {
+      // Experts stack whole 16-row groups (m % 16 == 0).
+      const std::size_t r =
+          std::size_t{static_cast<std::uint32_t>(expert)} * m +
+          min(matrix_row(wave * 16 + sub), m - 1);
+      const auto* src = reinterpret_cast<const uint4*>(
+          w + ((r / 16 * (k / kStageK) + stage) * 16 + r % 16) * kStride);
+#pragma unroll
+      for (int i = 0; i < kStride / 16; ++i) {
+        f_packed[i] = src[i];
+      }
+      return;
+    }
+    const std::uint8_t* block = f_ptr + (stage / 2) * f_step;
     const int n = stage % 2;
     f_half = n;
     if constexpr (kQ6) {
@@ -427,18 +457,35 @@ __global__ void __launch_bounds__(kThreads)
   fetch_weights(0);
   fetch_act(0);
   for (int stage = 0; stage < stages; ++stage) {
-    commit_weights();
-    __builtin_amdgcn_s_waitcnt(0x007f);
-    const auto* row =
-        reinterpret_cast<const uint4*>(s_rows + (wave * 16 + sub) * kStride);
-    const uint4 q[4] = {row[0], row[1], row[2], row[3]};
+    uint4 q[4];
     uint4 qh[2] = {};
-    if constexpr (!kQ4) {
-      qh[0] = row[4];
-      qh[1] = row[5];
+    uint4 sc4;
+    if constexpr (kPacked == 1) {
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        q[i] = f_packed[i];
+      }
+      if constexpr (!kQ4) {
+        qh[0] = f_packed[4];
+        qh[1] = f_packed[5];
+      }
+      sc4 = f_packed[kScaleChunk];
+    } else if constexpr (kPacked == 0) {
+      commit_weights();
+      __builtin_amdgcn_s_waitcnt(0x007f);
+      const auto* row =
+          reinterpret_cast<const uint4*>(s_rows + (wave * 16 + sub) * kStride);
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        q[i] = row[i];
+      }
+      if constexpr (!kQ4) {
+        qh[0] = row[4];
+        qh[1] = row[5];
+      }
+      sc4 = row[kScaleChunk];
+      __syncthreads();
     }
-    const uint4 sc4 = row[kScaleChunk];
-    __syncthreads();
     commit_act();
     __syncthreads();
     if (stage + 1 < stages) {
@@ -453,7 +500,15 @@ __global__ void __launch_bounds__(kThreads)
     for (int s = 0; s < 4; ++s) {
       v16h a_lo;
       v16h a_hi;
-      if constexpr (kQ6) {
+      if constexpr (kPacked == 2) {
+        const unsigned r = min(matrix_row(wave * 16 + sub), m - 1);
+        const auto* src =
+            w + (((std::size_t{r / 16} * (k / kStageK) + stage) * 4 + s) * 16 +
+                 r % 16) *
+                    64;
+        __builtin_memcpy(&a_lo, src, 32);
+        __builtin_memcpy(&a_hi, src + 32, 32);
+      } else if constexpr (kQ6) {
         DecodeQ6K(q, qh, scale, s, &a_lo, &a_hi);
       } else {
         DecodeQ45K<F>(q, qh, scale, n, s, &a_lo, &a_hi);
@@ -762,6 +817,166 @@ __device__ __forceinline__ void DecodeQ50(const std::uint32_t (&w)[kQ50Words],
   }
 }
 
+/// The staged LDS row of RoutedHalfKQuantKernel for row `row` and stage
+/// `stage` (128 K values) of a K-quant matrix: codes (64 bytes), Q5_K / Q6_K
+/// high bits (32 bytes) and the four binary16 scale pairs, the bytes its
+/// fetch and commit produce for a live row.
+template<ExpertFormat F>
+__device__ void StageRecord(const std::uint8_t* w, unsigned row, unsigned k,
+                            unsigned stage, uint4* rec) {
+  constexpr bool kQ6 = F == ExpertFormat::kQ6_K;
+  constexpr bool kQ4 = F == ExpertFormat::kQ4_K;
+  constexpr int kScaleChunk = kRowStride<F> / 16 - 1;
+  const std::uint8_t* block =
+      w + (std::size_t{row} * (k / 256) + stage / 2) * kBlockBytes<F>;
+  const int n = static_cast<int>(stage % 2);
+  const auto load = [](const std::uint8_t* p) {
+    return *reinterpret_cast<const uint4*>(p);
+  };
+  std::uint32_t packed[4];
+  if constexpr (kQ6) {
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      rec[i] = load(block + 64 * n + 16 * i);
+    }
+    rec[4] = load(block + 128 + 32 * n);
+    rec[5] = load(block + 128 + 32 * n + 16);
+    const uint2 sc = *reinterpret_cast<const uint2*>(block + 192 + 8 * n);
+    const float d = __half2float(*reinterpret_cast<const __half*>(block + 208));
+    const std::uint32_t sw[2] = {sc.x, sc.y};
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      const auto lo = static_cast<std::int8_t>(sw[i / 2] >> (16 * (i % 2)));
+      const auto hi = static_cast<std::int8_t>(sw[i / 2] >> (16 * (i % 2) + 8));
+      packed[i] = __builtin_bit_cast(
+          std::uint32_t,
+          __halves2half2(__float2half_rn(d * static_cast<float>(lo)),
+                         __float2half_rn(d * static_cast<float>(hi))));
+    }
+  } else {
+    const uint4 header = load(block);
+    const int codes = kQ4 ? 16 : 48;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      rec[i] = load(block + codes + 64 * n + 16 * i);
+    }
+    if constexpr (!kQ4) {
+      rec[4] = load(block + 16);
+      rec[5] = load(block + 32);
+    }
+    const __half2 dm = __builtin_bit_cast(__half2, header.x);
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      std::uint32_t sc = 0;
+      std::uint32_t mn = 0;
+      ScaleMinK4(header, 4 * n + i, &sc, &mn);
+      packed[i] = __builtin_bit_cast(
+          std::uint32_t,
+          __floats2half2_rn(__low2float(dm) * static_cast<float>(sc),
+                            -(__high2float(dm) * static_cast<float>(mn))));
+    }
+  }
+  rec[kScaleChunk] = make_uint4(packed[0], packed[1], packed[2], packed[3]);
+}
+
+/// Compact prefill weights: StageRecord per (16-row group, stage, row), so
+/// a wave's 16 rows of one stage are one contiguous run.
+template<ExpertFormat F>
+__global__ void PackCompactKernel(const std::uint8_t* w, uint4* packed,
+                                  unsigned m, unsigned k) {
+  constexpr int kChunks = kRowStride<F> / 16;
+  const unsigned r = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned stage = blockIdx.y;
+  if (r >= m) {
+    return;
+  }
+  uint4 rec[kChunks];
+  StageRecord<F>(w, r, k, stage, rec);
+  uint4* dst =
+      packed +
+      ((std::size_t{r / 16} * (k / kStageK) + stage) * 16 + r % 16) * kChunks;
+#pragma unroll
+  for (int i = 0; i < kChunks; ++i) {
+    dst[i] = rec[i];
+  }
+}
+
+/// Decoded prefill weights: the binary16 fragments the kernels decode, 64
+/// bytes (lo | hi) per (16-row group, 32-value K block, row).
+__device__ __forceinline__ void StoreDecoded(void* packed, unsigned r,
+                                             unsigned k, unsigned kblock,
+                                             const v16h& lo, const v16h& hi) {
+  auto* dst = static_cast<std::uint8_t*>(packed) +
+              ((std::size_t{r / 16} * (k / 32) + kblock) * 16 + r % 16) * 64;
+  __builtin_memcpy(dst, &lo, 32);
+  __builtin_memcpy(dst + 32, &hi, 32);
+}
+
+template<ExpertFormat F>
+__global__ void PackDecodedKernel(const std::uint8_t* w, void* packed,
+                                  unsigned m, unsigned k) {
+  const unsigned r = blockIdx.x * blockDim.x + threadIdx.x;
+  const unsigned stage = blockIdx.y;  // 128 K values
+  if (r >= m) {
+    return;
+  }
+  if constexpr (F == ExpertFormat::kQ4_K || F == ExpertFormat::kQ5_K ||
+                F == ExpertFormat::kQ6_K) {
+    uint4 rec[kRowStride<F> / 16];
+    StageRecord<F>(w, r, k, stage, rec);
+    const uint4 q[4] = {rec[0], rec[1], rec[2], rec[3]};
+    uint4 qh[2] = {};
+    if constexpr (F != ExpertFormat::kQ4_K) {
+      qh[0] = rec[4];
+      qh[1] = rec[5];
+    }
+    const uint4 sc4 = rec[kRowStride<F> / 16 - 1];
+    const __half2 scale[4] = {
+        __builtin_bit_cast(__half2, sc4.x), __builtin_bit_cast(__half2, sc4.y),
+        __builtin_bit_cast(__half2, sc4.z), __builtin_bit_cast(__half2, sc4.w)};
+#pragma unroll
+    for (int s = 0; s < 4; ++s) {
+      v16h lo;
+      v16h hi;
+      if constexpr (F == ExpertFormat::kQ6_K) {
+        DecodeQ6K(q, qh, scale, s, &lo, &hi);
+      } else {
+        DecodeQ45K<F>(q, qh, scale, static_cast<int>(stage % 2), s, &lo, &hi);
+      }
+      StoreDecoded(packed, r, k, 4 * stage + s, lo, hi);
+    }
+  } else {
+    // Q4_0 / Q5_0 / Q8_0: two 64-value stages of the down kernel, staged as
+    // words.
+    constexpr int kWords = kDownWords<F>;
+    constexpr int kBytes = kDownBlockBytes<F>;
+    const std::uint8_t* row = w + std::size_t{r} * (k / 32) * kBytes;
+#pragma unroll
+    for (int half = 0; half < 2; ++half) {
+      const auto* src = reinterpret_cast<const std::uint16_t*>(
+          row + (2 * stage + half) * 2 * kBytes);
+      std::uint32_t words[kWords];
+#pragma unroll
+      for (int i = 0; i < kWords; ++i) {
+        words[i] = src[2 * i] | (std::uint32_t{src[2 * i + 1]} << 16U);
+      }
+#pragma unroll
+      for (int s = 0; s < 2; ++s) {
+        v16h lo;
+        v16h hi;
+        if constexpr (F == ExpertFormat::kQ4_0) {
+          DecodeQ40(words, s, true, &lo, &hi);
+        } else if constexpr (F == ExpertFormat::kQ5_0) {
+          DecodeQ50(words, s, true, &lo, &hi);
+        } else {
+          DecodeQ80(words, s, true, &lo, &hi);
+        }
+        StoreDecoded(packed, r, k, 4 * stage + 2 * half + s, lo, hi);
+      }
+    }
+  }
+}
+
 /// Routed Q4_0 / Q5_0 / Q5_1 / Q8_0 / binary16 down projection with FP32
 /// outputs: the
 /// layout and tiling of RoutedHalfKQuantKernel over 64-value stages (three
@@ -772,7 +987,7 @@ __device__ __forceinline__ void DecodeQ50(const std::uint32_t (&w)[kQ50Words],
 /// the gate/up projection with RoutedHalfKQuantKernel's row split and GeGLU
 /// epilogue into `out_half`.
 template<ExpertFormat F, int kTileTokens, bool kGeGlu = false,
-         bool kDense = false>
+         bool kDense = false, bool kGrouped = false>
 __global__ void __launch_bounds__(kThreads)
     RoutedHalfDownKernel(const std::uint8_t* __restrict__ w,
                          const __half* __restrict__ x,
@@ -880,6 +1095,22 @@ __global__ void __launch_bounds__(kThreads)
            std::size_t{row_live(r_local) ? matrix_row(r_local) : m - 1} *
                row_bytes;
   };
+  // Stage `stage` of block row r_local; kGrouped (dense word-staged
+  // formats): the grouped layout (wmma_gemv.hpp) over 256-value super-blocks
+  // of four stages.
+  static_assert(!kGrouped || (kDense && kWordStaged));
+  const auto stage_src = [&](int r_local, int stage) {
+    if constexpr (kGrouped) {
+      const std::uint32_t r = row_live(r_local) ? matrix_row(r_local) : m - 1;
+      const std::uint32_t rows = min(128U, m - r / 128 * 128);
+      return w +
+             (std::size_t{r / 128} * 128 * (k / 256) +
+              std::size_t{static_cast<unsigned>(stage / 4)} * rows + r % 128) *
+                 (4 * kStageBytes) +
+             (stage % 4) * kStageBytes;
+    }
+    return row_src(r_local) + stage * kStageBytes;
+  };
   const bool f_second = tid + kThreads < kPieces;
   const std::uint8_t* f_src0 = row_src(tid / 3) + (tid % 3) * 16;
   const int c1 = f_second ? tid + kThreads : tid;
@@ -910,7 +1141,7 @@ __global__ void __launch_bounds__(kThreads)
       for (int i = 0; i < kWordsPer; ++i) {
         const int c = word_of(i);
         f_words[i] = *reinterpret_cast<const std::uint32_t*>(
-            row_src(c / kRowWords) + stage * kStageBytes + (c % kRowWords) * 4);
+            stage_src(c / kRowWords, stage) + (c % kRowWords) * 4);
       }
     } else {
       f_data0 = *reinterpret_cast<const uint4*>(f_src0 + stage * kStageBytes);
@@ -1147,17 +1378,140 @@ __global__ void __launch_bounds__(kThreads)
 
 }  // namespace
 
+bool PrefillLayoutSupports(ExpertFormat format, PrefillLayout layout,
+                           std::uint32_t k) {
+  const bool kquant = format == ExpertFormat::kQ4_K ||
+                      format == ExpertFormat::kQ5_K ||
+                      format == ExpertFormat::kQ6_K;
+  if (layout == PrefillLayout::kCompact) {
+    return kquant && k % 256 == 0;
+  }
+  if (layout == PrefillLayout::kDecoded) {
+    return (kquant && k % 256 == 0) ||
+           ((format == ExpertFormat::kQ4_0 || format == ExpertFormat::kQ5_0 ||
+             format == ExpertFormat::kQ8_0) &&
+            k % kStageK == 0);
+  }
+  return false;
+}
+
+std::size_t PrefillWeightBytes(ExpertFormat format, PrefillLayout layout,
+                               std::uint32_t m, std::uint32_t k) {
+  const std::size_t rows = (std::size_t{m} + 15) / 16 * 16;
+  if (layout == PrefillLayout::kDecoded) {
+    return rows * k * 2;
+  }
+  const int stride = format == ExpertFormat::kQ4_K
+                         ? kRowStride<ExpertFormat::kQ4_K>
+                         : kRowStride<ExpertFormat::kQ6_K>;
+  return rows * (k / kStageK) * static_cast<std::size_t>(stride);
+}
+
+bool PackPrefillWeights(ExpertFormat format, PrefillLayout layout,
+                        const void* w, void* packed, std::uint32_t m,
+                        std::uint32_t k, hipStream_t stream) {
+  if (m == 0 || !PrefillLayoutSupports(format, layout, k)) {
+    return false;
+  }
+  const dim3 grid((m + 255) / 256, k / kStageK);
+  const auto* wb = static_cast<const std::uint8_t*>(w);
+  const auto pack = [&]<ExpertFormat F>() {
+    if (layout == PrefillLayout::kDecoded) {
+      PackDecodedKernel<F><<<grid, 256, 0, stream>>>(wb, packed, m, k);
+    } else if constexpr (F == ExpertFormat::kQ4_K || F == ExpertFormat::kQ5_K ||
+                         F == ExpertFormat::kQ6_K) {
+      PackCompactKernel<F>
+          <<<grid, 256, 0, stream>>>(wb, static_cast<uint4*>(packed), m, k);
+    }
+  };
+  switch (format) {
+    case ExpertFormat::kQ4_K:
+      pack.template operator()<ExpertFormat::kQ4_K>();
+      return true;
+    case ExpertFormat::kQ5_K:
+      pack.template operator()<ExpertFormat::kQ5_K>();
+      return true;
+    case ExpertFormat::kQ6_K:
+      pack.template operator()<ExpertFormat::kQ6_K>();
+      return true;
+    case ExpertFormat::kQ4_0:
+      pack.template operator()<ExpertFormat::kQ4_0>();
+      return true;
+    case ExpertFormat::kQ5_0:
+      pack.template operator()<ExpertFormat::kQ5_0>();
+      return true;
+    case ExpertFormat::kQ8_0:
+      pack.template operator()<ExpertFormat::kQ8_0>();
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool LaunchPackedPrefillGemm(ExpertFormat format, PrefillLayout layout,
+                             const void* w, const void* x, float* out,
+                             void* out_half, std::uint32_t rows,
+                             std::uint32_t m, std::uint32_t k,
+                             hipStream_t stream, bool geglu,
+                             std::uint32_t group) {
+  if (rows == 0 || m == 0 || !PrefillLayoutSupports(format, layout, k) ||
+      (out == nullptr) == (out_half == nullptr) ||
+      (geglu && (out_half == nullptr || m % 2 != 0))) {
+    return false;
+  }
+  constexpr unsigned kTile = 112;
+  const unsigned token_tiles = (rows + kTile - 1) / kTile;
+  const unsigned row_blocks = geglu ? (m / 2 + 63) / 64 : (m + 127) / 128;
+  const dim3 grid(token_tiles * row_blocks);
+  if (group == 0) {
+    group = layout == PrefillLayout::kDecoded ? token_tiles : 2;
+  }
+  const auto* wb = static_cast<const std::uint8_t*>(w);
+  const auto* xh = static_cast<const __half*>(x);
+  auto* oh = static_cast<__half*>(out_half);
+  const auto launch = [&]<ExpertFormat F, int kMode>() {
+    if (geglu) {
+      RoutedHalfKQuantKernel<F, kTile, true, true, kMode>
+          <<<grid, kThreads, 0, stream>>>(wb, xh, nullptr, nullptr, nullptr,
+                                          nullptr, out, oh, m, k, rows, group);
+    } else {
+      RoutedHalfKQuantKernel<F, kTile, false, true, kMode>
+          <<<grid, kThreads, 0, stream>>>(wb, xh, nullptr, nullptr, nullptr,
+                                          nullptr, out, oh, m, k, rows, group);
+    }
+  };
+  if (layout == PrefillLayout::kDecoded) {
+    // Binary16 fragments: the source format no longer matters.
+    launch.template operator()<ExpertFormat::kQ4_K, 2>();
+    return true;
+  }
+  switch (format) {
+    case ExpertFormat::kQ4_K:
+      launch.template operator()<ExpertFormat::kQ4_K, 1>();
+      return true;
+    case ExpertFormat::kQ5_K:
+      launch.template operator()<ExpertFormat::kQ5_K, 1>();
+      return true;
+    case ExpertFormat::kQ6_K:
+      launch.template operator()<ExpertFormat::kQ6_K, 1>();
+      return true;
+    default:
+      return false;
+  }
+}
+
 bool LaunchDenseHalfGemm(ExpertFormat format, const void* w, const void* x,
                          float* out, void* out_half, std::uint32_t rows,
                          std::uint32_t m, std::uint32_t k, hipStream_t stream,
-                         bool geglu) {
+                         bool geglu, bool grouped) {
   // Q4_0 and Q5_0 take the down kernel's 64-value stages.
   const bool blockwise =
       format == ExpertFormat::kQ4_0 || format == ExpertFormat::kQ5_0;
   if (rows == 0 || k % (blockwise ? kDownStageK : 256) != 0 ||
       (out == nullptr) == (out_half == nullptr) ||
       (geglu && (out_half == nullptr || m % 2 != 0)) ||
-      (blockwise && out_half != nullptr && !geglu)) {
+      (blockwise && out_half != nullptr && !geglu) ||
+      (grouped && (k % 256 != 0 || format == ExpertFormat::kQ5_0))) {
     return false;
   }
   // Seven 16-token tiles: each decoded weight fragment feeds seven products
@@ -1176,27 +1530,36 @@ bool LaunchDenseHalfGemm(ExpertFormat format, const void* w, const void* x,
   const auto* xh = static_cast<const __half*>(x);
   auto* oh = static_cast<__half*>(out_half);
   const auto launch_blockwise = [&]<ExpertFormat F>() {
-    if (geglu) {
-      RoutedHalfDownKernel<F, kTile, true, true><<<grid, kThreads, 0, stream>>>(
-          wb, xh, nullptr, nullptr, nullptr, nullptr, nullptr, oh, m, k, rows,
-          kGroup);
-    } else {
-      RoutedHalfDownKernel<F, kTile, false, true>
-          <<<grid, kThreads, 0, stream>>>(wb, xh, nullptr, nullptr, nullptr,
-                                          nullptr, out, nullptr, m, k, rows,
-                                          kGroup);
-    }
+    const auto go = [&]<bool kGrouped>() {
+      if (geglu) {
+        RoutedHalfDownKernel<F, kTile, true, true, kGrouped>
+            <<<grid, kThreads, 0, stream>>>(wb, xh, nullptr, nullptr, nullptr,
+                                            nullptr, nullptr, oh, m, k, rows,
+                                            kGroup);
+      } else {
+        RoutedHalfDownKernel<F, kTile, false, true, kGrouped>
+            <<<grid, kThreads, 0, stream>>>(wb, xh, nullptr, nullptr, nullptr,
+                                            nullptr, out, nullptr, m, k, rows,
+                                            kGroup);
+      }
+    };
+    grouped ? go.template operator()<true>() : go.template operator()<false>();
   };
   const auto launch = [&]<ExpertFormat F>() {
-    if (geglu) {
-      RoutedHalfKQuantKernel<F, kTile, true, true>
-          <<<grid, kThreads, 0, stream>>>(wb, xh, nullptr, nullptr, nullptr,
-                                          nullptr, out, oh, m, k, rows, kGroup);
-    } else {
-      RoutedHalfKQuantKernel<F, kTile, false, true>
-          <<<grid, kThreads, 0, stream>>>(wb, xh, nullptr, nullptr, nullptr,
-                                          nullptr, out, oh, m, k, rows, kGroup);
-    }
+    const auto go = [&]<bool kGrouped>() {
+      if (geglu) {
+        RoutedHalfKQuantKernel<F, kTile, true, true, 0, kGrouped>
+            <<<grid, kThreads, 0, stream>>>(wb, xh, nullptr, nullptr, nullptr,
+                                            nullptr, out, oh, m, k, rows,
+                                            kGroup);
+      } else {
+        RoutedHalfKQuantKernel<F, kTile, false, true, 0, kGrouped>
+            <<<grid, kThreads, 0, stream>>>(wb, xh, nullptr, nullptr, nullptr,
+                                            nullptr, out, oh, m, k, rows,
+                                            kGroup);
+      }
+    };
+    grouped ? go.template operator()<true>() : go.template operator()<false>();
   };
   switch (format) {
     case ExpertFormat::kQ4_K:
@@ -1219,14 +1582,12 @@ bool LaunchDenseHalfGemm(ExpertFormat format, const void* w, const void* x,
   }
 }
 
-bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
-                          const std::int32_t* tiles, std::uint32_t n_tiles,
-                          std::uint32_t tile_rows,
-                          const std::int32_t* pad_bounds,
-                          const std::int32_t* rows_in,
-                          const std::int32_t* rows_out, float* out,
-                          void* out_half, std::uint32_t m, std::uint32_t k,
-                          hipStream_t stream, bool geglu) {
+bool LaunchRoutedHalfGemm(
+    ExpertFormat format, const void* w, const void* x,
+    const std::int32_t* tiles, std::uint32_t n_tiles, std::uint32_t tile_rows,
+    const std::int32_t* pad_bounds, const std::int32_t* rows_in,
+    const std::int32_t* rows_out, float* out, void* out_half, std::uint32_t m,
+    std::uint32_t k, hipStream_t stream, bool geglu, PrefillLayout layout) {
   if (tile_rows != kRoutedHalfTileRows || n_tiles == 0 ||
       (out == nullptr) == (out_half == nullptr) ||
       (format != ExpertFormat::kQ5_1 && format != ExpertFormat::kQ8_0 &&
@@ -1245,6 +1606,38 @@ bool LaunchRoutedHalfGemm(ExpertFormat format, const void* w, const void* x,
   const auto* wb = static_cast<const std::uint8_t*>(w);
   const auto* xh = static_cast<const __half*>(x);
   auto* oh = static_cast<__half*>(out_half);
+  if (layout == PrefillLayout::kCompact) {
+    if (!PrefillLayoutSupports(format, layout, k) || m % 16 != 0) {
+      return false;
+    }
+    const auto compact = [&]<ExpertFormat F>() {
+      if (geglu) {
+        RoutedHalfKQuantKernel<F, kRoutedHalfTileRows, true, false, 1>
+            <<<geglu_grid, kThreads, 0, stream>>>(
+                wb, xh, tiles, pad_bounds, rows_in, rows_out, out, oh, m, k);
+      } else {
+        RoutedHalfKQuantKernel<F, kRoutedHalfTileRows, false, false, 1>
+            <<<grid, kThreads, 0, stream>>>(wb, xh, tiles, pad_bounds, rows_in,
+                                            rows_out, out, oh, m, k);
+      }
+    };
+    switch (format) {
+      case ExpertFormat::kQ4_K:
+        compact.template operator()<ExpertFormat::kQ4_K>();
+        return true;
+      case ExpertFormat::kQ5_K:
+        compact.template operator()<ExpertFormat::kQ5_K>();
+        return true;
+      case ExpertFormat::kQ6_K:
+        compact.template operator()<ExpertFormat::kQ6_K>();
+        return true;
+      default:
+        return false;
+    }
+  }
+  if (layout != PrefillLayout::kNone) {
+    return false;
+  }
   switch (format) {
     case ExpertFormat::kQ4_K:
       if (geglu) {
