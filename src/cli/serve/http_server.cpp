@@ -51,6 +51,7 @@
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/json.hpp"
 #include "src/core/platform/net.hpp"
+#include "src/core/platform/socket.hpp"
 #include "src/core/utf8.hpp"
 #include "src/models/qwen/chat_template.hpp"
 
@@ -102,7 +103,8 @@ private:
 bool ReadUntil(std::string& out, int fd, std::string_view delim) {
   char buf[4096];
   while (out.find(delim) == std::string::npos) {
-    const ssize_t n = ::read(fd, buf, sizeof(buf));
+    // gufo_win: sockets are not CRT descriptors, so read() cannot reach them.
+    const ssize_t n = gufo::platform::SocketRecv(fd, buf, sizeof(buf), 0);
     if (n <= 0)
       return false;
     out.append(buf, static_cast<std::size_t>(n));
@@ -118,7 +120,7 @@ bool ReadN(std::string& out, int fd, std::size_t n) {
   char buf[4096];
   while (got < n) {
     const std::size_t want = std::min(sizeof(buf), n - got);
-    const ssize_t r = ::read(fd, buf, want);
+    const ssize_t r = gufo::platform::SocketRecv(fd, buf, want, 0);
     if (r <= 0)
       return false;
     out.append(buf, static_cast<std::size_t>(r));
@@ -183,7 +185,8 @@ bool IsPeerDisconnected(int fd) noexcept {
   if ((descriptor.revents & POLLIN) == 0)
     return false;
   char byte;
-  const auto count = ::recv(fd, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
+  const auto count =
+      gufo::platform::SocketRecv(fd, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
   return count == 0 || (count < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
                         errno != EINTR);
 }
@@ -1737,7 +1740,8 @@ void LoadingResponder::serve() {
           net::PollSocket(&client, 1, static_cast<int>(remaining)) <= 0)
         break;
       char buffer[2048];
-      const ssize_t received = ::recv(client_fd, buffer, sizeof(buffer), 0);
+      const ssize_t received =
+          gufo::platform::SocketRecv(client_fd, buffer, sizeof(buffer), 0);
       if (received <= 0)
         break;
       head.append(buffer, static_cast<std::size_t>(received));
@@ -1983,6 +1987,11 @@ void HttpServer::run(bool handle_signals) {
       net::CloseSocket(client_fd);
       break;
     }
+#ifdef _WIN32
+    // gufo_win: Winsock sockets accepted from the non-blocking listener
+    // inherit its mode, and a body that arrives later then fails to read.
+    (void)net::SetBlocking(static_cast<net::Socket>(client_fd));
+#endif
 
     reap_workers();
     auto worker = std::make_unique<ConnectionWorker>();
