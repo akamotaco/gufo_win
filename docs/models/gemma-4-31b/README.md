@@ -113,8 +113,9 @@ which decoding keeps reading:
 | `compact` | K-quant codes with binary16 scales in the GEMM's register order | +18.9 GiB | +3.3% |
 | `decoded` | binary16 weights for the 5376-wide inputs, `compact` elsewhere | +43.0 GiB | +6.5% |
 
-`decoded` also serves the QAT (Q4_0, +3.6%) and UD-Q8_K_XL (Q8_0, +3.8%)
-quants. Prefill logits are bit-identical to `off` in both modes on all three
+`decoded` also serves the QAT quant (Q4_0, +3.6%). UD-Q8_K_XL gets no copies:
+its default prefill already fuses GeGLU into the Q8_0 [gate | up] GEMM and
+matched the binary16 copies' GEMMs. Prefill logits are bit-identical to `off` in both modes on all three
 31B quants. Prompts under 512 tokens skip the binary16 copies. On the
 26B-A4B both modes copy only the K-quant expert [gate | up] weights, in the
 compact layout (UD-Q4_K_XL: +1.0% pp2048 for +9.0 GiB). Its dense projections

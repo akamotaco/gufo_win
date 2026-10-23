@@ -21,6 +21,10 @@
 //     lengths 0..15 and a per-cycle oracle over fixed lengths. The
 //     production rule is also decided through a replica of its chain
 //     arithmetic, which must agree on every chain (exit 1 otherwise).
+//     --decide-scale S prices verification for the policies' decisions and
+//     --score-scale S for the time each cycle is scored at (both default 1,
+//     the table): S adds (S - 1) times the depth-0 verification row at every
+//     depth, the projections of a target S times as heavy as the table's.
 //     Prints one JSON object.
 #include <algorithm>
 #include <array>
@@ -82,8 +86,23 @@ struct Options {
   std::uint32_t min_drafts{1};
   int replicas{8};
   std::uint64_t seed{1};
+  float decide_scale{1.0F};
+  float score_scale{1.0F};
   std::vector<std::string> files;
 };
+
+/// The table's costs at `context` with verification scaled as for a target
+/// `scale` times as heavy (Options::decide_scale, score_scale).
+g4::DraftCosts CostsAt(std::uint32_t context, bool experts, float scale) {
+  g4::DraftCosts costs = g4::DraftCostsAt(context, experts);
+  if (scale != 1.0F) {
+    const g4::DraftCosts flat = g4::DraftCostsAt(0, experts);
+    for (std::size_t r = 0; r < costs.verify.size(); ++r) {
+      costs.verify[r] += (scale - 1.0F) * flat.verify[r];
+    }
+  }
+  return costs;
+}
 
 // ---------------------------------------------------------------- validate
 
@@ -388,7 +407,8 @@ struct Outcome {
 };
 Outcome RunCycle(Estimator& estimator, const Chain& c,
                  const g4::DraftCosts& costs, const Options& opt,
-                 bool with_siblings, std::mt19937_64* rng, Tally* tally) {
+                 bool with_siblings, std::mt19937_64* rng, Tally* tally,
+                 const g4::DraftCosts* score = nullptr) {
   ReplicaChain chain(costs, opt.min_drafts, kChain);
   while (chain.kept() < kChain &&
          chain.Include(estimator.Draft(c.signal[chain.kept()], chain.kept(),
@@ -417,7 +437,8 @@ Outcome RunCycle(Estimator& estimator, const Chain& c,
     tokens += survival;
   }
   const std::uint32_t steps = k < kChain ? k + 1 : k;
-  tally->Add(tokens, costs.draft[steps] + costs.verify[rows], k, siblings);
+  const g4::DraftCosts& scored = score != nullptr ? *score : costs;
+  tally->Add(tokens, scored.draft[steps] + scored.verify[rows], k, siblings);
   std::uniform_real_distribution<double> uniform(0.0, 1.0);
   for (std::uint32_t j = 0; j < k; ++j) {
     const bool accepted = uniform(*rng) < c.accept[j];
@@ -523,7 +544,10 @@ int Simulate(const Options& opt) {
     std::mt19937_64 rng(opt.seed);
     Tally ignored;
     for (const Chain& c : chains) {
-      const g4::DraftCosts costs = g4::DraftCostsAt(c.position, opt.experts);
+      const g4::DraftCosts costs =
+          CostsAt(c.position, opt.experts, opt.decide_scale);
+      const g4::DraftCosts scored =
+          CostsAt(c.position, opt.experts, opt.score_scale);
       double survival = 1.0;
       double tokens = 1.0;
       std::size_t best = 0;
@@ -533,7 +557,7 @@ int Simulate(const Options& opt) {
           survival *= c.accept[k - 1];
           tokens += survival;
         }
-        const double ms = costs.draft[k] + costs.verify[k + 1];
+        const double ms = scored.draft[k] + scored.verify[k + 1];
         fixed[k].Add(tokens, ms, static_cast<double>(k));
         if (tokens / ms > best_rate) {
           best_rate = tokens / ms;
@@ -546,7 +570,7 @@ int Simulate(const Options& opt) {
         sv *= c.accept[j];
         t += sv;
       }
-      oracle.Add(t, costs.draft[best] + costs.verify[best + 1],
+      oracle.Add(t, scored.draft[best] + scored.verify[best + 1],
                  static_cast<double>(best));
       // The replica decides as production does.
       g4::CalibratedChain production(check.table(c.sampled), costs,
@@ -603,7 +627,10 @@ int Simulate(const Options& opt) {
       std::mt19937_64 rng(opt.seed + static_cast<std::uint64_t>(replica));
       const auto estimator = policy.make();
       for (const Chain& c : chains) {
-        const g4::DraftCosts costs = g4::DraftCostsAt(c.position, opt.experts);
+        const g4::DraftCosts costs =
+            CostsAt(c.position, opt.experts, opt.decide_scale);
+        const g4::DraftCosts scored =
+            CostsAt(c.position, opt.experts, opt.score_scale);
         if (replica == 0) {
           double reach = 1.0;
           for (std::size_t j = 0; j < kChain; ++j) {
@@ -612,7 +639,8 @@ int Simulate(const Options& opt) {
             reach *= c.accept[j];
           }
         }
-        RunCycle(*estimator, c, costs, opt, policy.siblings, &rng, &tally);
+        RunCycle(*estimator, c, costs, opt, policy.siblings, &rng, &tally,
+                 &scored);
       }
     }
     Value v = tally.Json();
@@ -630,7 +658,8 @@ int main(int argc, char** argv) {
   try {
     if (argc < 3) {
       std::cerr << "usage: gemma4_draft_replay validate|simulate [--experts] "
-                   "[--min-drafts N] [--replicas N] [--seed S] TRACE...\n";
+                   "[--min-drafts N] [--replicas N] [--seed S] "
+                   "[--decide-scale S] [--score-scale S] TRACE...\n";
       return 2;
     }
     const std::string mode = argv[1];
@@ -643,6 +672,10 @@ int main(int argc, char** argv) {
         opt.min_drafts = static_cast<std::uint32_t>(std::stoul(argv[++i]));
       } else if (arg == "--replicas" && i + 1 < argc) {
         opt.replicas = std::stoi(argv[++i]);
+      } else if (arg == "--decide-scale" && i + 1 < argc) {
+        opt.decide_scale = std::stof(argv[++i]);
+      } else if (arg == "--score-scale" && i + 1 < argc) {
+        opt.score_scale = std::stof(argv[++i]);
       } else if (arg == "--seed" && i + 1 < argc) {
         opt.seed = std::stoull(argv[++i]);
       } else {

@@ -233,18 +233,34 @@ bool UnquantizedF16Gemm(const void* w, const __half* x, float* out,
 /// Wide-batch tile plans a caller may choose for DenseF16Gemm; kAuto keeps
 /// the Flash-Next dispatch. The others apply from 1024 rows: eight row groups
 /// (each weight fragment reused across the token tiles), optionally with the
-/// two-block stage for long K.
+/// two-block stage for long K, and optionally walking seven row tiles of a
+/// token tile in launch order (row tiles divisible by seven; otherwise the
+/// staged plan).
 enum class DenseF16Plan : std::uint8_t {
   kAuto,
   kRowGroups8,
   kStagedRowGroups8,
+  kStagedRowGroups8Walk7,
 };
 /// input_stride is in half elements; zero means k. Padded rows are supported
 /// by the wide SSM output projection (batch >= 1024, m=2560, k=6144).
+/// `grouped`: Q8_0 weights in Gemma 4's grouped layout (gemma4 wmma_gemv.hpp;
+/// m > 512, k a multiple of 256), same results as the row order.
 bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
                   std::size_t m, std::size_t k, hipStream_t stream,
                   std::size_t input_stride = 0,
-                  DenseF16Plan plan = DenseF16Plan::kAuto);
+                  DenseF16Plan plan = DenseF16Plan::kAuto,
+                  bool grouped = false);
+/// Gemma 4's fused Q8_0 [gate | up] (m rows: gate rows, then their up rows;
+/// m a multiple of 64) with its GeGLU epilogue: `out` [batch][m / 2]
+/// binary16 rows of gelu_tanh(gate) * up, the values Gemma's separate GeGLU
+/// pass computes from DenseF16Gemm's FP32 rows. Needs 96 or more rows;
+/// `grouped` as for DenseF16Gemm; `half_weights`: binary16 weights (as
+/// UnquantizedF16Gemm reads them), row order only.
+bool DenseF16GeGluGemm(const void* w, const __half* x, __half* out,
+                       std::size_t batch, std::size_t m, std::size_t k,
+                       hipStream_t stream, bool grouped = false,
+                       bool half_weights = false);
 /// BF16 weight rows [m][k] times BF16 activation rows [batch][k] with one
 /// F32 K16 chain per output, in K order for every token: a row's result does
 /// not depend on its position in the batch (BlasLt::Gemm). out is [batch][m].

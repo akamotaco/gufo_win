@@ -19,6 +19,7 @@
 #include "src/models/gemma4/draft_vocab.hpp"
 #include "src/models/gemma4/kernels/rocm/device_model.hpp"
 #include "src/models/gemma4/kernels/rocm/executor.hpp"
+#include "src/models/gemma4/sibling_verification.hpp"
 #include "src/models/gemma4/weights.hpp"
 #include "src/models/qwen/hip/ops/token.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
@@ -886,70 +887,6 @@ Alternative SampledAlternative(const qwen38_flash_next::MtpProposal& proposal,
           static_cast<float>(proposal.probabilities[last] / rest)};
 }
 
-struct SiblingVerification {
-  sampling::TokenId token;
-  bool accepted;  ///< the chain's draft
-  bool sibling;   ///< the sibling, after the draft's rejection
-};
-
-/// p/q verification of a draft with a sibling drawn from q without it:
-/// recursive rejection sampling. The draft is accepted with min(1, p/q);
-/// else the sibling, against the residual r = norm(max(p - q, 0)) and its
-/// own proposal q' = q without the draft, with min(1, r/q'); else the token
-/// comes from norm(max(r - q', 0)). The emitted token follows p exactly.
-SiblingVerification VerifyWithSibling(
-    const sampling::SamplingDistribution& target,
-    const qwen38_flash_next::MtpProposal& q, sampling::TokenId sibling,
-    sampling::SamplerState& sampler) {
-  if (sampler.Uniform() * q.probability < target.probability(q.token)) {
-    return {q.token, true, false};
-  }
-  const auto draft = [&q](sampling::TokenId token) {
-    for (std::size_t i = 0; i < q.size; ++i) {
-      if (q.ids[i] == token) {
-        return static_cast<double>(q.probabilities[i]);
-      }
-    }
-    return 0.0;
-  };
-  std::vector<sampling::Probability> residual;
-  double total = 0.0;
-  for (const auto& entry : target.entries()) {
-    const double value = std::max(entry.value - draft(entry.token), 0.0);
-    if (value > 0.0) {
-      residual.push_back({.token = entry.token, .value = value});
-      total += value;
-    }
-  }
-  if (!(total > 0.0) || !std::isfinite(total)) {
-    return {target.Sample(sampler.mutable_rng_state()), false, false};
-  }
-  const double rest = 1.0 - static_cast<double>(q.probability);
-  const double own = draft(sibling) / rest;
-  const double r =
-      std::max(target.probability(sibling) - draft(sibling), 0.0) / total;
-  if (sampler.Uniform() * own < r) {
-    return {sibling, false, true};
-  }
-  std::vector<sampling::Probability> second;
-  for (const auto& entry : residual) {
-    const double other =
-        entry.token == q.token ? 0.0 : draft(entry.token) / rest;
-    const double value = std::max(entry.value / total - other, 0.0);
-    if (value > 0.0) {
-      second.push_back({.token = entry.token, .value = value});
-    }
-  }
-  if (second.empty()) {
-    return {sampling::SamplingDistribution(std::move(residual))
-                .Sample(sampler.mutable_rng_state()),
-            false, false};
-  }
-  return {sampling::SamplingDistribution(std::move(second))
-              .Sample(sampler.mutable_rng_state()),
-          false, false};
-}
-
 /// Whether a sampler's target distributions can come from the verification
 /// rows' LogitCandidates: random top-k sampling within kCandidateTop with no
 /// constraint mask now (FinishCycle checks each row again).
@@ -1030,8 +967,17 @@ struct Session::CycleDraft {
       // of a cycle without them.
       sibling_rng = draft_rng ^ 0x9E3779B97F4A7C15ULL;
       // Drafts are proposals: only the target's verification is
-      // constrained (a grammar may exclude every drafter candidate).
+      // constrained (a grammar may exclude every drafter candidate). Dense
+      // targets' drafts skip top-p too, which keeps a sibling candidate
+      // beside each draft: at top-p 0.95, 59% of 31B UD-Q8_K_XL story and
+      // code-sampled proposals held one token, while chain acceptance
+      // sum(min(p, q)) is 0.541 without it against 0.544 (rejection sampling
+      // is exact for any q). The 26B-A4B's verification rows cost too much
+      // for siblings to pay, so its drafts keep top-p.
       draft_sampler = cycle.sampler->WithoutConstraint();
+      if (!session.model_->config().HasExperts()) {
+        draft_sampler = draft_sampler.WithoutTopP();
+      }
     }
   }
 
@@ -1193,6 +1139,9 @@ struct Session::CycleDraft {
           qwen38_flash_next::SampleMtpProposal(c, draft_sampler, &draft_rng);
       if (cycle.trace) {
         cycle.trace->proposal_q.push_back(proposal.probability);
+        CycleRecord::Sparse& raw = cycle.trace->draft_candidates.emplace_back();
+        raw.ids.assign(c.ids.begin(), c.ids.begin() + c.size);
+        raw.values.assign(c.logits.begin(), c.logits.begin() + c.size);
       }
       if (Stop(cycle.proposals.size(), proposal.probability, c)) {
         (void)Copy();
@@ -1567,6 +1516,14 @@ void Session::TraceRows(Cycle& cycle, std::span<const float> logits,
         cycle.sampler->Distribution(logits.subspan(r * vocab, vocab));
     trace.row_acceptance.push_back(static_cast<float>(std::min(
         1.0, p.probability(q.token) / static_cast<double>(q.probability))));
+    CycleRecord::Sparse& qd = trace.proposal_dist.emplace_back();
+    qd.ids.assign(q.ids.begin(), q.ids.begin() + q.size);
+    qd.values.assign(q.probabilities.begin(), q.probabilities.begin() + q.size);
+    CycleRecord::Sparse& pd = trace.target_dist.emplace_back();
+    for (const auto& entry : p.entries()) {
+      pd.ids.push_back(static_cast<std::int32_t>(entry.token));
+      pd.values.push_back(static_cast<float>(entry.value));
+    }
     if (!beside) {
       continue;
     }
@@ -1776,6 +1733,12 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
     CycleRecord& trace = *cycle.trace;
     trace.position = cycle.position;
     trace.sampled = cycle.sampled;
+    if (cycle.sampled) {
+      const auto& config = cycle.sampler->config();
+      trace.temperature = config.temperature;
+      trace.top_k = config.top_k;
+      trace.top_p = config.top_p;
+    }
     trace.rows = static_cast<std::uint32_t>(rows.size());
     trace.copied = static_cast<std::uint32_t>(cycle.copied);
     trace.siblings = static_cast<std::uint32_t>(siblings);
