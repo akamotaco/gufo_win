@@ -4,6 +4,19 @@ Changes made in this fork's Gemma 4 engine, newest first. Each entry is a brief
 summary; its pull request has the details, measurements and validation.
 Upstream Gufo's changes are in [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-23: Faster UD-Q8_K_XL prefill and MTP decoding ([#8](https://github.com/franzmoca/gufo/pull/8))
+
+- Q8_0 projections verify MTP drafts on the WMMA kernel over the grouped
+  weight layout. 31B UD-Q8_K_XL MTP decode is +2.2% on mixed text, +19–20%
+  on repetitive text and +10–23% with two users; the 26B-A4B gains up to
+  +2.6%. Results are unchanged.
+- The 31B's Q8_0 attention output and MLP down projections get their own
+  prefill GEMM plan, and GeGLU runs inside the Q8_0 gate/up prefill GEMM.
+  31B UD-Q8_K_XL pp2048 rises from ~565 to ~610 tok/s; 26B-A4B prefill is
+  +1.0–1.1%. Results are bit-identical.
+- `--prefill-weights decoded` no longer copies Q8_0 weights: with GeGLU fused
+  in the default path, the copies were slower and cost 32.4 GiB.
+
 ## 2026-10-23: Faster sampled MTP verification ([#7](https://github.com/franzmoca/gufo/pull/7))
 
 - Sampled MTP cycles verify from each row's exact top logits, selected on the
