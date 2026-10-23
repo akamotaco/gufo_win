@@ -1039,7 +1039,7 @@ struct Session::CycleDraft {
     std::size_t agreed = 0;
     const auto match = session.lookup_.Find(
         session.tokens_, context, qwen38_flash_next::PromptLookup::kMinMatch,
-        &agreed);
+        /*require_resume=*/false, &agreed);
     if (match.length == 0) {
       return false;
     }

@@ -2291,9 +2291,36 @@ __global__ void UnpackQGateKernel(const float* qg, std::uint32_t qg_stride,
   }
 }
 
+// YarnRope travels to the kernels by value as a plain 20-byte argument.
+// Every rope kernel is instantiated with and without YaRN (`kYarn`) and the
+// launcher picks one on the host: a runtime branch in the default kernel let
+// fast-math contract its rotation differently, so the default instantiation
+// keeps the original code and only the YaRN one carries the extra work.
+static_assert(std::is_trivially_copyable_v<YarnRope> && sizeof(YarnRope) == 20);
+
+// YaRN frequency. The product is kept opaque so every rope site rounds the
+// angle identically: fast-math may otherwise reassociate position * freq *
+// multiplier differently per kernel and break cross-site byte identity.
+__device__ __forceinline__ float YarnFrequency(float freq, std::uint32_t pair,
+                                               const YarnRope& yarn) {
+  float scaled = freq * YarnPairMultiplier(yarn, pair);
+  asm volatile("" : "+v"(scaled));
+  return scaled;
+}
+
+// YaRN attention factor on cos and sin, opaque for the same reason: the
+// sites rotate with different expressions (explicit FMA or fast-math
+// contraction), which must all see the same rounded scaled values.
+__device__ __forceinline__ void YarnScale(float& sine, float& cosine,
+                                          const YarnRope& yarn) {
+  sine *= yarn.mscale;
+  cosine *= yarn.mscale;
+  asm volatile("" : "+v"(sine), "+v"(cosine));
+}
+
 // Keep each head's original eight-wave reduction. Heads in a block share
 // rotary angles; normalization statistics remain independent.
-template<std::uint32_t kHeadsPerBlock>
+template<std::uint32_t kHeadsPerBlock, bool kYarn>
 __global__ void PrepareAttentionKernel(
     const float* __restrict__ packed, std::uint32_t stride,
     const float* __restrict__ q_gamma, const float* __restrict__ k_gamma,
@@ -2301,7 +2328,8 @@ __global__ void PrepareAttentionKernel(
     __half* __restrict__ k_cache, __half* __restrict__ v_cache,
     std::uint32_t heads, std::uint32_t kv_heads, std::uint32_t d,
     std::uint32_t rotary, const std::uint32_t* start_pos, float theta,
-    float eps, const qwen::vision::DeviceRope* rope) {
+    float eps, const qwen::vision::DeviceRope* rope,
+    [[maybe_unused]] YarnRope yarn) {
   __shared__ float partial[kHeadsPerBlock][8];
   __shared__ float norm[kHeadsPerBlock][256];
   const std::uint32_t t = blockIdx.x, first = blockIdx.y * kHeadsPerBlock,
@@ -2355,10 +2383,14 @@ __global__ void PrepareAttentionKernel(
   const std::uint32_t half = rotary / 2;
   float sine = 0.0f, cosine = 0.0f;
   if (tid < half) {
-    const float freq = powf(
+    float freq = powf(
         theta, -2.0f * static_cast<float>(tid) / static_cast<float>(rotary));
+    if constexpr (kYarn)
+      freq = YarnFrequency(freq, tid, yarn);
     sincosf(qwen::vision::RopePosition(rope, *start_pos + t, tid) * freq, &sine,
             &cosine);
+    if constexpr (kYarn)
+      YarnScale(sine, cosine, yarn);
   }
 #pragma unroll
   for (std::uint32_t j = 0; j < kHeadsPerBlock; ++j) {
@@ -2391,25 +2423,38 @@ __global__ void PrepareAttentionKernel(
   }
 }
 
+template<bool kYarn>
 __global__ void RopeKernel(float* x, std::uint32_t heads, std::uint32_t d,
                            std::uint32_t rotary_dim,
                            const std::uint32_t* start_pos, float theta,
-                           const qwen::vision::DeviceRope* rope) {
+                           const qwen::vision::DeviceRope* rope,
+                           [[maybe_unused]] YarnRope yarn) {
   const std::uint32_t t = blockIdx.x;
   const std::uint32_t half = rotary_dim / 2;
   for (std::uint32_t idx = threadIdx.x; idx < heads * half; idx += blockDim.x) {
     const std::uint32_t h = idx / half;
     const std::uint32_t i = idx % half;
     float* v = x + (static_cast<std::size_t>(t) * heads + h) * d;
-    const float freq = powf(
+    float freq = powf(
         theta, -2.0f * static_cast<float>(i) / static_cast<float>(rotary_dim));
+    if constexpr (kYarn)
+      freq = YarnFrequency(freq, i, yarn);
     float s = 0.0f;
     float c = 0.0f;
     sincosf(qwen::vision::RopePosition(rope, *start_pos + t, i) * freq, &s, &c);
+    if constexpr (kYarn)
+      YarnScale(s, c, yarn);
     const float a = v[i];
     const float b = v[i + half];
-    v[i] = a * c - b * s;
-    v[i + half] = a * s + b * c;
+    if constexpr (kYarn) {
+      // Explicit rounding, as in PrepareAttention and the GEMM epilogue:
+      // fast-math may otherwise contract a * s + b * c either way round.
+      v[i] = __fmaf_rn(a, c, -__fmul_rn(b, s));
+      v[i + half] = __fmaf_rn(a, s, __fmul_rn(b, c));
+    } else {
+      v[i] = a * c - b * s;
+      v[i + half] = a * s + b * c;
+    }
   }
 }
 
@@ -2438,14 +2483,13 @@ __global__ void StoreRowsKernel(const float* src, float* dst,
 /// grid: the most blocks a batch can complete. Block b pools raw keys
 /// [b*ratio, (b+1)*ratio) once every one of them is stored, i.e. for
 /// b in [*first_block, (*start_pos + n_tokens) / ratio).
-__global__ void PoolBlocksKernel(const float* raw, const float* gamma,
-                                 __half* blocks,
-                                 const std::uint32_t* first_block,
-                                 const std::uint32_t* start_pos,
-                                 std::uint32_t n_tokens, std::uint32_t ratio,
-                                 std::uint32_t dim, std::uint32_t rotary_dim,
-                                 float theta, float eps, std::uint32_t capacity,
-                                 const qwen::vision::DeviceRope* rope) {
+template<bool kYarn>
+__global__ void PoolBlocksKernel(
+    const float* raw, const float* gamma, __half* blocks,
+    const std::uint32_t* first_block, const std::uint32_t* start_pos,
+    std::uint32_t n_tokens, std::uint32_t ratio, std::uint32_t dim,
+    std::uint32_t rotary_dim, float theta, float eps, std::uint32_t capacity,
+    const qwen::vision::DeviceRope* rope, [[maybe_unused]] YarnRope yarn) {
   __shared__ float v[256];
   __shared__ float shared[32];
   const std::uint32_t b = *first_block + blockIdx.x;
@@ -2471,11 +2515,15 @@ __global__ void PoolBlocksKernel(const float* raw, const float* gamma,
   float outv = i < dim ? v[i] : 0.0f;
   if (i < rotary_dim) {
     const std::uint32_t p = i < half ? i : i - half;
-    const float freq = powf(
+    float freq = powf(
         theta, -2.0f * static_cast<float>(p) / static_cast<float>(rotary_dim));
+    if constexpr (kYarn)
+      freq = YarnFrequency(freq, p, yarn);
     float s = 0.0f;
     float c = 0.0f;
     sincosf(qwen::vision::RopePosition(rope, b * ratio, p) * freq, &s, &c);
+    if constexpr (kYarn)
+      YarnScale(s, c, yarn);
     const float a = v[p];
     const float bb = v[p + half];
     outv = i < half ? a * c - bb * s : a * s + bb * c;
@@ -3765,6 +3813,93 @@ __global__ void CopyKernel(const float* src, float* dst, std::size_t count) {
   }
 }
 
+template<bool First>
+__global__ void VerificationCandidateTileKernel(
+    const float* logits, GreedyPenaltyRows penalties,
+    const std::uint32_t* input, std::uint32_t* output, std::uint32_t size,
+    std::uint32_t vocab, std::uint32_t stride) {
+  using Sort = hipcub::BlockRadixSort<float, kThreads, 4, std::uint32_t>;
+  __shared__ Sort::TempStorage scratch;
+  __shared__ unsigned excluded[kMtpCandidateTile / 32];
+  __shared__ unsigned first_penalty;
+  const unsigned row = blockIdx.y;
+  const auto begin = blockIdx.x * kMtpCandidateTile;
+  if constexpr (First) {
+    if (threadIdx.x < kMtpCandidateTile / 32)
+      excluded[threadIdx.x] = 0;
+    if (threadIdx.x == 0) {
+      auto lo = penalties.offsets[row];
+      auto hi = penalties.offsets[row + 1];
+      while (lo < hi) {
+        const auto mid = lo + (hi - lo) / 2;
+        if (penalties.penalties[mid].token < begin)
+          lo = mid + 1;
+        else
+          hi = mid;
+      }
+      first_penalty = lo;
+    }
+    __syncthreads();
+    for (auto i = first_penalty + threadIdx.x; i < penalties.offsets[row + 1];
+         i += blockDim.x) {
+      const auto token = penalties.penalties[i].token;
+      if (token >= begin + kMtpCandidateTile)
+        break;
+      const auto offset = token - begin;
+      atomicOr(&excluded[offset / 32], 1U << (offset % 32));
+    }
+    __syncthreads();
+  }
+  float keys[4];
+  std::uint32_t ids[4];
+#pragma unroll
+  for (unsigned j = 0; j < 4; ++j) {
+    const auto offset = threadIdx.x * 4 + j;
+    const auto i = begin + offset;
+    auto id = i < size ? (First ? i : input[std::size_t(row) * stride + i])
+                       : UINT32_MAX;
+    if constexpr (First) {
+      if ((excluded[offset / 32] >> (offset % 32)) & 1U)
+        id = UINT32_MAX;
+    }
+    const float value =
+        id < vocab ? logits[std::size_t(row) * vocab + id] : -INFINITY;
+    // Drop the ID too: a subsequent pass must never resurrect an excluded
+    // or nonfinite entry by reading its original logit.
+    ids[j] = isfinite(value) ? id : UINT32_MAX;
+    keys[j] = isfinite(value) ? (value == 0.0F ? 0.0F : value) : -INFINITY;
+  }
+  Sort(scratch).SortDescending(keys, ids);
+#pragma unroll
+  for (unsigned j = 0; j < 4; ++j) {
+    const auto rank = threadIdx.x * 4 + j;
+    if (rank < kMtpCandidates)
+      output[std::size_t(row) * stride + blockIdx.x * kMtpCandidates + rank] =
+          ids[j];
+  }
+}
+
+__global__ void GatherVerificationCandidatesKernel(
+    const float* logits, GreedyPenaltyRows penalties, const std::uint32_t* ids,
+    sampling::LogitCandidate* out, std::uint32_t vocab, std::uint32_t stride) {
+  const auto row = blockIdx.x;
+  const auto count =
+      kMtpCandidates + penalties.offsets[row + 1] - penalties.offsets[row];
+  auto* destination = out + row * kMtpCandidates + penalties.offsets[row];
+  for (unsigned i = threadIdx.x; i < count; i += blockDim.x) {
+    const auto id =
+        i < kMtpCandidates
+            ? ids[std::size_t(row) * stride + i]
+            : penalties.penalties[penalties.offsets[row] + i - kMtpCandidates]
+                  .token;
+    destination[i] =
+        id < vocab
+            ? sampling::LogitCandidate{id,
+                                       logits[std::size_t(row) * vocab + id]}
+            : sampling::LogitCandidate{UINT32_MAX, -INFINITY};
+  }
+}
+
 inline unsigned Blocks(std::size_t count) {
   return static_cast<unsigned>((count + kThreads - 1) / kThreads);
 }
@@ -3805,7 +3940,8 @@ constexpr std::uint32_t kWmmaRatio = 4;
 constexpr std::uint32_t kWmmaKSteps = kWmmaHeadDim / 16;
 // Row padding keeps a 16-byte-per-lane fragment read off a single bank group.
 constexpr std::uint32_t kWmmaKStride = kWmmaHeadDim + 8;
-// Union-mask capacity: one bit per 4-token block, 262,144 tokens of context.
+// Union-mask capacity of the live visible extent: one bit per 4-token block,
+// 262,144 visible tokens. Rows may be strided wider.
 constexpr std::uint32_t kWmmaMaxMaskWords = 2048;
 
 /// Two row layouts share the kernel. The dense window packs 16 queries x 2
@@ -6240,8 +6376,8 @@ bool RoutedGatedF16Gemm(const void* gate, const void* up, WeightType type,
                         const std::int32_t* rows_in,
                         const std::int32_t* rows_out, __half* out,
                         std::size_t m, std::size_t k, hipStream_t stream) {
-  // 128-token tiles decode each expert's weights once per wide bucket; at
-  // 1024+ batch rows they also beat 64-token tiles on short buckets.
+  // 128-token tiles decode each expert's weights once per wide bucket; in
+  // prefill they also beat narrower tiles on short buckets.
   constexpr int BN = 128;
   if (m == 0 || k == 0 || k % 256 != 0 || n_tiles == 0 || out == nullptr) {
     return false;
@@ -6335,6 +6471,7 @@ struct AttentionProjectionOutput {
   float theta;
   float eps;
   const qwen::vision::DeviceRope* rope;
+  YarnRope yarn;
 };
 
 /// Dense F16 WMMA GEMM over Q8_0 or F16 weights: block = BM rows x BN tokens,
@@ -6347,7 +6484,8 @@ struct AttentionProjectionOutput {
 /// skip decoding and use the same ordered K16 products. y is [batch][m].
 template<int BM, int BN, int BK, int WM, int WN, int kRowGroup = 1,
          bool kHcMix = false, bool kSsmConv = false, bool kAttention = false,
-         bool kHalfWeights = false, bool kBf16 = false, bool kStrided = false>
+         bool kHalfWeights = false, bool kBf16 = false, bool kStrided = false,
+         bool kYarn = false>
 __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     const void* __restrict__ w, const __half* __restrict__ x,
     float* __restrict__ y, std::size_t batch, std::size_t m, std::size_t k,
@@ -6407,25 +6545,7 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
   const unsigned within = (blockIdx.y % kRowGroup) * gridDim.x + blockIdx.x;
   const int r_block = (row_group * kRowGroup + within % kRowGroup) * BM;
   const int t_block = (within / kRowGroup) * BN;
-  // BF16 replaces a library GEMM whose 32-token tile g starts its K loop
-  // (g % 4) * 4 blocks in and wraps. A block takes the four tiles of one
-  // rotation class, one per token wave, so every dot product keeps the
-  // library's order.
-  const int bf16_class = kBf16 ? static_cast<int>(blockIdx.x % 4) : 0;
-  const int k_rotation = kBf16 ? (bf16_class * 4) % num_kb : 0;
-  const auto token_of = [&](int local) {
-    if constexpr (kBf16) {
-      static_assert(BN == 128 && WN == 4 && kRowGroup == 1);
-      return (static_cast<int>(blockIdx.x / 4) * 512) + (bf16_class * 32) +
-             ((local / 32) * 128) + (local % 32);
-    } else {
-      return t_block + local;
-    }
-  };
-  const auto rotate = [&](int kb) {
-    const int r = kb + k_rotation;
-    return r >= num_kb ? r - num_kb : r;
-  };
+  const auto token_of = [&](int local) { return t_block + local; };
 
   // SSM thread tid owns row tid and K block p of the stage. Other paths
   // use row (p*256+tid)/BK and K block (p*256+tid)%BK; rows past m read
@@ -6466,7 +6586,7 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
       const bool live = a_live[p] && kb < num_kb;
       if constexpr (kRawWeights) {
         const auto* src = reinterpret_cast<const uint4*>(
-            a_ptr[p] + static_cast<std::size_t>(rotate(kb)) * 64);
+            a_ptr[p] + static_cast<std::size_t>(kb) * 64);
 #pragma unroll
         for (int c = 0; c < 4; ++c)
           a_half[p][c] = live ? src[c] : make_uint4(0u, 0u, 0u, 0u);
@@ -6483,8 +6603,7 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     for (int p = 0; p < kBPer; ++p) {
       const int kb = kb0 + (((p * 256) + tid) % BK);
       if (b_ptr[p] != nullptr && kb < num_kb) {
-        const auto* src =
-            reinterpret_cast<const uint4*>(b_ptr[p] + (rotate(kb) * 32));
+        const auto* src = reinterpret_cast<const uint4*>(b_ptr[p] + (kb * 32));
 #pragma unroll
         for (int c = 0; c < 4; ++c) {
           b_data[p][c] = src[c];
@@ -6640,7 +6759,7 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
 #pragma unroll
           for (int i = 0; i < kWaveRowTiles; ++i) {
             if constexpr (kBf16) {
-              // One K16 chain in K order, as the library GEMM it replaces.
+              // One K16 chain in K order for every token.
               acc[i][j] = WmmaBf16(a_lo[i], b_lo, acc[i][j]);
               acc[i][j] = WmmaBf16(a_hi[i], b_hi, acc[i][j]);
             } else if constexpr (kHalfWeights) {
@@ -6726,13 +6845,17 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
               v[c] = v[c] * gamma[c * 32 + lane_id];
               asm volatile("" : "+v"(v[c]));
             }
-            const float freq = powf(
-                attention.theta, -2.0F * static_cast<float>(lane_id) / 64.0F);
+            float freq = powf(attention.theta,
+                              -2.0F * static_cast<float>(lane_id) / 64.0F);
+            if constexpr (kYarn)
+              freq = YarnFrequency(freq, lane_id, attention.yarn);
             float sn = 0.0F, cs = 0.0F;
             sincosf(qwen::vision::RopePosition(
                         attention.rope, *attention.position + tok, lane_id) *
                         freq,
                     &sn, &cs);
+            if constexpr (kYarn)
+              YarnScale(sn, cs, attention.yarn);
             const float lo = __fmaf_rn(v[0], cs, -__fmul_rn(v[1], sn));
             const float hi = __fmaf_rn(v[0], sn, __fmul_rn(v[1], cs));
             v[0] = lo;
@@ -6969,19 +7092,29 @@ bool AttentionF16Gemm(const void* weights, const __half* input,
                       float* gate, __half* keys, __half* values,
                       std::uint32_t n_tokens, const std::uint32_t* position,
                       float theta, float eps, hipStream_t stream,
-                      const qwen::vision::DeviceRope* rope) {
-  if (n_tokens < 1024 || weights == nullptr || input == nullptr ||
+                      const qwen::vision::DeviceRope* rope,
+                      const YarnRope& yarn) {
+  if (n_tokens == 0 || weights == nullptr || input == nullptr ||
       q_gamma == nullptr || k_gamma == nullptr || query == nullptr ||
       gate == nullptr || keys == nullptr || values == nullptr ||
       position == nullptr)
     return false;
-  const AttentionProjectionOutput output{q_gamma, k_gamma,  query, gate, keys,
-                                         values,  position, theta, eps,  rope};
+  const AttentionProjectionOutput output{q_gamma, k_gamma, query,    gate,
+                                         keys,    values,  position, theta,
+                                         eps,     rope,    yarn};
   // One 256-row tile per query, gate, key or value head (52). Four row
   // tiles per token tile in launch order share each activation tile's read
   // (8.8 to 7.9 ms at 4,096 tokens). One K block per LDS stage halves the
   // stage to 24 KB, so three blocks share a WGP instead of two (7.8 to
   // 7.3 ms); the K order is unchanged.
+  if (yarn.enabled != 0) {
+    hipLaunchKernelGGL((DenseF16GEMMKernel<256, 128, 1, 8, 1, 4, false, false,
+                                           true, false, false, false, true>),
+                       dim3((n_tokens + 127) / 128, 52), dim3(kThreads), 0,
+                       stream, weights, input, nullptr, n_tokens, 13312, 2560,
+                       nullptr, nullptr, nullptr, nullptr, nullptr, output);
+    return true;
+  }
   hipLaunchKernelGGL(
       (DenseF16GEMMKernel<256, 128, 1, 8, 1, 4, false, false, true>),
       dim3((n_tokens + 127) / 128, 52), dim3(kThreads), 0, stream, weights,
@@ -7040,12 +7173,11 @@ bool DenseBf16Gemm(const void* w, const void* x, float* out, std::size_t batch,
                    std::size_t m, std::size_t k, hipStream_t stream) {
   if (m == 0 || batch == 0 || k == 0 || k % 32 != 0)
     return false;
-  // Four blocks, one per K rotation class, cover each 512 tokens.
   hipLaunchKernelGGL((DenseF16GEMMKernel<64, 128, 2, 2, 4, 1, false, false,
                                          false, false, true>),
-                     dim3(((batch + 511) / 512) * 4, (m + 63) / 64),
-                     dim3(kThreads), 0, stream, w,
-                     static_cast<const __half*>(x), out, batch, m, k);
+                     dim3((batch + 127) / 128, (m + 63) / 64), dim3(kThreads),
+                     0, stream, w, static_cast<const __half*>(x), out, batch, m,
+                     k);
   return true;
 }
 
@@ -7130,7 +7262,7 @@ bool DenseF16SsmGemm(const void* w, const __half* x, const float* conv_w,
                      std::uint32_t n_tokens, std::uint32_t m, std::uint32_t k,
                      std::uint32_t channels, std::uint32_t kernel,
                      hipStream_t stream, std::uint32_t checkpoint_tokens) {
-  if (n_tokens < 1024 || m != 16384 || k != 2560 || channels != 10240 ||
+  if (n_tokens == 0 || m != 16384 || k != 2560 || channels != 10240 ||
       kernel != kSsmConvTaps) {
     return false;
   }
@@ -7422,7 +7554,8 @@ bool PrepareAttention(const float* packed, std::uint32_t stride,
                       std::uint32_t kv_heads, std::uint32_t d,
                       std::uint32_t rotary_dim, const std::uint32_t* start_pos,
                       float theta, float eps, hipStream_t stream,
-                      const qwen::vision::DeviceRope* rope, bool prefill) {
+                      const qwen::vision::DeviceRope* rope, bool prefill,
+                      const YarnRope& yarn) {
   if (d == 0 || d > 256 || rotary_dim == 0 || rotary_dim > d ||
       rotary_dim % 2 != 0 || kv_heads == 0 ||
       stride < static_cast<std::size_t>(2) * (heads + kv_heads) * d) {
@@ -7430,18 +7563,34 @@ bool PrepareAttention(const float* packed, std::uint32_t stride,
   }
   if (n_tokens == 0)
     return true;
-  if (!prefill && n_tokens < 32) {
-    hipLaunchKernelGGL((PrepareAttentionKernel<1>),
-                       dim3(n_tokens, heads + kv_heads), dim3(kThreads), 0,
-                       stream, packed, stride, q_gamma, k_gamma, q, gate,
-                       k_cache, v_cache, heads, kv_heads, d, rotary_dim,
-                       start_pos, theta, eps, rope);
+  if (yarn.enabled != 0) {
+    if (!prefill && n_tokens < 32) {
+      hipLaunchKernelGGL((PrepareAttentionKernel<1, true>),
+                         dim3(n_tokens, heads + kv_heads), dim3(kThreads), 0,
+                         stream, packed, stride, q_gamma, k_gamma, q, gate,
+                         k_cache, v_cache, heads, kv_heads, d, rotary_dim,
+                         start_pos, theta, eps, rope, yarn);
+    } else {
+      hipLaunchKernelGGL((PrepareAttentionKernel<4, true>),
+                         dim3(n_tokens, (heads + kv_heads + 3) / 4),
+                         dim3(kThreads), 0, stream, packed, stride, q_gamma,
+                         k_gamma, q, gate, k_cache, v_cache, heads, kv_heads, d,
+                         rotary_dim, start_pos, theta, eps, rope, yarn);
+    }
   } else {
-    hipLaunchKernelGGL((PrepareAttentionKernel<4>),
-                       dim3(n_tokens, (heads + kv_heads + 3) / 4),
-                       dim3(kThreads), 0, stream, packed, stride, q_gamma,
-                       k_gamma, q, gate, k_cache, v_cache, heads, kv_heads, d,
-                       rotary_dim, start_pos, theta, eps, rope);
+    if (!prefill && n_tokens < 32) {
+      hipLaunchKernelGGL((PrepareAttentionKernel<1, false>),
+                         dim3(n_tokens, heads + kv_heads), dim3(kThreads), 0,
+                         stream, packed, stride, q_gamma, k_gamma, q, gate,
+                         k_cache, v_cache, heads, kv_heads, d, rotary_dim,
+                         start_pos, theta, eps, rope, yarn);
+    } else {
+      hipLaunchKernelGGL((PrepareAttentionKernel<4, false>),
+                         dim3(n_tokens, (heads + kv_heads + 3) / 4),
+                         dim3(kThreads), 0, stream, packed, stride, q_gamma,
+                         k_gamma, q, gate, k_cache, v_cache, heads, kv_heads, d,
+                         rotary_dim, start_pos, theta, eps, rope, yarn);
+    }
   }
   return true;
 }
@@ -7449,9 +7598,15 @@ bool PrepareAttention(const float* packed, std::uint32_t stride,
 void Rope(float* x, std::uint32_t n_tokens, std::uint32_t heads,
           std::uint32_t d, std::uint32_t rotary_dim,
           const std::uint32_t* start_pos, float theta, hipStream_t stream,
-          const qwen::vision::DeviceRope* rope) {
-  hipLaunchKernelGGL(RopeKernel, dim3(n_tokens), dim3(kThreads), 0, stream, x,
-                     heads, d, rotary_dim, start_pos, theta, rope);
+          const qwen::vision::DeviceRope* rope, const YarnRope& yarn) {
+  if (yarn.enabled != 0)
+    hipLaunchKernelGGL(RopeKernel<true>, dim3(n_tokens), dim3(kThreads), 0,
+                       stream, x, heads, d, rotary_dim, start_pos, theta, rope,
+                       yarn);
+  else
+    hipLaunchKernelGGL(RopeKernel<false>, dim3(n_tokens), dim3(kThreads), 0,
+                       stream, x, heads, d, rotary_dim, start_pos, theta, rope,
+                       yarn);
 }
 
 void StoreKv(const float* src, __half* cache, std::uint32_t n_tokens,
@@ -7474,14 +7629,21 @@ void PoolIndexerBlocks(const float* raw_keys, const float* gamma,
                        std::uint32_t grid_blocks, std::uint32_t ratio,
                        std::uint32_t dim, std::uint32_t rotary_dim, float theta,
                        float eps, std::uint32_t capacity, hipStream_t stream,
-                       const qwen::vision::DeviceRope* rope) {
+                       const qwen::vision::DeviceRope* rope,
+                       const YarnRope& yarn) {
   if (grid_blocks == 0) {
     return;
   }
-  hipLaunchKernelGGL(PoolBlocksKernel, dim3(grid_blocks), dim3(kThreads), 0,
-                     stream, raw_keys, gamma, blocks, first_block, start_pos,
-                     n_tokens, ratio, dim, rotary_dim, theta, eps, capacity,
-                     rope);
+  if (yarn.enabled != 0)
+    hipLaunchKernelGGL(PoolBlocksKernel<true>, dim3(grid_blocks),
+                       dim3(kThreads), 0, stream, raw_keys, gamma, blocks,
+                       first_block, start_pos, n_tokens, ratio, dim, rotary_dim,
+                       theta, eps, capacity, rope, yarn);
+  else
+    hipLaunchKernelGGL(PoolBlocksKernel<false>, dim3(grid_blocks),
+                       dim3(kThreads), 0, stream, raw_keys, gamma, blocks,
+                       first_block, start_pos, n_tokens, ratio, dim, rotary_dim,
+                       theta, eps, capacity, rope, yarn);
 }
 
 void SelectBlocks(const float* q, const __half* blocks, std::uint32_t* mask,
@@ -7559,6 +7721,16 @@ void Attention(const float* q, const __half* k_cache, const __half* v_cache,
   }
 }
 
+std::uint32_t WmmaCausalAttentionContextLimit(std::uint32_t heads,
+                                              std::uint32_t kv_heads,
+                                              std::uint32_t d,
+                                              std::uint32_t ratio) {
+  if (heads != kWmmaQueryHeads || kv_heads != kWmmaKvHeads ||
+      d != kWmmaHeadDim || ratio != kWmmaRatio)
+    return 0;
+  return kWmmaMaxMaskWords * kWmmaRatio * 32;
+}
+
 bool WmmaCausalAttention(const float* q, const float* gate,
                          const __half* k_cache, const __half* v_cache,
                          const std::uint32_t* mask, std::uint32_t mask_words,
@@ -7567,10 +7739,19 @@ bool WmmaCausalAttention(const float* q, const float* gate,
                          std::uint32_t kv_heads, std::uint32_t d,
                          std::uint32_t ratio, hipStream_t stream,
                          bool last_only) {
-  if (heads != kWmmaQueryHeads || kv_heads != kWmmaKvHeads ||
-      d != kWmmaHeadDim || ratio != kWmmaRatio || n_tokens == 0 ||
-      (mask != nullptr && mask_words > kWmmaMaxMaskWords)) {
+  if (WmmaCausalAttentionContextLimit(heads, kv_heads, d, ratio) == 0 ||
+      n_tokens == 0) {
     return false;
+  }
+  if (mask != nullptr) {
+    // The kernel's union mask covers the LIVE visible extent; mask_words is
+    // only the row stride and may be wider when the session capacity
+    // exceeds 262,144 tokens.
+    const std::uint64_t live_blocks =
+        (std::uint64_t{start_pos} + n_tokens + kWmmaRatio - 1) / kWmmaRatio;
+    const std::uint64_t live_words = (live_blocks + 31) / 32;
+    if (live_words > kWmmaMaxMaskWords || live_words > mask_words)
+      return false;
   }
   if (mask != nullptr) {
     constexpr std::uint32_t kPackedQueries = 4;
@@ -7813,6 +7994,33 @@ void SelectMtpCandidates(const float* logits, std::uint32_t* ids,
 std::uint32_t MtpCandidateWorkspaceSize(std::uint32_t vocab) {
   const auto tiles = (vocab + 1023) / 1024;
   return (tiles > 2 ? tiles : 2) * kMtpCandidates;
+}
+
+void VerificationCandidates(const float* logits, GreedyPenaltyRows penalties,
+                            std::uint32_t* ids, std::uint32_t* scratch_ids,
+                            sampling::LogitCandidate* out, std::uint32_t rows,
+                            std::uint32_t vocab, hipStream_t stream) {
+  if (!logits || !ids || !scratch_ids || !out || !vocab || !rows || rows > 7)
+    throw std::invalid_argument("invalid verification candidate shape");
+  const auto stride = MtpCandidateWorkspaceSize(vocab);
+  const auto tiles = [](std::uint32_t n) { return 1U + (n - 1U) / 1024; };
+  auto size = vocab;
+  auto blocks = tiles(size);
+  VerificationCandidateTileKernel<true>
+      <<<dim3(blocks, rows), kThreads, 0, stream>>>(logits, penalties, nullptr,
+                                                    ids, size, vocab, stride);
+  auto* source = ids;
+  auto* destination = scratch_ids;
+  while (blocks > 1) {
+    size = blocks * kMtpCandidates;
+    blocks = tiles(size);
+    VerificationCandidateTileKernel<false>
+        <<<dim3(blocks, rows), kThreads, 0, stream>>>(
+            logits, penalties, source, destination, size, vocab, stride);
+    std::swap(source, destination);
+  }
+  GatherVerificationCandidatesKernel<<<rows, kThreads, 0, stream>>>(
+      logits, penalties, source, out, vocab, stride);
 }
 
 void MtpTopCandidates(const float* logits, std::uint32_t* ids,

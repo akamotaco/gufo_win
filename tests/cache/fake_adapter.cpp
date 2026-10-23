@@ -89,6 +89,9 @@ public:
     ReleaseRows();
   }
   bool IsValid() const noexcept override { return valid; }
+  bool ExecutionComplete() const noexcept override {
+    return execution_complete;
+  }
   void ReleaseRows() noexcept {
     if (!target.empty())
       guard_.BeforeRelease(kTarget, 0, target.size());
@@ -122,6 +125,7 @@ public:
   mutable std::size_t pending_reads{0};
   std::size_t pending_loads{0};
   bool valid{true};
+  bool execution_complete{true};
   bool restoring{false};
   bool private_loaded{false};
   std::array<bool, 32> private_pieces{};
@@ -246,11 +250,6 @@ Completion FakeStream::SubmitTracked(
 }
 
 namespace {
-constexpr std::array<ComponentDescriptor, 3> kComponents{{
-    {kTarget, 1, ComponentKind::kAppendRows, sizeof(Token), 4, 0},
-    {kDraft, 1, ComponentKind::kAppendRows, sizeof(Token), 4, 0},
-    {kRecurrent, 1, ComponentKind::kPrivateState, 0, 0, 32},
-}};
 const ComponentDescriptor* WindowDescriptor(
     std::span<const ComponentDescriptor> components) {
   const auto it =
@@ -265,8 +264,6 @@ Rows WindowLoadedEnd(const FakeSlot& slot, const ComponentDescriptor& d) {
   return row;
 }
 }  // namespace
-FakeAdapter::FakeAdapter()
-    : components_(kComponents.begin(), kComponents.end()) {}
 FakeAdapter::FakeAdapter(Rows window_rows, Rows ring_rows) : FakeAdapter() {
   if (!window_rows || ring_rows % 4 || ring_rows < window_rows + 3)
     throw std::invalid_argument("fake window ring cannot hold a window");
@@ -279,6 +276,14 @@ Capabilities FakeAdapter::GetCapabilities() const {
           .persistent_encoding = true,
           .in_place_restore = in_place_};
 }
+FakeAdapter::FakeAdapter(Rows rows_per_chunk)
+    : components_{
+          {kTarget, 1, ComponentKind::kAppendRows, sizeof(Token),
+           rows_per_chunk, 0},
+          {kDraft, 1, ComponentKind::kAppendRows, sizeof(Token), rows_per_chunk,
+           0},
+          {kRecurrent, 1, ComponentKind::kPrivateState, 0, 0, 32},
+      } {}
 std::span<const ComponentDescriptor> FakeAdapter::Components() const {
   return components_;
 }
@@ -303,6 +308,9 @@ void FakeAdapter::SetPrefillPassRows(Rows rows) {
   if (!rows)
     throw std::invalid_argument("empty prefill pass");
   prefill_pass_rows_ = rows;
+}
+void FakeAdapter::SetExecutionComplete(Slot& slot, bool complete) {
+  AsSlot(slot).execution_complete = complete;
 }
 std::vector<Rows> FakeAdapter::PlanPrefill(const Slot& slot, Rows first,
                                            Rows end) const {

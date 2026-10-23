@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -51,6 +52,11 @@ struct ModelOptions {
   /// Fixed serving capacity used by the calibrated MTP cost model. Keeping
   /// it independent of scheduler timing preserves seeded request replay.
   std::uint32_t decode_concurrency = 1;
+  /// Static YaRN scaling, derived by the caller (serve, bench) from the
+  /// requested context via `RopeScalingForContext`. Empty leaves the
+  /// artifact's own setting, which is always off: no GGUF metadata key sets
+  /// it today.
+  std::optional<RopeScaling> rope_scaling{};
 };
 
 class Session;
@@ -292,7 +298,8 @@ private:
   bool DraftReplay(std::int32_t next_token, std::vector<std::int32_t>* replay,
                    std::int32_t* hidden_row, std::string* error_msg) const;
   static bool DraftCatchUpBatch(std::span<const AdvanceRequest> requests,
-                                std::string* error_msg);
+                                std::string* error_msg,
+                                std::span<const std::uint8_t> propose = {});
   template<class Request>
   static bool RunIsolatedBatch(std::span<const Request> requests,
                                std::string* error_msg);
@@ -308,7 +315,7 @@ private:
   static void AppendDraft(PendingDecode& pending);
   /// Appends copies within the prepared budget, stopping at EOG when enabled.
   bool AppendLookup(PendingDecode& pending, bool stop_at_eos,
-                    std::size_t minimum = 1);
+                    std::size_t minimum = 1, bool require_resume = false);
   bool FinishDecode(const DecodeRequest& request, const PendingDecode& pending,
                     std::string* error_msg);
 

@@ -162,6 +162,7 @@ public:
   [[nodiscard]] Match Find(std::span<const std::int32_t> committed,
                            std::span<const std::int32_t> tail,
                            std::size_t minimum = kMinMatch,
+                           bool require_resume = false,
                            std::size_t* agreed = nullptr) const {
     const std::size_t context = committed.size() + tail.size();
     const std::size_t available =
@@ -169,7 +170,8 @@ public:
             ? context
             : context - std::min(context, request_start_);
     const std::size_t max_match = std::min(kMaxMatch, available);
-    if (max_match < kKeyTokens) {
+    if (max_match < kKeyTokens ||
+        (require_resume && (resume_ == kNoResume || max_match < minimum))) {
       return {};
     }
     const auto at = [&](std::size_t i) {
@@ -194,10 +196,16 @@ public:
       const bool resumes = resume_ != kNoResume &&
                            end + kResumeBack >= resume_ &&
                            end <= resume_ + kResumeWindow;
+      // Skipping a sampled neural proposal needs both an established copy
+      // and a full match. The short resume gate only appends copies after
+      // a neural proposal has already extended the context.
+      const bool allowed =
+          require_resume
+              ? resumes && length >= minimum
+              : length >= minimum || (resumes && length >= kResumeMinMatch);
       if (end < prev_.size()) {
         candidates[candidate_count++] = {end, length};
-        if (length > best.length &&
-            (length >= minimum || (resumes && length >= kResumeMinMatch))) {
+        if (length > best.length && allowed) {
           best = {end, length};
         }
       }
