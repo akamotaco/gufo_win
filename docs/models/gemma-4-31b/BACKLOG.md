@@ -47,7 +47,7 @@ verification takes 1.72–1.78 × the UD-Q4_K_XL cost at d0.
 | 5 | Global prefill attention: the shared-LDS-arena variant of two heads per wave (the plain variant spilled and was rejected) | Prefill at depth | Hard | ~1.5% at 16K by the PV probe, more at 128K | Low |
 | 6 | AR decode GEMV | Decode AR | Hard | +2–4% | Low |
 | 7 | Measure and validate MTP cycle cost estimates | Decode MTP, 31B and 26B | Medium | Remeasured tables (2026-10-05, -20), byte-scaled Q8 prices and the Q8 replay (2026-10-23) found nothing above 0.2%; the 7.5% oracle gap needs information only verification gives | Very low |
-| 8 | Sampled MTP siblings: done for dense targets (drafts skip top-p, +1.8–3.2% sampled on 31B); a second sibling per depth replays at +0.5–1.5% | Decode MTP, sampled | Hard (executor and kernel sibling layout) | 31B sampled +0.5–1.5% | Medium |
+| 8 | MTP siblings: done for sampled dense targets (drafts skip top-p, +1.8–3.2% on 31B); a second sibling per depth replays at +0.5–1.5% sampled, greedy unmeasured (paused) | Decode MTP | Hard (executor and kernel sibling layout); replay first | 31B sampled +0.5–1.5% | Medium |
 
 ### 1. MTP verification projections
 
@@ -151,7 +151,8 @@ pp2048), and GeGLU now runs in the [gate | up] epilogue on the FP32 sums
 [q | k]. What is left on Q8 is the Q/K post-processing (~77 ms per chunk,
 ~2.2%): folding its per-head norms, rope and KV writes into the QKV GEMM's
 epilogue would save the FP32 round trip, but cannot reproduce the separate
-pass's summation order, so it needs a quality check. The six binary16 MLP
+pass's summation order, so it needs a quality check; on 2026-10-23 it was
+set aside in favour of bit-identical work. The six binary16 MLP
 layers of UD-Q8_K_XL fuse their GeGLU too (−10.6 ms per chunk).
 
 ### 5. Global prefill attention redesign
@@ -228,10 +229,43 @@ a sibling candidate beside each draft (31B UD-Q8_K_XL story +1.8–1.9%,
 code-sampled +2.5–3.2%; EXPERIMENTS.md). The 26B-A4B keeps top-p: its
 verification rows cost too much for siblings to pay. Replay any next
 variant with `tools/gemma4/proposal_replay.py` over a fixed 15-draft
-`--draft-trace` before building it. Candidate 2 (a second sibling per depth)
-replays at +0.5% best fixed and +1.5% per-cycle oracle on 31B UD-Q8_K_XL;
-it needs per-depth sibling slots in the executor and kernels
-(EXPERIMENTS.md). Candidate 3 is untouched. The original analysis:
+`--draft-trace` before building it. Candidate 3 is untouched. The original
+analysis follows the next subsection.
+
+#### Second sibling per depth (paused 2026-10-23)
+
+After a rejected draft and a rejected first sibling, a second sibling drawn
+from q without both is checked against the next residual
+r2 = norm(max(r1 - q1, 0)) (recursive rejection sampling; output still
+follows p exactly). Replay over 1,038 sampled 31B UD-Q8_K_XL cycles: the
+first sibling is accepted after 49.5% of rejected drafts, a second only 6.7%
+(the first already takes most of the mass the target moves away from the
+draft). Best fixed 16.98 → 17.06 tok/s (+0.5%), per-cycle oracle
+19.87 → 20.16 (+1.5%); the first sibling's replay (+1.3/+2.4%) became
++1.8–3.2% live, so expect +0.5–1.5%. Dense targets only (the 26B's siblings
+do not pay).
+
+The single-sibling layout is built into the GPU side:
+
+- Executor segments place sibling i at depth i (position
+  first_position + 1 + i, K/V at a spare key); two per depth need an
+  explicit depth per sibling row.
+- `QkvPost` derives a sibling row's position and spare key from its row
+  index; split attention gives a sibling the chain prefix up to its depth
+  plus its own key (added in a final step). Both would read the depth table,
+  keeping verification rows bit-identical to single-row decode
+  (`gemma4.attention_ops`).
+- `MoveKey` commits whichever sibling was accepted.
+- A second-sibling calibration table and `IncludeSibling` pricing for it.
+- Tests: two-sibling frequency test, attention cases with two siblings per
+  depth, trace and replay support.
+
+Next step before building: greedy could use the drafter's third-ranked
+token as its second sibling, unmeasured because the trace keeps only the
+runner-up. Log the drafter's top three in greedy cycles, replay greedy and
+sampled together, and build the per-depth layout only if the sum clears ~1%.
+
+#### Original analysis
 
 Added 2026-10-23. Sampled decoding is bound by acceptance, not overhead:
 without `--draft-trace` the host adds nothing measurable (decode GPU idle
