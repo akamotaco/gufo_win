@@ -403,15 +403,18 @@ an NPU load.
 
 - Binary16-accumulate WMMA: same rate as FP32 accumulate.
 - A lower-bit drafter: −9% code acceptance, a net loss. No matching row in
-  EXPERIMENTS.md; `feat/gemma-mtp-drafter` proposes a 4-bit drafter
-  quantized from the BF16 file (below), so recheck this before relying on it.
+  EXPERIMENTS.md; the
+  [`feat/gemma-mtp-drafter`](https://github.com/franzmoca/gufo/tree/feat/gemma-mtp-drafter)
+  branch proposes a 4-bit drafter quantized from the BF16 file (below), so
+  recheck this before relying on it.
 - Windowing the drafter's global attention: acceptance falls with the window.
 
 ## Experimental branches (refused or on hold)
 
-Kept off the main line; read their docs before reviving them.
+Kept off the main line on the fork (franzmoca/gufo); read their docs before
+reviving them.
 
-- **`feat/gemma-mtp-exp`: relaxed MTP acceptance (L1), refused.**
+- **[`feat/gemma-mtp-exp`](https://github.com/franzmoca/gufo/tree/feat/gemma-mtp-exp): relaxed MTP acceptance (L1), refused.**
   `--relaxed-acceptance GAP` (off by default) accepts a draft the exact rule
   rejects when it is among the target's top three and at most GAP nats below
   the top. Fast (sampled decode +9–12% prose and essay at 0.5, up to +23% at
@@ -422,7 +425,9 @@ Kept off the main line; read their docs before reviving them.
   min(1, λ·p/q) that keeps the sampler's randomness), gate on the target's
   entropy, check chat and agent workloads, and pass the same 24-case
   thinking eval against exact.
-- **`feat/gemma-quant-shape`: int4 W4A4 prefill sidecar (L7), on hold.**
+- **[`feat/gemma-quant-shape`](https://github.com/franzmoca/gufo/tree/feat/gemma-quant-shape): int4 W4A4 prefill sidecar (L7), on hold.**
+  The study harness is `tools/gemma4/quant_sim/` there; the sidecar GGUF is
+  not in git and is rebuilt with its `sidecar.py`.
   `--prefill-sidecar` loads a BF16-built GPTQ sidecar (14.07 GiB, rotated
   inputs quantized per token and 128 values, iu4 WMMA GEMM) beside
   UD-Q4_K_XL; decode keeps the GGUF bit for bit. pp2048 575 → 881 tok/s at
@@ -430,7 +435,7 @@ Kept off the main line; read their docs before reviving them.
   d0). Quality: decoding after an int4 prefill KL 0.10 against exact rows,
   simulated chat replies 0.027–0.028 against 0.021 for UD-Q4_K_XL alone
   (the branch's QUALITY.md and WEIGHT-FORMATS.md).
-- **`feat/gemma-mtp-drafter`: BF16 drafter study, no change.** BF16 and F16
+- **[`feat/gemma-mtp-drafter`](https://github.com/franzmoca/gufo/tree/feat/gemma-mtp-drafter): BF16 drafter study, no change.** BF16 and F16
   drafters now load there; Q8_0 measured as good as BF16 (2.271 against
   2.275 accepted greedy drafts per cycle, paired), so Q8_0 stays. Its
   follow-up proposal: quantize the drafter's layers and projections to 4 bits
