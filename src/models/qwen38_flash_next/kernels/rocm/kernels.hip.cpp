@@ -7217,7 +7217,12 @@ bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
     const dim3 grid(static_cast<unsigned int>((batch + kBN - 1) / kBN),
                     static_cast<unsigned int>((m + kWideBM - 1) / kWideBM));
     const bool planned = plan != DenseF16Plan::kAuto && batch >= 1024;
-    if (planned && plan == DenseF16Plan::kStagedRowGroups8) {
+    if (planned && plan == DenseF16Plan::kStagedRowGroups8Walk7 &&
+        grid.y % 7 == 0) {
+      hipLaunchKernelGGL((DenseF16GEMMKernel<kWideBM, kBN, 2, 8, 1, 7>), grid,
+                         dim3(kThreads), 0, stream, w, x, out, batch, m, k);
+    } else if (planned && (plan == DenseF16Plan::kStagedRowGroups8 ||
+                           plan == DenseF16Plan::kStagedRowGroups8Walk7)) {
       hipLaunchKernelGGL((DenseF16GEMMKernel<kWideBM, kBN, 2, 8, 1>), grid,
                          dim3(kThreads), 0, stream, w, x, out, batch, m, k);
     } else if (planned) {

@@ -485,14 +485,20 @@ std::optional<GemvFormat> GemvFormatOf(core::GgmlType type) {
   }
 }
 
-/// The binary16 GEMM plan for a Q8_0 projection of the 26B-A4B's width (the
+/// The binary16 GEMM plan for a Q8_0 projection of a Gemma width (the
 /// Flash-Next dispatch is tuned on its own shapes): eight row groups, and the
-/// two-block stage over a long K. Attention output (176 blocks, K = 4096 or
-/// 8192) 2013 -> 1759 us per 2048 rows; dense MLP down (K = 2112) 605 ->
-/// 582 us.
+/// two-block stage over a long K. 26B-A4B attention output (176 blocks, K =
+/// 4096 or 8192) 2013 -> 1759 us per 2048 rows; dense MLP down (K = 2112)
+/// 605 -> 582 us. The 31B's 5376 outputs (21 row tiles) also walk seven row
+/// tiles of a token tile in launch order: per pp2048 chunk, attention output
+/// 473 -> 344 ms and MLP down 824 -> 769 ms. Its other shapes measured
+/// slower with every staged or walking plan.
 qwen38_flash_next::rocm::DenseF16Plan HalfPlan(std::uint32_t m,
                                                std::uint32_t k) {
   using qwen38_flash_next::rocm::DenseF16Plan;
+  if (m == 5376 && k >= 8192) {
+    return DenseF16Plan::kStagedRowGroups8Walk7;
+  }
   if (m != 2816) {
     return DenseF16Plan::kAuto;
   }

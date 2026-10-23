@@ -233,11 +233,14 @@ bool UnquantizedF16Gemm(const void* w, const __half* x, float* out,
 /// Wide-batch tile plans a caller may choose for DenseF16Gemm; kAuto keeps
 /// the Flash-Next dispatch. The others apply from 1024 rows: eight row groups
 /// (each weight fragment reused across the token tiles), optionally with the
-/// two-block stage for long K.
+/// two-block stage for long K, and optionally walking seven row tiles of a
+/// token tile in launch order (row tiles divisible by seven; otherwise the
+/// staged plan).
 enum class DenseF16Plan : std::uint8_t {
   kAuto,
   kRowGroups8,
   kStagedRowGroups8,
+  kStagedRowGroups8Walk7,
 };
 /// input_stride is in half elements; zero means k. Padded rows are supported
 /// by the wide SSM output projection (batch >= 1024, m=2560, k=6144).
