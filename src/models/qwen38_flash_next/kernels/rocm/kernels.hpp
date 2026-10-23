@@ -255,10 +255,12 @@ bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
 /// m a multiple of 64) with its GeGLU epilogue: `out` [batch][m / 2]
 /// binary16 rows of gelu_tanh(gate) * up, the values Gemma's separate GeGLU
 /// pass computes from DenseF16Gemm's FP32 rows. Needs 96 or more rows;
-/// `grouped` as for DenseF16Gemm.
+/// `grouped` as for DenseF16Gemm; `half_weights`: binary16 weights (as
+/// UnquantizedF16Gemm reads them), row order only.
 bool DenseF16GeGluGemm(const void* w, const __half* x, __half* out,
                        std::size_t batch, std::size_t m, std::size_t k,
-                       hipStream_t stream, bool grouped = false);
+                       hipStream_t stream, bool grouped = false,
+                       bool half_weights = false);
 /// BF16 weight rows [m][k] times BF16 activation rows [batch][k] with one
 /// F32 K16 chain per output, in K order for every token: a row's result does
 /// not depend on its position in the batch (BlasLt::Gemm). out is [batch][m].

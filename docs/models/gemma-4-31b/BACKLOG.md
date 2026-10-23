@@ -152,7 +152,7 @@ pp2048), and GeGLU now runs in the [gate | up] epilogue on the FP32 sums
 ~2.2%): folding its per-head norms, rope and KV writes into the QKV GEMM's
 epilogue would save the FP32 round trip, but cannot reproduce the separate
 pass's summation order, so it needs a quality check. The six binary16 MLP
-layers of UD-Q8_K_XL keep a separate GeGLU pass (~12 ms per chunk).
+layers of UD-Q8_K_XL fuse their GeGLU too (−10.6 ms per chunk).
 
 ### 5. Global prefill attention redesign
 

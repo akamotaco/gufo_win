@@ -7031,8 +7031,8 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
   // global store covers 32 consecutive rows of one token: a full 128-byte
   // line (half lines cost a read-modify-write on the fabric).
   if constexpr (kGeGlu) {
-    static_assert(BM == 256 && WM == 4 && !kHcMix && !kSsmConv && !kAttention &&
-                  !kRawWeights);
+    static_assert(BM / WM == 64 && !kHcMix && !kSsmConv && !kAttention &&
+                  !kBf16);
     static_assert(kWaveRowTiles == 4);
     // scratch[token][output] per wave: 16 tokens of the wave's 32 outputs.
     constexpr unsigned kStride = 36;
@@ -7398,24 +7398,33 @@ bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
 
 bool DenseF16GeGluGemm(const void* w, const __half* x, __half* out,
                        std::size_t batch, std::size_t m, std::size_t k,
-                       hipStream_t stream, bool grouped) {
+                       hipStream_t stream, bool grouped, bool half_weights) {
   if (batch < 96 || m == 0 || m % 64 != 0 || k == 0 ||
-      k % (grouped ? 256 : 32) != 0 || out == nullptr) {
+      k % (grouped ? 256 : 32) != 0 || out == nullptr ||
+      (grouped && half_weights)) {
     return false;
   }
-  // DenseF16Gemm's wide plan for the [gate | up] shape; a block computes 128
-  // outputs (the last one fewer).
-  const dim3 grid(static_cast<unsigned int>((batch + 127) / 128),
-                  static_cast<unsigned int>((m / 2 + 127) / 128));
-  const auto launch = [&]<bool kGrouped>() {
-    hipLaunchKernelGGL(
-        (DenseF16GEMMKernel<256, 128, 1, 4, 2, 1, false, false, false, false,
-                            false, false, false, kGrouped, true>),
-        grid, dim3(kThreads), 0, stream, w, x, nullptr, batch, m, k, nullptr,
-        out);
-  };
-  grouped ? launch.template operator()<true>()
-          : launch.template operator()<false>();
+  // DenseF16Gemm's wide plan for the Q8_0 [gate | up] shape (a block
+  // computes 128 outputs, the last one fewer), UnquantizedF16Gemm's for
+  // binary16 weights (64 outputs).
+  const unsigned token_tiles = static_cast<unsigned int>((batch + 127) / 128);
+  const auto launch =
+      [&]<int BM, int BK, int WM, int WN, bool kGrouped, bool kHalf>() {
+        const dim3 grid(token_tiles, static_cast<unsigned int>(
+                                         (m / 2 + BM / 2 - 1) / (BM / 2)));
+        hipLaunchKernelGGL(
+            (DenseF16GEMMKernel<BM, 128, BK, WM, WN, 1, false, false, false,
+                                kHalf, false, false, false, kGrouped, true>),
+            grid, dim3(kThreads), 0, stream, w, x, nullptr, batch, m, k,
+            nullptr, out);
+      };
+  if (half_weights) {
+    launch.template operator()<128, 2, 2, 4, false, true>();
+  } else if (grouped) {
+    launch.template operator()<256, 1, 4, 2, true, false>();
+  } else {
+    launch.template operator()<256, 1, 4, 2, false, false>();
+  }
   return true;
 }
 

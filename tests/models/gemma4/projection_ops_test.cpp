@@ -585,9 +585,9 @@ void CheckGeGluHalfGemm(const Format& f, std::uint32_t m, std::uint32_t k,
                         std::uint32_t batch, std::mt19937& rng) {
   namespace fn = gufo::models::qwen38_flash_next::rocm;
   namespace g4k = gufo::models::gemma4::rocm;
-  const std::string name = "Q8_0 GeGLU prefill " + std::to_string(m) + "x" +
-                           std::to_string(k) + ", " + std::to_string(batch) +
-                           " rows";
+  const std::string name = std::string(f.name) + " GeGLU prefill " +
+                           std::to_string(m) + "x" + std::to_string(k) + ", " +
+                           std::to_string(batch) + " rows";
   const auto w = RandomMatrix(f, m, k, rng);
   std::normal_distribution<float> normal(0.0F, 1.0F);
   std::vector<__half> x(std::size_t{batch} * k);
@@ -609,7 +609,10 @@ void CheckGeGluHalfGemm(const Format& f, std::uint32_t m, std::uint32_t k,
   HIP_CHECK(hipMalloc(&gu, std::size_t{batch} * m * sizeof(float)));
   HIP_CHECK(hipMalloc(&want_d, outputs * sizeof(__half)));
   HIP_CHECK(hipMalloc(&got_d, outputs * sizeof(__half)));
-  Require(fn::DenseF16Gemm(dw, dx, gu, batch, m, k, nullptr), name + " FP32");
+  const bool half = f.type == GgmlType::kF16;
+  Require(half ? fn::UnquantizedF16Gemm(dw, dx, gu, batch, m, k, nullptr)
+               : fn::DenseF16Gemm(dw, dx, gu, batch, m, k, nullptr),
+          name + " FP32");
   g4k::GeGluPacked(gu, nullptr, batch, m / 2, nullptr, want_d);
   std::vector<std::uint16_t> want(outputs), got(outputs);
   HIP_CHECK(hipMemcpy(want.data(), want_d, outputs * 2, hipMemcpyDeviceToHost));
@@ -619,7 +622,7 @@ void CheckGeGluHalfGemm(const Format& f, std::uint32_t m, std::uint32_t k,
     }
     HIP_CHECK(hipMemset(got_d, 0xFF, outputs * 2));
     Require(fn::DenseF16GeGluGemm(grouped ? dg : dw, dx, got_d, batch, m, k,
-                                  nullptr, grouped),
+                                  nullptr, grouped, half),
             name + " rejected");
     HIP_CHECK(hipMemcpy(got.data(), got_d, outputs * 2, hipMemcpyDeviceToHost));
     std::size_t differ = 0;
@@ -862,6 +865,11 @@ int main() {
     CheckGeGluHalfGemm(formats[3], 4096, 4096, 129, rng);
     // The 26B-A4B's dense [gate | up]: 2112 outputs, a partial last block.
     CheckGeGluHalfGemm(formats[3], 4224, 2816, 2048, rng);
+    // UD-Q8_K_XL's binary16 MLP layers: the 31B's [gate | up] and the 26B's
+    // (its BF16 layer, rewritten as binary16).
+    const Format f16{GgmlType::kF16, std::nullopt, 1, 2, {0}, "F16"};
+    CheckGeGluHalfGemm(f16, 43008, 5376, 2048, rng);
+    CheckGeGluHalfGemm(f16, 4224, 2816, 300, rng);
     // The 26B-A4B's K-quant and Q4_0 quants (llama.cpp mixes, QAT): q, k / v,
     // fused [q | k] of a global layer, attention output, [gate | up] and the
     // vocabulary head over 2816-wide rows.
