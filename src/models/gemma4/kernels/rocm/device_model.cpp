@@ -43,6 +43,7 @@ std::optional<ExpertFormat> PrefillFormat(core::GgmlType type) {
 std::size_t GroupedBytes(const DeviceTensor& t) {
   const std::size_t super = t.type == core::GgmlType::kQ5_K   ? 176
                             : t.type == core::GgmlType::kQ6_K ? 210
+                            : t.type == core::GgmlType::kQ8_0 ? 272
                                                               : 144;
   return std::size_t{t.rows} * (t.cols / 256) * super;
 }

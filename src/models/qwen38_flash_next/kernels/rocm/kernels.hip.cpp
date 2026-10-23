@@ -6482,10 +6482,12 @@ struct AttentionProjectionOutput {
 /// accumulate in F32 with no per-block scaling. SSM waves retain their
 /// decoded weight rows in registers instead of staging them in LDS. F16 weights
 /// skip decoding and use the same ordered K16 products. y is [batch][m].
+/// kGrouped (Q8_0): Gemma 4's grouped layout (DenseF16Gemm), the same blocks
+/// at other addresses.
 template<int BM, int BN, int BK, int WM, int WN, int kRowGroup = 1,
          bool kHcMix = false, bool kSsmConv = false, bool kAttention = false,
          bool kHalfWeights = false, bool kBf16 = false, bool kStrided = false,
-         bool kYarn = false>
+         bool kYarn = false, bool kGrouped = false>
 __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     const void* __restrict__ w, const __half* __restrict__ x,
     float* __restrict__ y, std::size_t batch, std::size_t m, std::size_t k,
@@ -6550,8 +6552,13 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
   // SSM thread tid owns row tid and K block p of the stage. Other paths
   // use row (p*256+tid)/BK and K block (p*256+tid)%BK; rows past m read
   // the last row with a zero scale.
+  static_assert(!kGrouped || !(kRawWeights || kHcMix || kRegisterWeights));
   const std::uint8_t* a_ptr[kAPer];
   bool a_live[kAPer];
+  // kGrouped: 128-row groups store 256-value super-blocks (eight blocks) of
+  // all their rows back to back; a_ptr is the row's first super-block and
+  // a_group the bytes between its super-blocks.
+  [[maybe_unused]] std::size_t a_group[kGrouped ? kAPer : 1];
 #pragma unroll
   for (int p = 0; p < kAPer; ++p) {
     const int idx = (p * 256) + tid;
@@ -6560,9 +6567,21 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     // Interleave the four gate streams within the tile, without repacking
     // weights. Each group of four rows produces one mixed hidden element.
     const int weight_row = kHcMix ? (r % 4) * (m_i / 4) + r / 4 : r;
-    a_ptr[p] = w_bytes +
-               static_cast<std::size_t>(a_live[p] ? weight_row : (m_i - 1)) *
-                   static_cast<std::size_t>(num_kb) * (kRawWeights ? 64 : 34);
+    if constexpr (kGrouped) {
+      const auto row =
+          static_cast<std::size_t>(a_live[p] ? weight_row : (m_i - 1));
+      const std::size_t rows = min(
+          std::size_t{128}, static_cast<std::size_t>(m_i) - row / 128 * 128);
+      a_group[p] = rows * 272;
+      a_ptr[p] =
+          w_bytes +
+          (row / 128 * 128 * static_cast<std::size_t>(num_kb / 8) + row % 128) *
+              272;
+    } else {
+      a_ptr[p] = w_bytes +
+                 static_cast<std::size_t>(a_live[p] ? weight_row : (m_i - 1)) *
+                     static_cast<std::size_t>(num_kb) * (kRawWeights ? 64 : 34);
+    }
   }
   const __half* b_ptr[kBPer];
 #pragma unroll
@@ -6591,9 +6610,13 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
         for (int c = 0; c < 4; ++c)
           a_half[p][c] = live ? src[c] : make_uint4(0u, 0u, 0u, 0u);
       } else {
-        const std::uint8_t* blk =
-            a_ptr[p] +
-            (static_cast<std::size_t>(live ? kb : (num_kb - 1)) * 34);
+        const auto kb_live = static_cast<std::size_t>(live ? kb : (num_kb - 1));
+        const std::uint8_t* blk;
+        if constexpr (kGrouped) {
+          blk = a_ptr[p] + kb_live / 8 * a_group[p] + kb_live % 8 * 34;
+        } else {
+          blk = a_ptr[p] + kb_live * 34;
+        }
         a_d[p] = live ? *reinterpret_cast<const std::uint16_t*>(blk) : 0U;
         __builtin_memcpy(&a_codes[p][0], blk + 2, 16);
         __builtin_memcpy(&a_codes[p][1], blk + 18, 16);
@@ -7183,9 +7206,44 @@ bool DenseBf16Gemm(const void* w, const void* x, float* out, std::size_t batch,
 
 bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
                   std::size_t m, std::size_t k, hipStream_t stream,
-                  std::size_t input_stride, DenseF16Plan plan) {
+                  std::size_t input_stride, DenseF16Plan plan, bool grouped) {
   if (m == 0 || k == 0 || batch == 0 || k % 32 != 0) {
     return false;
+  }
+  if (grouped) {
+    // Gemma 4's grouped Q8_0 weights: the same tiles as below for wide
+    // projections, each block read from its grouped address.
+    if (k % 256 != 0 || m <= 512 || (input_stride != 0 && input_stride != k))
+      return false;
+    if (batch < 96) {
+      hipLaunchKernelGGL(
+          (DenseF16GEMMKernel<128, 64, 4, 4, 2, 1, false, false, false, false,
+                              false, false, false, true>),
+          dim3((batch + 63) / 64, (m + 127) / 128), dim3(kThreads), 0, stream,
+          w, x, out, batch, m, k);
+      return true;
+    }
+    const dim3 grid(static_cast<unsigned int>((batch + 127) / 128),
+                    static_cast<unsigned int>((m + 255) / 256));
+    const bool planned = plan != DenseF16Plan::kAuto && batch >= 1024;
+    const auto launch = [&]<int BK, int WM, int WN, int kRowGroup>() {
+      hipLaunchKernelGGL(
+          (DenseF16GEMMKernel<256, 128, BK, WM, WN, kRowGroup, false, false,
+                              false, false, false, false, false, true>),
+          grid, dim3(kThreads), 0, stream, w, x, out, batch, m, k);
+    };
+    if (planned && plan == DenseF16Plan::kStagedRowGroups8Walk7 &&
+        grid.y % 7 == 0) {
+      launch.template operator()<2, 8, 1, 7>();
+    } else if (planned && (plan == DenseF16Plan::kStagedRowGroups8 ||
+                           plan == DenseF16Plan::kStagedRowGroups8Walk7)) {
+      launch.template operator()<2, 8, 1, 1>();
+    } else if (planned) {
+      launch.template operator()<1, 8, 1, 1>();
+    } else {
+      launch.template operator()<1, 4, 2, 1>();
+    }
+    return true;
   }
   if (input_stride != 0 && input_stride != k) {
     if (batch < 1024 || m != 2560 || k != 6144 || input_stride < k ||

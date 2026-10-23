@@ -12,12 +12,12 @@ namespace gufo::models::gemma4::rocm {
 
 /// Width-invariant decode and verification projections on the matrix cores:
 /// Y[t][m] = W X[t] for 1 to kWmmaGemvRows FP32 activation rows and Q4_K,
-/// Q5_K, Q6_K or Q4_0 weights.
+/// Q5_K, Q6_K, Q4_0 or Q8_0 weights.
 ///
 /// Each 32-value block of an activation row is scaled by a power of two (its
 /// maximum lands in [2^13, 2^14)) and split into binary16 hi + lo parts
-/// (x = hi + lo to about 2^-22). The weight codes (Q6_K: q - 32, Q4_0: q - 8)
-/// are exact binary16 values, so per weight group (32 values; Q6_K 16)
+/// (x = hi + lo to about 2^-22). The weight codes (Q6_K: q - 32, Q4_0: q - 8,
+/// Q8_0: q) are exact binary16 values, so per weight group (32 values; Q6_K 16)
 /// S = codes . hi + codes . lo accumulates in FP32 WMMAs, each output
 /// independent of the other tile rows and columns, and the row's FP32 scale
 /// (and Q4_K / Q5_K minimum) applies on the vector units:
@@ -49,9 +49,9 @@ struct WmmaPackOut {
 /// reductions up to `max_k`.
 [[nodiscard]] std::size_t WmmaGemvScratchBytes(std::uint32_t max_k) noexcept;
 
-/// Grouped weight layout: the same 256-value super-blocks as GGUF (Q4_0:
-/// eight blocks), reordered so a 128-row group stores super-block s of all
-/// its rows back to back, then s + 1; group g starts at row 128 g's GGUF
+/// Grouped weight layout: the same 256-value super-blocks as GGUF (Q4_0 and
+/// Q8_0: eight blocks), reordered so a 128-row group stores super-block s of
+/// all its rows back to back, then s + 1; group g starts at row 128 g's GGUF
 /// offset, and the last group is as tall as its rows. The verification walk
 /// (eight waves of 16 rows in lockstep over the super-blocks) then reads
 /// one contiguous stream per block instead of one per row: 210 -> 220-230
