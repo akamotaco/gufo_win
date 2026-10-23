@@ -595,9 +595,11 @@ void CheckGeGluHalfGemm(const Format& f, std::uint32_t m, std::uint32_t k,
     v = __float2half(normal(rng));
   }
   auto* dw = Device(w.data(), w.size());
+  // MTP targets group the weights WMMA verification reads.
+  const bool groups = g4k::GroupedLayoutSupports(f.type, m, k);
   std::uint8_t* dg = nullptr;
   HIP_CHECK(hipMalloc(&dg, w.size()));
-  Require(g4k::GroupWeights(f.type, dw, dg, m, k, nullptr),
+  Require(!groups || g4k::GroupWeights(f.type, dw, dg, m, k, nullptr),
           name + ": grouping rejected");
   auto* dx = Device(x.data(), x.size());
   float* gu = nullptr;
@@ -612,6 +614,9 @@ void CheckGeGluHalfGemm(const Format& f, std::uint32_t m, std::uint32_t k,
   std::vector<std::uint16_t> want(outputs), got(outputs);
   HIP_CHECK(hipMemcpy(want.data(), want_d, outputs * 2, hipMemcpyDeviceToHost));
   for (const bool grouped : {false, true}) {
+    if (grouped && !groups) {
+      continue;
+    }
     HIP_CHECK(hipMemset(got_d, 0xFF, outputs * 2));
     Require(fn::DenseF16GeGluGemm(grouped ? dg : dw, dx, got_d, batch, m, k,
                                   nullptr, grouped),
@@ -855,6 +860,8 @@ int main() {
     CheckGeGluHalfGemm(formats[3], 43008, 5376, 2048, rng);
     CheckGeGluHalfGemm(formats[3], 43008, 5376, 300, rng);
     CheckGeGluHalfGemm(formats[3], 4096, 4096, 129, rng);
+    // The 26B-A4B's dense [gate | up]: 2112 outputs, a partial last block.
+    CheckGeGluHalfGemm(formats[3], 4224, 2816, 2048, rng);
     // The 26B-A4B's K-quant and Q4_0 quants (llama.cpp mixes, QAT): q, k / v,
     // fused [q | k] of a global layer, attention output, [gate | up] and the
     // vocabulary head over 2816-wide rows.

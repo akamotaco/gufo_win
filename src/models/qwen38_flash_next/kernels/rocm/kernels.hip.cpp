@@ -6593,6 +6593,7 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
       const int l = r - r_block;
       const int out = r_block / 2 + (l / 64) * 32 + l % 32;
       weight_row = l % 64 < 32 ? out : out + m_i / 2;
+      a_live[p] = idx < kAUnits && out < m_i / 2;
     }
     if constexpr (kGrouped) {
       const auto row =
@@ -7040,6 +7041,10 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     const std::size_t half_m = m / 2;
     const std::size_t r0 =
         static_cast<std::size_t>(r_block / 2) + wave_row * 32;
+    // m / 2 is a multiple of 32: a wave's outputs are all live or none.
+    if (r0 >= half_m) {
+      return;
+    }
 #pragma unroll
     for (int j = 0; j < kWaveTokTiles; ++j) {
 #pragma unroll
@@ -7394,13 +7399,14 @@ bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
 bool DenseF16GeGluGemm(const void* w, const __half* x, __half* out,
                        std::size_t batch, std::size_t m, std::size_t k,
                        hipStream_t stream, bool grouped) {
-  if (batch < 96 || m == 0 || m % 256 != 0 || k == 0 ||
+  if (batch < 96 || m == 0 || m % 64 != 0 || k == 0 ||
       k % (grouped ? 256 : 32) != 0 || out == nullptr) {
     return false;
   }
-  // DenseF16Gemm's wide plan for the [gate | up] shape.
+  // DenseF16Gemm's wide plan for the [gate | up] shape; a block computes 128
+  // outputs (the last one fewer).
   const dim3 grid(static_cast<unsigned int>((batch + 127) / 128),
-                  static_cast<unsigned int>(m / 256));
+                  static_cast<unsigned int>((m / 2 + 127) / 128));
   const auto launch = [&]<bool kGrouped>() {
     hipLaunchKernelGGL(
         (DenseF16GEMMKernel<256, 128, 1, 4, 2, 1, false, false, false, false,

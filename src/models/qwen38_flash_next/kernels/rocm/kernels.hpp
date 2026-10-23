@@ -252,7 +252,7 @@ bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
                   DenseF16Plan plan = DenseF16Plan::kAuto,
                   bool grouped = false);
 /// Gemma 4's fused Q8_0 [gate | up] (m rows: gate rows, then their up rows;
-/// m a multiple of 256) with its GeGLU epilogue: `out` [batch][m / 2]
+/// m a multiple of 64) with its GeGLU epilogue: `out` [batch][m / 2]
 /// binary16 rows of gelu_tanh(gate) * up, the values Gemma's separate GeGLU
 /// pass computes from DenseF16Gemm's FP32 rows. Needs 96 or more rows;
 /// `grouped` as for DenseF16Gemm.
