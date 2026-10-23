@@ -1,11 +1,12 @@
 # Gemma 4 performance backlog
 
 Open performance work for the Gemma 4 engine (31B, 31B QAT, 26B-A4B), as of
-2026-10-20 on branch `feat/gemma-mtp`. Measured results, including every
+2026-10-23 on branch `feat/gemma-q8-perf`. Measured results, including every
 rejected attempt, are in [EXPERIMENTS.md](EXPERIMENTS.md) and the
 [26B log](../gemma-4-26b-a4b/EXPERIMENTS.md); read the matching rows before
-retrying anything listed here. Impact figures are estimates on 31B
-UD-Q4_K_XL tok/s unless stated.
+retrying anything listed here. Work kept on experimental branches is listed
+under [Experimental branches](#experimental-branches-refused-or-on-hold).
+Impact figures are estimates on 31B UD-Q4_K_XL tok/s unless stated.
 
 ## Where the time goes
 
@@ -29,17 +30,23 @@ the measured 239 GB/s), ~0.6 ms of attention at d0 growing to ~36 ms at 128K
 gaps. MTP verify cycles at d0 (~101 ms GPU): target verification projections
 ~93%, drafter ~3–5%, attention ~2%.
 
+UD-Q8_K_XL (2026-10-23): a pp2048 chunk at d0 takes ~3.37 s, the projections
+at 37–44 TFLOP/s (66–79% of the ceiling; Q8_0 decodes to binary16 more
+cheaply than the K-quants, so Q8 prefill runs ~6% ahead of Q4). AR decode
+reads ~35 GB per token at ~229 GB/s (~96% of the measured bandwidth); MTP
+verification takes 1.72–1.78 × the UD-Q4_K_XL cost at d0.
+
 ## Open items
 
 | # | Item | Area | Effort | Est. impact | Confidence |
 | ---: | --- | --- | --- | --- | --- |
-| 1 | MTP verification projections: close the remaining gap of the WMMA verification GEMV to the AR GEMV (after the 2026-10-21 grouped layout) | Decode MTP, all depths | Very hard | MTP +0–2% | Low |
+| 1 | MTP verification projections: close the remaining gap of the WMMA verification GEMV to the AR GEMV (after the 2026-10-21 grouped layout; Q8_0 joined 2026-10-23) | Decode MTP, all depths | Very hard | MTP +0–2% | Low |
 | 2 | 8-bit KV cache | Decode at depth, memory | Very hard, quality risk | AR +5% at 32K, +14% at 128K; MTP more; about half the KV memory | Speed medium, quality unknown |
 | 3 | MTP verification attention at five or more rows | Decode MTP at depth | Hard | +2–5% at 32K, more at 128K | Low |
-| 4 | Prefill projections past ~70% of the WMMA ceiling | Prefill, all depths | Hard | +2–5% | Low |
-| 5 | Global prefill attention redesign: two heads per wave over one shared LDS arena | Prefill at depth | Hard | +1.5–3% at 32K, +3–6% at 128K | Medium |
+| 4 | Prefill projections past ~70% of the WMMA ceiling; Q/K post-processing in the QKV GEMM epilogue | Prefill, all depths | Hard | +2–5%; the epilogue ≤2.2% (not bit-identical) | Low |
+| 5 | Global prefill attention: the shared-LDS-arena variant of two heads per wave (the plain variant spilled and was rejected) | Prefill at depth | Hard | ~1.5% at 16K by the PV probe, more at 128K | Low |
 | 6 | AR decode GEMV | Decode AR | Hard | +2–4% | Low |
-| 7 | Measure and validate MTP cycle cost estimates | Decode MTP, 31B and 26B | Medium | Bounded by the oracle replay below; the 2026-10-05 remeasured tables measured neutral | Low |
+| 7 | Measure and validate MTP cycle cost estimates | Decode MTP, 31B and 26B | Medium | Bounded by the oracle replay below; remeasured tables (2026-10-05, -20) and byte-scaled Q8 prices (2026-10-23) did not gain | Low |
 | 8 | Sampled MTP siblings: proposals that keep a sibling available | Decode MTP, sampled | Medium (replay first), hard to ship | Sampled +3–4% before row costs and chain-acceptance effects | Low |
 
 ### 1. MTP verification projections
@@ -70,6 +77,14 @@ to back lift the walk to 220–230 GB/s, the kernel 0–9% per shape, MTP tg128
 so it still equals decode bit for bit (`gemma4.projection_ops`); the slab
 rewrite showed the accumulation may be restructured (slab partials in slab
 order) while keeping width invariance and the FP64 bound.
+
+Tried since (EXPERIMENTS.md): a fused q/k verification walk (rejected,
+2026-10-21: fewer, taller blocks fill the WGPs worse, MTP −0.6%) and split-K
+on the short-row shapes (rejected: the reduce pass and launches cost more).
+2026-10-23: Q8_0 runs on the WMMA kernel from 2048 outputs and 4096 inputs,
+grouped like the K-quants (31B UD-Q8_K_XL code-edit and repetitive +22–23%,
+two users +10%); shorter Q8_0 shapes stay on the shared small-batch kernel,
+which reads them faster at one to three rows.
 
 ### 2. 8-bit KV cache
 
@@ -128,9 +143,26 @@ regions and a register prefetch all still lose 7–55%, and their ceiling over
 compact is ~1–1.5% of the projections (EXPERIMENTS.md). On the 26B-A4B the
 modes copy the K-quant expert [gate | up] weights (+1.0% pp2048, +9.0 GiB).
 
+Q8_0 (2026-10-23): Flash-Next's binary16 GEMM serves it. A per-shape plan
+sweep gave the 31B's 5376-output projections a seven-tile walk (+4.4%
+pp2048), and GeGLU now runs in the [gate | up] epilogue on the FP32 sums
+(+2.8%, bit-identical), which made the `decoded` Q8_0 copies pointless
+(dropped). Every other plan was slower on [gate | up], QKV and global
+[q | k]. What is left on Q8 is the Q/K post-processing (~77 ms per chunk,
+~2.2%): folding its per-head norms, rope and KV writes into the QKV GEMM's
+epilogue would save the FP32 round trip, but cannot reproduce the separate
+pass's summation order, so it needs a quality check. The six binary16 MLP
+layers of UD-Q8_K_XL keep a separate GeGLU pass (~12 ms per chunk).
+
 ### 5. Global prefill attention redesign
 
-`attention_wmma.hip.cpp`. After today's rows the tile loop issues ~350
+Mostly explored. Two heads per wave over 128 dims was built and rejected
+(2026-10-05: 256 VGPRs with spills, pp2048 at d16K 437 → 354 tok/s); the
+64-dim variant with one shared LDS arena was gated by a PV probe at ~9% of
+the layer (≈1.5% of pp2048 at d16K) and not pursued; the 2026-10-17 layout
+sweep changed nothing (EXPERIMENTS.md). Only the arena variant remains.
+
+`attention_wmma.hip.cpp`. After the 2026-10-17 rows the tile loop issues ~350
 instructions per wave and 16-key tile, 16 of them WMMAs; VALU and WMMA share
 the SIMD issue, so cutting instructions maps almost one to one to time. Probes
 cap the obvious redesign: loading every K/Vᵀ fragment once per two products
@@ -168,9 +200,11 @@ Next steps, in order:
    throughput unchanged (EXPERIMENTS.md). Other target quantizations (Q8,
    QAT) and drafters keep these tables. Pricing by the loaded files' bytes
    was tried 2026-10-23 and rejected: accurate UD-Q8_K_XL prices made the
-   policy draft more on prose for no more accepted tokens (−1.2%), which
-   points at optimistic acceptance estimates for late drafts (EXPERIMENTS.md;
-   patch in `artifacts/verify-price-scale-2026-10-23.patch`).
+   policy draft more on prose for no more accepted tokens (−1.2%). The cause
+   is not established: the 2026-10-20 study found the reach-weighted
+   estimates accurate, so replay the decisions under both prices (step 2)
+   before trying again (EXPERIMENTS.md; patch in
+   `artifacts/verify-price-scale-2026-10-23.patch`).
 2. Bound the gain first: replay labelled chains (`gemma4_draft_replay
    simulate` over a `--draft-policy fixed --draft-tokens 15` trace) with each
    cycle's measured costs (oracle prices) and with tables perturbed by ±2/5/10%;
@@ -238,9 +272,11 @@ Candidates, all exact (rejection sampling stays exact for any q):
 
 Next steps, in order:
 
-1. Bound it offline, with no engine change: extend the cycle trace to log
-   each verified row's target candidates and the drafter's logits, then
-   extend `gemma4_draft_replay` to simulate expected tokens per cycle and
+1. Bound it offline, with no engine change. The 2026-10-20 study's replay
+   already labels sibling hits (`VerifyWithSibling`) and found siblings worth
+   1.8% (31B sampled) as they are. Extend the cycle trace to log each
+   verified row's target candidates and the drafter's logits, then extend
+   `gemma4_draft_replay` to simulate expected tokens per cycle and
    per millisecond for each proposal choice above, at the measured row
    costs. Stop if the best choice gains under ~1%.
 2. Build only the winner; check seeded output distributions against the
@@ -258,16 +294,20 @@ estimates, not measurements.
 
 | # | Lever | Speeds up | Est. gain | Quality risk | Effort |
 | ---: | --- | --- | --- | --- | --- |
-| L1 | Relaxed MTP acceptance | MTP decode | +15–30% prose, +5–10% code | Low–medium: output no longer equals greedy AR | Low–medium |
+| L1 | Relaxed MTP acceptance: built, refused (see below) | MTP decode | Measured +5–23% sampled | High: sampled reasoning loops | Done on a branch |
 | L2 | 8-bit KV cache (open item 2) | Decode at depth, KV memory | AR +5% at 32K, +14% at 128K | Low | High |
 | L3 | Target output-head shortlist | AR and MTP decode | ~+3% | Medium: tokens outside the list become impossible | Low–medium |
-| L4 | Binary16 dot products in decode and verification attention | MTP verification at five or more rows | +2–4% at 32K, +5–8% at 128K | Very low | Medium |
+| L4 | Binary16 dot products in decode and verification attention | MTP verification at five or more rows | +2–4% at 32K, +5–8% at 128K | Low: beyond the default decode KL limit | Medium |
 | L5 | Binary16 prefill intermediates | Prefill | +1–1.5% | Very low | Low–medium |
 | L6 | Sparse long-context prefill attention | Prefill at depth | 1.5–2× at 128K, +10–15% at 32K | Medium–high | High (research) |
-| L7 | W4A4 prefill projections (INT4 WMMA) | Prefill, all depths | +20–30% | Medium–high | Very high |
+| L7 | W4A4 prefill projections (INT4 WMMA): prototyped, on hold (see below) | Prefill, all depths | Measured +53% pp2048 d0, +35% d32K | Medium: decode after an int4 prefill KL 0.10 | Done on a branch |
 | L8 | NPU prefill offload | Prefill | 0–10% | Low–medium | Very high |
 
 ### L1. Relaxed MTP acceptance
+
+Built and refused 2026-10-20; see
+[Experimental branches](#experimental-branches-refused-or-on-hold). The
+original proposal:
 
 Greedy verification accepts a draft only when it equals the target's argmax
 (`Session::FinishCycle`, `engine.cpp`); on prose at ~31K depth 42% of drafts
@@ -301,7 +341,9 @@ non-English text and rare tokens.
 
 Round Q to binary16 and score with `v_dot2_f32_f16` (prefill attention already
 uses binary16 Q). Verification and single-row decode keep one arithmetic, so
-their bit-identity contract holds; only today's FP32 outputs change.
+their bit-identity contract holds; only today's FP32 outputs change. Assessed
+earlier and not adopted as a default: it moves decode beyond the declared
+decode KL limit (EXPERIMENTS.md), so only an opt-in remains.
 
 ### L5. Binary16 prefill intermediates
 
@@ -315,6 +357,10 @@ blocks chosen by a cheap block score. Research grade; needle and long-context
 suites decide.
 
 ### L7. W4A4 prefill projections (INT4 WMMA)
+
+Prototyped 2026-10-23 and on hold; see
+[Experimental branches](#experimental-branches-refused-or-on-hold). The
+original proposal:
 
 hipfire runs dense and MoE prefill through `v_wmma_i32_16x16x16_iu4`: weight
 nibbles feed the WMMA directly and activations are quantized to int4 per 128
@@ -356,8 +402,40 @@ an NPU load.
 ### Ruled out
 
 - Binary16-accumulate WMMA: same rate as FP32 accumulate.
-- A lower-bit drafter: −9% code acceptance, a net loss (EXPERIMENTS.md).
+- A lower-bit drafter: −9% code acceptance, a net loss. No matching row in
+  EXPERIMENTS.md; `feat/gemma-mtp-drafter` proposes a 4-bit drafter
+  quantized from the BF16 file (below), so recheck this before relying on it.
 - Windowing the drafter's global attention: acceptance falls with the window.
+
+## Experimental branches (refused or on hold)
+
+Kept off the main line; read their docs before reviving them.
+
+- **`feat/gemma-mtp-exp`: relaxed MTP acceptance (L1), refused.**
+  `--relaxed-acceptance GAP` (off by default) accepts a draft the exact rule
+  rejects when it is among the target's top three and at most GAP nats below
+  the top. Fast (sampled decode +9–12% prose and essay at 0.5, up to +23% at
+  2), but sampled 26B reasoning loops to the length cap (DS4 first 24 cases:
+  21 exact, 9 at 0.5, 7 at 1, 1 at 2) and greedy text leaves exact decoding
+  within ~50 words (`artifacts/mtp-relaxed-acceptance-2026-10-20.json` on the
+  branch). Before revisiting: accept with a probability (a relaxed ratio
+  min(1, λ·p/q) that keeps the sampler's randomness), gate on the target's
+  entropy, check chat and agent workloads, and pass the same 24-case
+  thinking eval against exact.
+- **`feat/gemma-quant-shape`: int4 W4A4 prefill sidecar (L7), on hold.**
+  `--prefill-sidecar` loads a BF16-built GPTQ sidecar (14.07 GiB, rotated
+  inputs quantized per token and 128 values, iu4 WMMA GEMM) beside
+  UD-Q4_K_XL; decode keeps the GGUF bit for bit. pp2048 575 → 881 tok/s at
+  d0, 456 → 648 at 16K, 393 → 531 at 32K (`--prefill-weights decoded`: 616 at
+  d0). Quality: decoding after an int4 prefill KL 0.10 against exact rows,
+  simulated chat replies 0.027–0.028 against 0.021 for UD-Q4_K_XL alone
+  (the branch's QUALITY.md and WEIGHT-FORMATS.md).
+- **`feat/gemma-mtp-drafter`: BF16 drafter study, no change.** BF16 and F16
+  drafters now load there; Q8_0 measured as good as BF16 (2.271 against
+  2.275 accepted greedy drafts per cycle, paired), so Q8_0 stays. Its
+  follow-up proposal: quantize the drafter's layers and projections to 4 bits
+  from the BF16 file and repeat the fixed-chain acceptance study (~200 MB
+  per draft step; +1–2% MTP decode on 31B, more on 26B).
 
 ## Notes from hipfire (2026-10-17)
 
@@ -392,8 +470,17 @@ an NPU load.
 
 ## Measured, no change (do not retry without a new idea)
 
-- Fusing the prefill norms and Q/K post-processing: they move 154–230 MB per
-  layer at 185–203 GB/s against a 210 GB/s read-plus-write ceiling.
+- Fusing the prefill norms and Q/K post-processing into one another: they
+  move 154–230 MB per layer at 185–203 GB/s against a 210 GB/s
+  read-plus-write ceiling. (Folding Q/K post-processing into the QKV GEMM's
+  epilogue is a different idea; see open item 4.)
+- Verification prices scaled by the target's bytes (2026-10-23, open item 7):
+  UD-Q8_K_XL prose −1.2%.
+- Sampled MTP draft length (2026-10-23): fixed 3 or 5 drafts and the
+  confidence policy all lose to the calibrated policy on story and
+  code-sampled; the host adds nothing measurable without a trace.
+- Q8_0 `--prefill-weights decoded` copies (2026-10-23): slower than the
+  fused-GeGLU default; dropped.
 - Decode launch gaps through HIP graphs: a 733-kernel dependent chain takes
   7.9 µs per kernel launched on a stream and the same replayed as a graph; the
   gaps are GPU-side. A removed launch saves ~1.4 µs.
@@ -402,11 +489,12 @@ an NPU load.
 
 ## Housekeeping
 
-- Model card refresh: BENCHMARKS.md is from 2026-10-07 and holds none of the
-  2026-10-17 gains; one full sweep (the `benchmark-model` skill) at the end of
-  the round.
-- The branch is pushed to the `fork` remote (franzmoca/gufo) with no pull
-  request yet; its title follows [the release policy](../../RELEASING.md).
+- Model card refresh: BENCHMARKS.md's Gufo columns are from 2026-10-17 and
+  hold none of the 2026-10-21 MTP or 2026-10-23 Q8 gains (31B UD-Q8_K_XL
+  pp2048 557 → ~610, two-user MTP +10–23%); one full sweep (the
+  `benchmark-model` skill) at the end of the round.
+- `feat/gemma-q8-perf` is local; fork pull requests (#1–#7 so far) go to
+  `feat/gemma` and are titled per [the release policy](../../RELEASING.md).
 
 ## Methods that worked
 
