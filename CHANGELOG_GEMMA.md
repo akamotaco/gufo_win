@@ -16,6 +16,10 @@ Upstream Gufo's changes are in [CHANGELOG.md](CHANGELOG.md).
   +1.0–1.1%. Results are bit-identical.
 - `--prefill-weights decoded` no longer copies Q8_0 weights: with GeGLU fused
   in the default path, the copies were slower and cost 32.4 GiB.
+- Sampled MTP on the dense 31B draws its drafts without the request's top-p,
+  so the drafter's runner-up can be verified beside each draft; output still
+  follows the request's sampling exactly. 31B UD-Q8_K_XL sampled decode is
+  +1.8–3.2%; the 26B-A4B keeps top-p.
 
 ## 2026-10-23: Faster sampled MTP verification ([#7](https://github.com/franzmoca/gufo/pull/7))
 

@@ -78,6 +78,21 @@ struct CycleRecord {
   std::vector<std::int32_t> runner_ups;
   std::vector<float> runner_up_signals;
   std::vector<float> runner_up_acceptance;
+  /// Sampled cycles, for offline proposal studies: the request sampler's
+  /// temperature, top-k and top-p; per drafter proposal its top-64
+  /// candidates (ids and raw logits); per verified MTP draft the proposal q
+  /// it was drawn from and the target distribution p of its row (as for
+  /// row_acceptance; ids with their probabilities).
+  struct Sparse {
+    std::vector<std::int32_t> ids;
+    std::vector<float> values;
+  };
+  float temperature{0.0F};
+  std::int32_t top_k{0};
+  float top_p{1.0F};
+  std::vector<Sparse> draft_candidates;
+  std::vector<Sparse> proposal_dist;
+  std::vector<Sparse> target_dist;
   /// What the calibrated policy learned: each judged MTP draft's outcome
   /// (signals[i] with observed[i]) and the sibling's, when one was judged.
   std::vector<bool> observed;

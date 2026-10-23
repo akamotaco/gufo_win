@@ -47,7 +47,7 @@ verification takes 1.72–1.78 × the UD-Q4_K_XL cost at d0.
 | 5 | Global prefill attention: the shared-LDS-arena variant of two heads per wave (the plain variant spilled and was rejected) | Prefill at depth | Hard | ~1.5% at 16K by the PV probe, more at 128K | Low |
 | 6 | AR decode GEMV | Decode AR | Hard | +2–4% | Low |
 | 7 | Measure and validate MTP cycle cost estimates | Decode MTP, 31B and 26B | Medium | Remeasured tables (2026-10-05, -20), byte-scaled Q8 prices and the Q8 replay (2026-10-23) found nothing above 0.2%; the 7.5% oracle gap needs information only verification gives | Very low |
-| 8 | Sampled MTP siblings: proposals that keep a sibling available | Decode MTP, sampled | Medium (replay first), hard to ship | Sampled +3–4% before row costs and chain-acceptance effects | Low |
+| 8 | Sampled MTP siblings: done for dense targets (drafts skip top-p, +1.8–3.2% sampled on 31B); several siblings per depth remain | Decode MTP, sampled | Medium | Unknown beyond the shipped step | Low |
 
 ### 1. MTP verification projections
 
@@ -222,6 +222,14 @@ emitted token (or p99 alongside tokens per cycle), not as one maximum: a
 longer cycle that emits more tokens is not a pause regression.
 
 ### 8. Sampled MTP siblings
+
+Done 2026-10-23 for the dense family: sampled drafts skip top-p, which keeps
+a sibling candidate beside each draft (31B UD-Q8_K_XL story +1.8–1.9%,
+code-sampled +2.5–3.2%; EXPERIMENTS.md). The 26B-A4B keeps top-p: its
+verification rows cost too much for siblings to pay. Replay any next
+variant with `tools/gemma4/proposal_replay.py` over a fixed 15-draft
+`--draft-trace` before building it. What remains is candidate 2 below
+(several siblings per depth) and candidate 3. The original analysis:
 
 Added 2026-10-23. Sampled decoding is bound by acceptance, not overhead:
 without `--draft-trace` the host adds nothing measurable (decode GPU idle
