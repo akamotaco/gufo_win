@@ -46,7 +46,7 @@ verification takes 1.72–1.78 × the UD-Q4_K_XL cost at d0.
 | 4 | Prefill projections past ~70% of the WMMA ceiling; Q/K post-processing in the QKV GEMM epilogue | Prefill, all depths | Hard | +2–5%; the epilogue ≤2.2% (not bit-identical) | Low |
 | 5 | Global prefill attention: the shared-LDS-arena variant of two heads per wave (the plain variant spilled and was rejected) | Prefill at depth | Hard | ~1.5% at 16K by the PV probe, more at 128K | Low |
 | 6 | AR decode GEMV | Decode AR | Hard | +2–4% | Low |
-| 7 | Measure and validate MTP cycle cost estimates | Decode MTP, 31B and 26B | Medium | Bounded by the oracle replay below; remeasured tables (2026-10-05, -20) and byte-scaled Q8 prices (2026-10-23) did not gain | Low |
+| 7 | Measure and validate MTP cycle cost estimates | Decode MTP, 31B and 26B | Medium | Remeasured tables (2026-10-05, -20), byte-scaled Q8 prices and the Q8 replay (2026-10-23) found nothing above 0.2%; the 7.5% oracle gap needs information only verification gives | Very low |
 | 8 | Sampled MTP siblings: proposals that keep a sibling available | Decode MTP, sampled | Medium (replay first), hard to ship | Sampled +3–4% before row costs and chain-acceptance effects | Low |
 
 ### 1. MTP verification projections
@@ -200,10 +200,11 @@ Next steps, in order:
    throughput unchanged (EXPERIMENTS.md). Other target quantizations (Q8,
    QAT) and drafters keep these tables. Pricing by the loaded files' bytes
    was tried 2026-10-23 and rejected: accurate UD-Q8_K_XL prices made the
-   policy draft more on prose for no more accepted tokens (−1.2%). The cause
-   is not established: the 2026-10-20 study found the reach-weighted
-   estimates accurate, so replay the decisions under both prices (step 2)
-   before trying again (EXPERIMENTS.md; patch in
+   policy draft more on prose for no more accepted tokens (−1.2%). The replay
+   agrees (−0.3% on 1,954 Q8 chains scored at the measured costs): on those
+   chains the calibration overestimates positions 2–6 by 0.03–0.05, and
+   cheaper prices let those drafts through. No price set or replay estimator
+   beats the shipped policy by more than 0.2% (EXPERIMENTS.md; patch in
    `artifacts/verify-price-scale-2026-10-23.patch`).
 2. Bound the gain first: replay labelled chains (`gemma4_draft_replay
    simulate` over a `--draft-policy fixed --draft-tokens 15` trace) with each
