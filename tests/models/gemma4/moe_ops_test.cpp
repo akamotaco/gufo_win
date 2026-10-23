@@ -1194,6 +1194,8 @@ int main() {
     for (const Format& f : {q4k, q5k, q6k, q80}) {
       CheckDensePrefill(f, 2000, kHidden, rng);
     }
+    // Q6_K from 4096 rows takes 144-token tiles.
+    CheckDensePrefill(q6k, 4100, kHidden, rng);
     for (const Format& f : {q40, q50}) {
       CheckDenseBlockwise(f, 2000, kHidden, rng);
       // The dense down projection [2816, 2112].
