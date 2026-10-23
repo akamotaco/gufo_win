@@ -451,9 +451,13 @@ private:
   /// Brings the draft vocabulary up to tokens_ (loading new table rows) and
   /// picks the head for a chain after `anchor`.
   rocm::DraftHead PrepareDraftHead(TokenId anchor);
+  struct VerifyCandidates;
+  /// Accepts from the verification rows' argmax ids (greedy), candidates
+  /// (sampled; `logits` may then be empty) or full logits.
   void FinishCycle(Cycle& cycle, std::span<const float> logits,
                    std::span<const std::uint32_t> argmax,
-                   std::uint32_t first_hidden_row);
+                   std::uint32_t first_hidden_row,
+                   const VerifyCandidates* candidates = nullptr);
   /// Records each chain row's acceptance probability and the greedy
   /// runner-up hits in the cycle's trace, before verification.
   void TraceRows(Cycle& cycle, std::span<const float> logits,
@@ -475,6 +479,8 @@ private:
   /// cache_->logits holds them (EnsureLogits copies them back).
   mutable std::vector<float> logits_;
   mutable bool logits_on_device_{false};
+  /// FinishCycle's scratch for one row's sampling candidates.
+  std::vector<sampling::LogitCandidate> candidate_row_;
   /// Brings logits_ up to date; the caller holds the model mutex.
   void EnsureLogits() const;
   bool valid_{false};

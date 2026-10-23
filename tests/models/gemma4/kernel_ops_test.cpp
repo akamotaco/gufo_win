@@ -2,7 +2,8 @@
 // post-processing (weighted and unweighted norms, NEOX rope with frequency
 // divisors, binary16 cache slots in linear and ring caches), the fused
 // residual norms, GeGLU and the logit softcap; the fused prefill
-// quantization writes the shared Q8_1 activation.
+// quantization writes the shared Q8_1 activation; sampling candidates hold
+// each row's exact top logits and give the full row's distributions.
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
@@ -10,11 +11,15 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <random>
+#include <span>
 #include <string>
 #include <vector>
 
 #include "src/core/hip/hip_utils.hpp"
+#include "src/core/sampling.hpp"
+#include "src/models/gemma4/kernels/rocm/candidates.hpp"
 #include "src/models/gemma4/kernels/rocm/kernels.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
 #include "tests/models/gemma4/check.hpp"
@@ -423,6 +428,171 @@ void CheckFusedQuantize(std::mt19937& rng) {
   }
 }
 
+/// LogitCandidates against a CPU ranking in sampling order, then the target
+/// distributions FinishCycle builds from them against the full rows'.
+void CheckLogitCandidates(std::mt19937& rng) {
+  constexpr std::uint32_t kVocab = 262144;
+  constexpr std::uint32_t kRows = 16;
+  std::normal_distribution<float> normal(0.0F, 3.0F);
+  std::vector<float> logits(std::size_t{kRows} * kVocab);
+  for (float& v : logits) {
+    v = normal(rng);
+  }
+  const auto row = [&](std::uint32_t r) {
+    return std::span<float>(logits).subspan(std::size_t{r} * kVocab, kVocab);
+  };
+  // Ties across the top-64 boundary, signed zeros and non-finite logits.
+  {
+    auto x = row(1);
+    std::vector<std::uint32_t> order(kVocab);
+    for (std::uint32_t i = 0; i < kVocab; ++i) {
+      order[i] = i;
+    }
+    std::ranges::partial_sort(order, order.begin() + 80,
+                              [&](auto a, auto b) { return x[a] > x[b]; });
+    for (std::uint32_t i = 50; i < 80; ++i) {
+      x[order[i]] = x[order[63]];
+    }
+    x[3] = std::numeric_limits<float>::infinity();
+    x[4] = std::numeric_limits<float>::quiet_NaN();
+    x[5] = -std::numeric_limits<float>::infinity();
+  }
+  {
+    // 300 signed zeros tie at the boundary below 40 positive logits.
+    auto x = row(2);
+    for (float& v : x) {
+      v = -20.0F - std::abs(v);
+    }
+    for (std::uint32_t i = 0; i < 300; ++i) {
+      x[i * 811 + 1] = i % 2 == 0 ? 0.0F : -0.0F;
+    }
+    for (std::uint32_t i = 0; i < 40; ++i) {
+      x[i * 4099] = 1.0F + static_cast<float>(i);
+    }
+  }
+  // Fewer finite logits than candidates, and a threshold bin too full.
+  std::ranges::fill(row(3), std::numeric_limits<float>::quiet_NaN());
+  for (std::uint32_t i = 0; i < 10; ++i) {
+    row(3)[i * 1000 + 7] = static_cast<float>(i);
+  }
+  std::ranges::fill(row(4), 2.5F);
+  const std::vector<std::uint32_t> extra = {0, 7, 1000, 4099, 131072, 262143};
+  const auto n_extra = static_cast<std::uint32_t>(extra.size());
+  const std::uint32_t top = k::kCandidateTop + n_extra;
+  const std::uint32_t stride = top + n_extra;
+
+  float* d_logits = Device(logits);
+  std::uint32_t* d_extra = Device(extra);
+  void* scratch = nullptr;
+  HIP_CHECK(hipMalloc(&scratch, k::CandidateWorkBytes(kRows)));
+  std::uint32_t* d_counts = nullptr;
+  HIP_CHECK(hipMalloc(&d_counts, kRows * sizeof(std::uint32_t)));
+  gufo::sampling::LogitCandidate* d_out = nullptr;
+  HIP_CHECK(hipMalloc(&d_out, std::size_t{kRows} * stride * sizeof(*d_out)));
+  const auto work = k::CandidateWorkAt(scratch, kRows, nullptr);
+  std::vector<std::uint32_t> counts;
+  std::vector<gufo::sampling::LogitCandidate> out;
+  // Twice: the first launch must leave its workspace zeroed.
+  for (int pass = 0; pass < 2; ++pass) {
+    k::LogitCandidates(d_logits, kRows, kVocab, top, d_extra, n_extra, work,
+                       d_counts, d_out, nullptr);
+    counts = Host(d_counts, kRows);
+    out = Host(d_out, std::size_t{kRows} * stride);
+  }
+  for (std::uint32_t r = 0; r < kRows; ++r) {
+    const auto x = row(r);
+    const std::string name = "candidates row " + std::to_string(r);
+    if (r == 4) {
+      Require(counts[r] == k::kCandidateOverflow, name + " did not overflow");
+      continue;
+    }
+    std::vector<std::uint32_t> finite;
+    for (std::uint32_t i = 0; i < kVocab; ++i) {
+      if (std::isfinite(x[i])) {
+        finite.push_back(i);
+      }
+    }
+    const std::size_t want_count = std::min<std::size_t>(top, finite.size());
+    std::ranges::partial_sort(
+        finite, finite.begin() + want_count,
+        [&](auto a, auto b) { return x[a] == x[b] ? a < b : x[a] > x[b]; });
+    std::vector<std::uint32_t> want(finite.begin(),
+                                    finite.begin() + want_count);
+    Require(counts[r] == want_count, name + " count");
+    std::vector<std::uint32_t> got;
+    for (std::uint32_t i = 0; i < counts[r]; ++i) {
+      const auto& c = out[std::size_t{r} * stride + i];
+      Require(std::memcmp(&c.value, &x[c.token], sizeof(float)) == 0,
+              name + " value");
+      got.push_back(c.token);
+    }
+    std::ranges::sort(want);
+    std::ranges::sort(got);
+    Require(got == want, name + " top set");
+    for (std::size_t i = 0; i < extra.size(); ++i) {
+      const auto& c = out[std::size_t{r} * stride + top + i];
+      Require(c.token == extra[i] &&
+                  std::memcmp(&c.value, &x[extra[i]], sizeof(float)) == 0,
+              name + " extra");
+    }
+  }
+
+  // Penalized tokens are in `extra`, as FinishCycle arranges.
+  using gufo::sampling::SamplerState;
+  using gufo::sampling::SamplingConfig;
+  std::vector<SamplingConfig> configs(4);
+  configs[0].temperature = 1.0F;
+  configs[0].top_k = 64;
+  configs[0].top_p = 0.95F;
+  configs[1].temperature = 0.7F;
+  configs[1].top_k = 40;
+  configs[1].min_p = 0.05F;
+  configs[2] = configs[0];
+  configs[2].repeat_penalty = 1.3F;
+  configs[2].presence_penalty = 0.5F;
+  configs[3] = configs[2];
+  configs[3].top_k = 5;
+  configs[3].min_keep = 2;
+  for (std::size_t n = 0; n < configs.size(); ++n) {
+    SamplerState sampler(configs[n]);
+    if (configs[n].penalties_enabled()) {
+      for (const std::uint32_t token : extra) {
+        sampler.Accept(static_cast<gufo::sampling::TokenId>(token));
+      }
+    }
+    for (std::uint32_t r = 0; r < kRows; ++r) {
+      if (r == 3 || r == 4) {
+        continue;
+      }
+      std::vector<gufo::sampling::LogitCandidate> candidates;
+      for (std::uint32_t i = 0; i < counts[r]; ++i) {
+        const auto& c = out[std::size_t{r} * stride + i];
+        if (!std::ranges::binary_search(extra, c.token)) {
+          candidates.push_back(c);
+        }
+      }
+      for (std::size_t i = 0; i < extra.size(); ++i) {
+        candidates.push_back(out[std::size_t{r} * stride + top + i]);
+      }
+      const auto full = sampler.Distribution(row(r));
+      const auto compact = sampler.DistributionFromCandidates(candidates);
+      const auto a = full.entries();
+      const auto b = compact.entries();
+      bool same = a.size() == b.size();
+      for (std::size_t i = 0; same && i < a.size(); ++i) {
+        same = a[i].token == b[i].token && a[i].value == b[i].value;
+      }
+      Require(same, "candidate distribution config " + std::to_string(n) +
+                        " row " + std::to_string(r));
+    }
+  }
+  HIP_CHECK(hipFree(d_out));
+  HIP_CHECK(hipFree(d_counts));
+  HIP_CHECK(hipFree(scratch));
+  HIP_CHECK(hipFree(d_extra));
+  HIP_CHECK(hipFree(d_logits));
+}
+
 int main() {
   int devices = 0;
   if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0) {
@@ -436,5 +606,6 @@ int main() {
     CheckNorms(rng);
     CheckElementwise();
     CheckFusedQuantize(rng);
+    CheckLogitCandidates(rng);
   });
 }
