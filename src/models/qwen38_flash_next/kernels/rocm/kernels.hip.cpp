@@ -6458,6 +6458,23 @@ __global__ void SsmConvBoundaryKernel(const float* qkv, const float* w,
   }
 }
 
+/// Gemma 4's gelu_tanh(x) * u: the expression and build flags of its
+/// GeGluValue, out of line like it, so the fused [gate | up] epilogue rounds
+/// as Gemma's separate GeGLU pass does.
+__device__ __attribute__((noinline)) float GemmaGeGluValue(float x, float u) {
+  constexpr float kSqrt2OverPi = 0.79788456080286535587989211986876F;
+  constexpr float kCoefA = 0.044715F;
+  const float g =
+      0.5F * x * (1.0F + tanhf(kSqrt2OverPi * x * (1.0F + kCoefA * x * x)));
+  return g * u;
+}
+
+/// Gemma 4's HalfOf: the binary16 store its GeGLU pass writes.
+__device__ __forceinline__ __half GemmaHalfOf(float v) {
+  asm volatile("" : "+v"(v));
+  return __float2half(v);
+}
+
 // Optional output layout for the stacked QKV projection. The projection's
 // 256-row tile covers one query, gate, key or value head.
 struct AttentionProjectionOutput {
@@ -6483,11 +6500,14 @@ struct AttentionProjectionOutput {
 /// decoded weight rows in registers instead of staging them in LDS. F16 weights
 /// skip decoding and use the same ordered K16 products. y is [batch][m].
 /// kGrouped (Q8_0): Gemma 4's grouped layout (DenseF16Gemm), the same blocks
-/// at other addresses.
+/// at other addresses. kGeGlu (DenseF16GeGluGemm): W is Gemma 4's fused
+/// [gate | up]; a wave's first two row tiles take gate rows and its last two
+/// the matching up rows, and the epilogue writes binary16 GeGLU rows of
+/// width m / 2 into `mixed_half`.
 template<int BM, int BN, int BK, int WM, int WN, int kRowGroup = 1,
          bool kHcMix = false, bool kSsmConv = false, bool kAttention = false,
          bool kHalfWeights = false, bool kBf16 = false, bool kStrided = false,
-         bool kYarn = false, bool kGrouped = false>
+         bool kYarn = false, bool kGrouped = false, bool kGeGlu = false>
 __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     const void* __restrict__ w, const __half* __restrict__ x,
     float* __restrict__ y, std::size_t batch, std::size_t m, std::size_t k,
@@ -6566,7 +6586,14 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
     a_live[p] = idx < kAUnits && r < m_i;
     // Interleave the four gate streams within the tile, without repacking
     // weights. Each group of four rows produces one mixed hidden element.
-    const int weight_row = kHcMix ? (r % 4) * (m_i / 4) + r / 4 : r;
+    int weight_row = kHcMix ? (r % 4) * (m_i / 4) + r / 4 : r;
+    if constexpr (kGeGlu) {
+      // Block row l: wave row group l / 64, gate rows for l % 64 < 32, then
+      // the up rows of the same outputs.
+      const int l = r - r_block;
+      const int out = r_block / 2 + (l / 64) * 32 + l % 32;
+      weight_row = l % 64 < 32 ? out : out + m_i / 2;
+    }
     if constexpr (kGrouped) {
       const auto row =
           static_cast<std::size_t>(a_live[p] ? weight_row : (m_i - 1));
@@ -7002,6 +7029,50 @@ __launch_bounds__(256) __global__ void DenseF16GEMMKernel(
   // Transpose the result through LDS, two row tiles at a time, so every
   // global store covers 32 consecutive rows of one token: a full 128-byte
   // line (half lines cost a read-modify-write on the fabric).
+  if constexpr (kGeGlu) {
+    static_assert(BM == 256 && WM == 4 && !kHcMix && !kSsmConv && !kAttention &&
+                  !kRawWeights);
+    static_assert(kWaveRowTiles == 4);
+    // scratch[token][output] per wave: 16 tokens of the wave's 32 outputs.
+    constexpr unsigned kStride = 36;
+    static_assert(8 * 16 * kStride * sizeof(float) <= sizeof(s_lds));
+    float* scratch = reinterpret_cast<float*>(s_lds) + wave_id * 16 * kStride;
+    const std::size_t half_m = m / 2;
+    const std::size_t r0 =
+        static_cast<std::size_t>(r_block / 2) + wave_row * 32;
+#pragma unroll
+    for (int j = 0; j < kWaveTokTiles; ++j) {
+#pragma unroll
+      for (int l = 0; l < 8; ++l) {
+        scratch[sub_lane * kStride + 2 * l + half_id] =
+            GemmaGeGluValue(acc[0][j][l], acc[2][j][l]);
+        scratch[sub_lane * kStride + 16 + 2 * l + half_id] =
+            GemmaGeGluValue(acc[1][j][l], acc[3][j][l]);
+      }
+      __builtin_amdgcn_wave_barrier();
+      // Lane pair (2p, 2p + 1) stores token p's 32 outputs as binary16.
+      const int tok_l = lane_id >> 1;
+      const int col = (lane_id & 1) * 16;
+      const std::size_t tok = static_cast<std::size_t>(
+          token_of(((wave_tok * kWaveTokTiles) + j) * 16 + tok_l));
+      if (tok < batch) {
+        __half h[16];
+#pragma unroll
+        for (int v = 0; v < 16; ++v) {
+          h[v] = GemmaHalfOf(scratch[tok_l * kStride + col + v]);
+        }
+        uint4 packed[2];
+        __builtin_memcpy(packed, h, sizeof(packed));
+        auto* dst = reinterpret_cast<uint4*>(mixed_half + tok * half_m + r0 +
+                                             static_cast<std::size_t>(col));
+        dst[0] = packed[0];
+        dst[1] = packed[1];
+      }
+      __builtin_amdgcn_wave_barrier();
+    }
+    return;
+  }
+
   // Four padding floats reduce scatter bank conflicts and retain float4
   // alignment for both output stores and the fused convolution's reads.
   constexpr unsigned kOutputStride = 36;
@@ -7317,6 +7388,28 @@ bool DenseF16Gemm(const void* w, const __half* x, float* out, std::size_t batch,
     hipLaunchKernelGGL((DenseF16GEMMKernel<kBM, kBN, 4, 4, 2>), grid,
                        dim3(kThreads), 0, stream, w, x, out, batch, m, k);
   }
+  return true;
+}
+
+bool DenseF16GeGluGemm(const void* w, const __half* x, __half* out,
+                       std::size_t batch, std::size_t m, std::size_t k,
+                       hipStream_t stream, bool grouped) {
+  if (batch < 96 || m == 0 || m % 256 != 0 || k == 0 ||
+      k % (grouped ? 256 : 32) != 0 || out == nullptr) {
+    return false;
+  }
+  // DenseF16Gemm's wide plan for the [gate | up] shape.
+  const dim3 grid(static_cast<unsigned int>((batch + 127) / 128),
+                  static_cast<unsigned int>(m / 256));
+  const auto launch = [&]<bool kGrouped>() {
+    hipLaunchKernelGGL(
+        (DenseF16GEMMKernel<256, 128, 1, 4, 2, 1, false, false, false, false,
+                            false, false, false, kGrouped, true>),
+        grid, dim3(kThreads), 0, stream, w, x, nullptr, batch, m, k, nullptr,
+        out);
+  };
+  grouped ? launch.template operator()<true>()
+          : launch.template operator()<false>();
   return true;
 }
 

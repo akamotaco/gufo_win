@@ -22,6 +22,7 @@
 #include "src/core/hip/hip_utils.hpp"
 #include "src/core/quant/ggml_gemm.hpp"
 #include "src/models/gemma4/kernels/rocm/gemv.hpp"
+#include "src/models/gemma4/kernels/rocm/kernels.hpp"
 #include "src/models/gemma4/kernels/rocm/wmma_gemv.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
@@ -577,6 +578,62 @@ void CheckGroupedHalfGemm(const Format& f, std::uint32_t m, std::uint32_t k,
   HIP_CHECK(hipFree(dy));
 }
 
+/// The UD-Q8_K_XL [gate | up] prefill GEMM with its GeGLU epilogue writes the
+/// binary16 rows of the FP32 GEMM followed by Gemma's GeGLU pass, bit for
+/// bit, in row order and grouped.
+void CheckGeGluHalfGemm(const Format& f, std::uint32_t m, std::uint32_t k,
+                        std::uint32_t batch, std::mt19937& rng) {
+  namespace fn = gufo::models::qwen38_flash_next::rocm;
+  namespace g4k = gufo::models::gemma4::rocm;
+  const std::string name = "Q8_0 GeGLU prefill " + std::to_string(m) + "x" +
+                           std::to_string(k) + ", " + std::to_string(batch) +
+                           " rows";
+  const auto w = RandomMatrix(f, m, k, rng);
+  std::normal_distribution<float> normal(0.0F, 1.0F);
+  std::vector<__half> x(std::size_t{batch} * k);
+  for (auto& v : x) {
+    v = __float2half(normal(rng));
+  }
+  auto* dw = Device(w.data(), w.size());
+  std::uint8_t* dg = nullptr;
+  HIP_CHECK(hipMalloc(&dg, w.size()));
+  Require(g4k::GroupWeights(f.type, dw, dg, m, k, nullptr),
+          name + ": grouping rejected");
+  auto* dx = Device(x.data(), x.size());
+  float* gu = nullptr;
+  __half* want_d = nullptr;
+  __half* got_d = nullptr;
+  const std::size_t outputs = std::size_t{batch} * (m / 2);
+  HIP_CHECK(hipMalloc(&gu, std::size_t{batch} * m * sizeof(float)));
+  HIP_CHECK(hipMalloc(&want_d, outputs * sizeof(__half)));
+  HIP_CHECK(hipMalloc(&got_d, outputs * sizeof(__half)));
+  Require(fn::DenseF16Gemm(dw, dx, gu, batch, m, k, nullptr), name + " FP32");
+  g4k::GeGluPacked(gu, nullptr, batch, m / 2, nullptr, want_d);
+  std::vector<std::uint16_t> want(outputs), got(outputs);
+  HIP_CHECK(hipMemcpy(want.data(), want_d, outputs * 2, hipMemcpyDeviceToHost));
+  for (const bool grouped : {false, true}) {
+    HIP_CHECK(hipMemset(got_d, 0xFF, outputs * 2));
+    Require(fn::DenseF16GeGluGemm(grouped ? dg : dw, dx, got_d, batch, m, k,
+                                  nullptr, grouped),
+            name + " rejected");
+    HIP_CHECK(hipMemcpy(got.data(), got_d, outputs * 2, hipMemcpyDeviceToHost));
+    std::size_t differ = 0;
+    for (std::size_t i = 0; i < outputs; ++i) {
+      differ += got[i] != want[i];
+    }
+    Require(differ == 0, name + (grouped ? " grouped" : "") + ": " +
+                             std::to_string(differ) + " of " +
+                             std::to_string(outputs) + " values differ");
+  }
+  std::cout << name << ": identical to the GEMM and GeGLU pass\n";
+  HIP_CHECK(hipFree(dw));
+  HIP_CHECK(hipFree(dg));
+  HIP_CHECK(hipFree(dx));
+  HIP_CHECK(hipFree(gu));
+  HIP_CHECK(hipFree(want_d));
+  HIP_CHECK(hipFree(got_d));
+}
+
 /// The load-time BF16 -> binary16 rewrite: exact inside the binary16 range,
 /// round to nearest below it, and every value past it counted.
 void CheckBf16Conversion(std::mt19937& rng) {
@@ -793,6 +850,11 @@ int main() {
     for (const auto& [m, k] : q8_grouped_shapes) {
       CheckGroupedHalfGemm(formats[3], m, k, rng);
     }
+    // The 31B's [gate | up] with its GeGLU epilogue: a full and a partial
+    // token tile, and a small shape.
+    CheckGeGluHalfGemm(formats[3], 43008, 5376, 2048, rng);
+    CheckGeGluHalfGemm(formats[3], 43008, 5376, 300, rng);
+    CheckGeGluHalfGemm(formats[3], 4096, 4096, 129, rng);
     // The 26B-A4B's K-quant and Q4_0 quants (llama.cpp mixes, QAT): q, k / v,
     // fused [q | k] of a global layer, attention output, [gate | up] and the
     // vocabulary head over 2816-wide rows.

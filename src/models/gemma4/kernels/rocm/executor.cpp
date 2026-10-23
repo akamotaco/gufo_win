@@ -1032,7 +1032,9 @@ void Executor::Forward(std::span<const Segment> segments,
     WmmaPackOut down_pack{};
     const auto gate_up_half = DenseHalfFormat(L.ffn_gate_up.type);
     const bool gate_up_packed = PackedPrefill(L.ffn_gate_up, n);
-    if (!L.ffn_gate_up.empty() && half && (gate_up_half || gate_up_packed) &&
+    const bool gate_up_q8 = L.ffn_gate_up.type == core::GgmlType::kQ8_0;
+    if (!L.ffn_gate_up.empty() && half &&
+        (gate_up_half || gate_up_packed || gate_up_q8) &&
         half_only({&L.ffn_down}) &&
         ((gate_up_packed &&
           LaunchPackedPrefillGemm(
@@ -1042,7 +1044,14 @@ void Executor::Forward(std::span<const Segment> segments,
          (gate_up_half &&
           LaunchDenseHalfGemm(*gate_up_half, L.ffn_gate_up.data, fq, nullptr,
                               gate_, n, L.ffn_gate_up.rows, L.ffn_gate_up.cols,
-                              stream_, true, L.ffn_gate_up.grouped)))) {
+                              stream_, true, L.ffn_gate_up.grouped)) ||
+         // Q8_0: GeGLU of the FP32 [gate | up] sums, as the separate pass.
+         (gate_up_q8 && !gate_up_packed &&
+          qwen38_flash_next::rocm::DenseF16GeGluGemm(
+              L.ffn_gate_up.data, static_cast<const __half*>(fq),
+              static_cast<__half*>(static_cast<void*>(gate_)), n,
+              L.ffn_gate_up.rows, L.ffn_gate_up.cols, stream_,
+              L.ffn_gate_up.grouped)))) {
       // The GEMM writes GeGLU of each binary16 [gate | up] pair into the
       // (free) gate rows as the down projection's binary16 input.
       gq = gate_;
