@@ -1,7 +1,5 @@
 #include "src/cli/serve/text_model_runner.hpp"
 
-#include <unistd.h>
-
 #include <algorithm>
 #include <chrono>
 #include <fstream>
@@ -16,6 +14,7 @@
 #include "src/cli/serve/continuation_disk_store.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/core/json.hpp"
+#include "src/core/platform/os_info.hpp"
 
 namespace gufo::server {
 
@@ -174,11 +173,7 @@ namespace {
 /// Host RAM still available, after cgroup limits. Unified-memory device
 /// allocations draw from the same RAM, so HIP's device capacity is not used.
 std::uint64_t HostAvailableBytes() {
-  const long pages = sysconf(_SC_AVPHYS_PAGES);
-  const long page_size = sysconf(_SC_PAGESIZE);
-  if (pages <= 0 || page_size <= 0)
-    return 0;
-  std::uint64_t available = std::uint64_t(pages) * page_size;
+  std::uint64_t available = platform::AvailableMemoryBytes();
   std::ifstream meminfo("/proc/meminfo");
   std::ostringstream meminfo_text;
   meminfo_text << meminfo.rdbuf();
@@ -655,11 +650,13 @@ struct TextRunnerPool::Impl {
               : std::min(TextRunnerRamCacheOptions::kAutomaticMaxBytes,
                          automatic);
       // This is an upper bound. Providers commit backing only after their
-      // slots allocate and the cache observes remaining host capacity. The
-      // state claim includes lazy image/rollback storage, not startup usage.
+      // slots allocate and the cache observes remaining host capacity. Slots
+      // allocate under the ceiling; what they pin is charged on top of this.
+      // The state claim includes lazy image/rollback storage, not startup
+      // usage.
       component_cache = std::make_unique<ComponentTextCache>(
           validated.runner, state_count, std::min(requested, ceiling),
-          disk_cache_options, !ram_cache_options.capacity_bytes);
+          disk_cache_options, !ram_cache_options.capacity_bytes, ceiling);
       if (disk_cache_options) {
         shared_prefix_min_tokens = disk_cache_options->shared_prefix_min_tokens;
         shared_prefix_max_boundaries =
@@ -1431,6 +1428,21 @@ std::size_t TextRunnerPool::Request::ShareCheckpoint(
   const auto offset = impl_->prefill_offset;
   if (target <= offset)
     return 0;
+  // A peer can arrive while the stable-boundary copy is pending, or just
+  // after it was published. Reuse that nearby frontier instead of inserting
+  // another pass a few tokens later (for example, splitting framing 6 + 1).
+  if (offset && impl_->lease.component() &&
+      target - offset <= kSharedCheckpointSlack) {
+    const bool capturing =
+        impl_->snapshot_future.valid() &&
+        (impl_->boundary_capture || impl_->snapshot_tokens.size() == offset);
+    const bool published =
+        impl_->fallback_position == offset &&
+        impl_->lease.HasSnapshotFor(
+            std::span<const TextRunnerToken>(impl_->prompt).first(offset));
+    if (capturing || published)
+      return offset;
+  }
   // Prefill already publishes the fallback, this turn's stable boundary and
   // intermediate checkpoints before advancing past them.
   std::size_t planned = 0;
@@ -1583,12 +1595,11 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
           ? std::function<std::unique_ptr<TextRunnerSnapshot>()>(
                 [&] { return impl_->lease.Capture(); })
           : std::function<std::unique_ptr<TextRunnerSnapshot>()>{};
-  // A cancellation observed inside a step abandons it half-fed, which loses
-  // the whole conversation. Let a step run to completion instead, and honour
-  // the cancellation at the next step boundary where Cancel keeps the prefix.
-  const bool finish_step =
-      impl_->runner->Descriptor().capabilities.partial_prefill_retention &&
-      impl_->cancelled;
+  // A runner must either roll back an interrupted step or finish it before
+  // cancellation can retain the completed conversation frontier.
+  const auto capabilities = impl_->runner->Descriptor().capabilities;
+  const bool finish_step = capabilities.partial_prefill_retention &&
+                           !capabilities.prefill_rollback && impl_->cancelled;
   struct Rearm {
     TextRunnerState* state;
     const CancellationCheck* check;
@@ -1625,6 +1636,14 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
                     max_input_tokens, snapshot_position, &captured, capture)
               : impl_->runner->Prefill(state, model_prompt,
                                        impl_->prefill_offset, max_input_tokens);
+  if (step.interrupted) {
+    if (!capabilities.prefill_rollback || step.consumed_tokens ||
+        step.decode_ready || !impl_->cancelled || !impl_->cancelled() ||
+        impl_->runner->CheckpointPosition(state) != impl_->prefill_offset)
+      throw std::runtime_error("invalid interrupted prefill frontier");
+    impl_->state_reusable = true;
+    throw std::runtime_error("generation cancelled");
+  }
   const std::size_t maximum_consumed = std::min(remaining, max_input_tokens);
   if (step.consumed_tokens == 0 || step.consumed_tokens > maximum_consumed) {
     throw std::runtime_error(

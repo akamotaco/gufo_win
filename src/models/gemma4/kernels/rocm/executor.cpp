@@ -27,6 +27,7 @@ namespace gufo::models::gemma4::rocm {
 namespace {
 
 constexpr std::size_t kAlign = 256;
+constexpr std::size_t kCandidateHeaderBytes = 256;
 
 std::size_t AlignUp(std::size_t n) {
   return (n + kAlign - 1) / kAlign * kAlign;
@@ -342,11 +343,38 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
                               logits_host_.size() * sizeof(float),
                               hipHostRegisterDefault));
   }
+  if (model.vocab_size() % 4 == 0) {
+    const std::size_t work = CandidateWorkBytes(kSplitRows);
+    const std::size_t out =
+        kCandidateHeaderBytes + std::size_t{kSplitRows} *
+                                    (kCandidateTop + 2 * kMaxCandidateExtra) *
+                                    sizeof(sampling::LogitCandidate);
+    const std::size_t extra = kMaxCandidateExtra * sizeof(std::uint32_t);
+    HIP_CHECK(hip::AllocateDevice(&candidate_scratch_, work + out + extra));
+    auto* base = static_cast<std::uint8_t*>(candidate_scratch_);
+    candidate_work_ = CandidateWorkAt(base, kSplitRows, stream_);
+    candidate_out_ = base + work;
+    candidate_extra_ = reinterpret_cast<std::uint32_t*>(base + work + out);
+    candidate_host_.resize(out);
+    candidate_extra_host_.resize(kMaxCandidateExtra);
+    HIP_CHECK(hipHostRegister(candidate_host_.data(), candidate_host_.size(),
+                              hipHostRegisterDefault));
+    HIP_CHECK(hipHostRegister(candidate_extra_host_.data(),
+                              kMaxCandidateExtra * sizeof(std::uint32_t),
+                              hipHostRegisterDefault));
+  }
 }
 
 Executor::~Executor() {
   if (!logits_host_.empty()) {
     hip::LogCleanupError(hipHostUnregister(logits_host_.data()));
+  }
+  if (!candidate_host_.empty()) {
+    hip::LogCleanupError(hipHostUnregister(candidate_host_.data()));
+    hip::LogCleanupError(hipHostUnregister(candidate_extra_host_.data()));
+  }
+  if (candidate_scratch_ != nullptr) {
+    hip::LogCleanupError(hipFree(candidate_scratch_));
   }
   if (argmax_host_ != nullptr) {
     hip::LogCleanupError(hipHostFree(argmax_host_));
@@ -1716,6 +1744,44 @@ std::span<const float> Executor::ReadLogits(std::size_t rows) const {
   }
   HIP_CHECK(hipStreamSynchronize(stream_));
   return std::span<const float>(logits_host_.data(), count);
+}
+
+Executor::Candidates Executor::ReadCandidates(
+    std::size_t rows, std::span<const std::uint32_t> extra) const {
+  if (rows == 0 || rows > kSplitRows || extra.size() > kMaxCandidateExtra ||
+      candidate_scratch_ == nullptr) {
+    throw std::invalid_argument("gemma4 candidate rows exceed capacity");
+  }
+  const auto n_extra = static_cast<std::uint32_t>(extra.size());
+  const std::uint32_t top = kCandidateTop + n_extra;
+  if (n_extra != 0) {
+    std::ranges::copy(extra, candidate_extra_host_.begin());
+    HIP_CHECK(hipMemcpyAsync(candidate_extra_, candidate_extra_host_.data(),
+                             n_extra * sizeof(std::uint32_t),
+                             hipMemcpyHostToDevice, stream_));
+  }
+  auto* counts = reinterpret_cast<std::uint32_t*>(candidate_out_);
+  auto* data = reinterpret_cast<sampling::LogitCandidate*>(
+      candidate_out_ + kCandidateHeaderBytes);
+  LogitCandidates(logits_, static_cast<std::uint32_t>(rows),
+                  static_cast<std::uint32_t>(model_.vocab_size()), top,
+                  candidate_extra_, n_extra, candidate_work_, counts, data,
+                  stream_);
+  const std::size_t stride = top + n_extra;
+  HIP_CHECK(hipMemcpyAsync(
+      candidate_host_.data(), candidate_out_,
+      kCandidateHeaderBytes + rows * stride * sizeof(sampling::LogitCandidate),
+      hipMemcpyDeviceToHost, stream_));
+  HIP_CHECK(hipStreamSynchronize(stream_));
+  const auto* host = candidate_host_.data();
+  return {
+      .counts = {reinterpret_cast<const std::uint32_t*>(host), rows},
+      .data = {reinterpret_cast<const sampling::LogitCandidate*>(
+                   host + kCandidateHeaderBytes),
+               rows * stride},
+      .top = top,
+      .stride = static_cast<std::uint32_t>(stride),
+  };
 }
 
 void Executor::CopyLogits(std::size_t rows, std::vector<float>* out) const {

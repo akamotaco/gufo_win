@@ -15,6 +15,7 @@ set(gufo_pr_targets
   cache_retention_test
   arg_parser_test json_test json_constraint_test gguf_reader_test gguf_identity_test
   heap_placement_test
+  platform_publish_test platform_prefault_test
   logit_sampler_test ggml_dequant_test
   quote_tracker_test
   openai_chat_test http_server_test trace_test audio_websocket_test
@@ -22,7 +23,9 @@ set(gufo_pr_targets
   component_text_cache_test text_model_runner_test continuation_disk_store_test
   bench_cli_test prompt_cli_test eval_http_client_test
   qwen_tokenizer_test qwen_chat_template_test
+  qwen27b_continuation_layout_test
   qwen38_flash_next_config_test qwen38_flash_next_mtp_sampling_test
+  qwen38_flash_next_rope_scaling_test
   qwen38_flash_next_continuation_layout_test
   gemma4_config_test gemma4_tokenizer_contract_test gemma4_template_test
   gemma4_tool_syntax_test gemma4_vision_prompt_test
@@ -34,13 +37,14 @@ set(gufo_pr_targets
 set(gufo_pr_tests ${gufo_pr_targets})
 list(REMOVE_ITEM gufo_pr_tests
   qwen38_flash_next_config_test qwen38_flash_next_mtp_sampling_test
+  qwen38_flash_next_rope_scaling_test
   qwen38_flash_next_continuation_layout_test
   gemma4_config_test gemma4_tokenizer_contract_test gemma4_template_test
   gemma4_tool_syntax_test gemma4_vision_prompt_test
   ds4_sampling_test ds4_chat_template_test ds4_cli_test)
 list(APPEND gufo_pr_tests
   "qwen38_flash_next\\.config" "qwen38_flash_next\\.mtp_sampling"
-  "qwen38_flash_next\\.continuation_layout"
+  "qwen38_flash_next\\.rope_scaling" "qwen38_flash_next\\.continuation_layout"
   "gemma4\\.config" "gemma4\\.tokenizer_contract" "gemma4\\.template"
   "gemma4\\.tool_syntax" "gemma4\\.vision_prompt"
   "ds4\\.sampling" "ds4\\.template" "ds4\\.cli"

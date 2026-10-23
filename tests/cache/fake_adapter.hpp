@@ -1,6 +1,7 @@
 #ifndef GUFO_CACHE_TESTING_FAKE_ADAPTER_HPP_
 #define GUFO_CACHE_TESTING_FAKE_ADAPTER_HPP_
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -43,7 +44,8 @@ private:
 
 class FakeAdapter final : public Adapter {
 public:
-  FakeAdapter();
+  // Wider chunks need less capture metadata for the same row bytes.
+  explicit FakeAdapter(Rows rows_per_chunk = 4);
   // Opt in to a fourth, windowed component (kWindow) that mirrors the target
   // tokens in a ring of ring_rows slots, like sliding-window attention: a
   // continuation reads the last window_rows, and appending past the ring
@@ -60,6 +62,7 @@ public:
   [[nodiscard]] std::vector<Rows> PlanPrefill(const Slot&, Rows first,
                                               Rows end) const override;
   void SetPrefillPassRows(Rows rows);
+  void SetExecutionComplete(Slot&, bool);
   [[nodiscard]] std::vector<ComponentPosition> PrefillCheckpointPositions(
       const Slot&, Rows boundary) const override;
   void BeginRestore(Slot&, std::span<const ComponentPosition>) override;

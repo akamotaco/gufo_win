@@ -4,6 +4,14 @@ Changes made in this fork's Gemma 4 engine, newest first. Each entry is a brief
 summary; its pull request has the details, measurements and validation.
 Upstream Gufo's changes are in [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-23: Faster sampled MTP verification ([#7](https://github.com/franzmoca/gufo/pull/7))
+
+- Sampled MTP cycles verify from each row's exact top logits, selected on the
+  GPU, instead of copying every row's full logits to the host. Output is
+  bit-identical. Sampled MTP decode is +1.0% on 26B-A4B UD-Q4_K_XL (+0.9% with
+  a repeat penalty) and +0.2% on 31B UD-Q4_K_XL.
+- Synced with upstream main through gufo-org/gufo#729 (0.21.0).
+
 ## 2026-10-21: Faster MTP decoding and opt-in prefill weight copies ([#6](https://github.com/franzmoca/gufo/pull/6))
 
 - With an MTP drafter loaded, the target's projection weights are reordered
