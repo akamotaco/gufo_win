@@ -486,26 +486,20 @@ std::optional<GemvFormat> GemvFormatOf(core::GgmlType type) {
 }
 
 /// The binary16 GEMM plan for a Q8_0 projection of a Gemma width (the
-/// Flash-Next dispatch is tuned on its own shapes): eight row groups, and the
-/// two-block stage over a long K. 26B-A4B attention output (176 blocks, K =
-/// 4096 or 8192) 2013 -> 1759 us per 2048 rows; dense MLP down (K = 2112)
-/// 605 -> 582 us. The 31B's 5376 outputs (21 row tiles) also walk seven row
-/// tiles of a token tile in launch order: per pp2048 chunk, attention output
-/// 473 -> 344 ms and MLP down 824 -> 769 ms. Its other shapes measured
-/// slower with every staged or walking plan.
+/// Flash-Next dispatch is tuned on its own shapes): eight row groups for the
+/// 26B-A4B's dense MLP down (K = 2112), 605 -> 582 us per 2048 rows. The
+/// 31B's 5376 outputs (21 row tiles) take two-block stages and walk seven
+/// row tiles of a token tile in launch order: per pp2048 chunk, attention
+/// output 473 -> 344 ms and MLP down 824 -> 769 ms. Its other shapes
+/// measured slower with every staged or walking plan.
 qwen38_flash_next::rocm::DenseF16Plan HalfPlan(std::uint32_t m,
                                                std::uint32_t k) {
   using qwen38_flash_next::rocm::DenseF16Plan;
   if (m == 5376 && k >= 8192) {
     return DenseF16Plan::kStagedRowGroups8Walk7;
   }
-  if (m != 2816) {
-    return DenseF16Plan::kAuto;
-  }
-  if (k >= 4096) {
-    return DenseF16Plan::kStagedRowGroups8;
-  }
-  return k == 2112 ? DenseF16Plan::kRowGroups8 : DenseF16Plan::kAuto;
+  return m == 2816 && k == 2112 ? DenseF16Plan::kRowGroups8
+                                : DenseF16Plan::kAuto;
 }
 
 /// The formats of the dense binary16 prefill GEMM (LaunchDenseHalfGemm).
@@ -584,6 +578,14 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
       // Binary16 activations: Q8_0, Q4_0 and K-quant weights decode to
       // binary16 in the WMMA GEMMs; other formats keep the W8A8 route on their
       // own Q8_1 rows.
+      // The 26B-A4B's Q8_0 attention outputs (2816 outputs, 11 row tiles
+      // of Flash-Next's 256-row blocks) fill the WGPs better on Gemma's
+      // 128-row blocks, with the same sums: 1.80 -> 1.61 ms per 2048 rows.
+      if (w.type == core::GgmlType::kQ8_0 && w.rows == 2816 && w.cols >= 4096 &&
+          LaunchDenseHalfGemm(ExpertFormat::kQ8_0, w.data, xq, y, nullptr, rows,
+                              w.rows, w.cols, stream_, false, w.grouped)) {
+        return;
+      }
       if (w.type == core::GgmlType::kQ8_0 &&
           qwen38_flash_next::rocm::DenseF16Gemm(
               w.data, static_cast<const __half*>(xq), y, rows, w.rows, w.cols,

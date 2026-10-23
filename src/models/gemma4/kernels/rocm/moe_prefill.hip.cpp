@@ -1505,8 +1505,9 @@ bool LaunchDenseHalfGemm(ExpertFormat format, const void* w, const void* x,
                          std::uint32_t m, std::uint32_t k, hipStream_t stream,
                          bool geglu, bool grouped) {
   // Q4_0 and Q5_0 take the down kernel's 64-value stages.
-  const bool blockwise =
-      format == ExpertFormat::kQ4_0 || format == ExpertFormat::kQ5_0;
+  const bool blockwise = format == ExpertFormat::kQ4_0 ||
+                         format == ExpertFormat::kQ5_0 ||
+                         format == ExpertFormat::kQ8_0;
   if (rows == 0 || k % (blockwise ? kDownStageK : 256) != 0 ||
       (out == nullptr) == (out_half == nullptr) ||
       (geglu && (out_half == nullptr || m % 2 != 0)) ||
@@ -1576,6 +1577,9 @@ bool LaunchDenseHalfGemm(ExpertFormat format, const void* w, const void* x,
       return true;
     case ExpertFormat::kQ5_0:
       launch_blockwise.template operator()<ExpertFormat::kQ5_0>();
+      return true;
+    case ExpertFormat::kQ8_0:
+      launch_blockwise.template operator()<ExpertFormat::kQ8_0>();
       return true;
     default:
       return false;

@@ -948,9 +948,6 @@ void CheckDensePrefill(const Format& f, std::uint32_t m, std::uint32_t k,
     HIP_CHECK(hipMalloc(&dense, std::size_t{rows} * m * 4));
     HIP_CHECK(hipMalloc(&routed_half, std::size_t{rows} * m));
     HIP_CHECK(hipMalloc(&dense_half, std::size_t{rows} * m));
-    // Q8_0 has no dense GEMM here (Flash-Next's serves it): its prefill copy
-    // is held to the routed GEMM alone.
-    const bool q8 = f.format == g4k::ExpertFormat::kQ8_0;
     Require(g4k::LaunchRoutedHalfGemm(f.format, dw, dx, dtiles, n_tiles, kTile,
                                       dbounds, dids, dids, routed, nullptr, m,
                                       k, nullptr) &&
@@ -958,18 +955,11 @@ void CheckDensePrefill(const Format& f, std::uint32_t m, std::uint32_t k,
                                           kTile, dbounds, dids, dids, nullptr,
                                           routed_half, m, k, nullptr, true),
             "routed prefill GEMM rejected " + std::string(f.name));
-    Require(
-        q8 || (g4k::LaunchDenseHalfGemm(f.format, dw, dx, dense, nullptr, rows,
-                                        m, k, nullptr) &&
-               g4k::LaunchDenseHalfGemm(f.format, dw, dx, nullptr, dense_half,
-                                        rows, m, k, nullptr, true)),
-        "dense prefill GEMM rejected " + std::string(f.name));
-    if (q8) {
-      HIP_CHECK(hipMemcpy(dense, routed, std::size_t{rows} * m * 4,
-                          hipMemcpyDeviceToDevice));
-      HIP_CHECK(hipMemcpy(dense_half, routed_half, std::size_t{rows} * m,
-                          hipMemcpyDeviceToDevice));
-    }
+    Require(g4k::LaunchDenseHalfGemm(f.format, dw, dx, dense, nullptr, rows, m,
+                                     k, nullptr) &&
+                g4k::LaunchDenseHalfGemm(f.format, dw, dx, nullptr, dense_half,
+                                         rows, m, k, nullptr, true),
+            "dense prefill GEMM rejected " + std::string(f.name));
     const auto a = Host(routed, std::size_t{rows} * m);
     const auto b = Host(dense, std::size_t{rows} * m);
     Require(std::memcmp(a.data(), b.data(), a.size() * 4) == 0,
@@ -981,9 +971,7 @@ void CheckDensePrefill(const Format& f, std::uint32_t m, std::uint32_t k,
             std::string(f.name) + ": dense GeGLU differs from routed at " +
                 std::to_string(rows) + " rows");
     CheckPackedPrefill(f, dw, dx, b, bh, rows, m, k);
-    if (!q8) {
-      CheckGroupedPrefill(f, dw, dx, b, bh, rows, m, k);
-    }
+    CheckGroupedPrefill(f, dw, dx, b, bh, rows, m, k);
     for (void* p :
          {static_cast<void*>(dx), static_cast<void*>(dids),
           static_cast<void*>(dtiles), static_cast<void*>(dbounds),

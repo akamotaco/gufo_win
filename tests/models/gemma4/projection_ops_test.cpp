@@ -23,6 +23,7 @@
 #include "src/core/quant/ggml_gemm.hpp"
 #include "src/models/gemma4/kernels/rocm/gemv.hpp"
 #include "src/models/gemma4/kernels/rocm/kernels.hpp"
+#include "src/models/gemma4/kernels/rocm/moe.hpp"
 #include "src/models/gemma4/kernels/rocm/wmma_gemv.hpp"
 #include "src/models/qwen/hip/ops/gemm.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
@@ -571,6 +572,27 @@ void CheckGroupedHalfGemm(const Format& f, std::uint32_t m, std::uint32_t k,
                   std::to_string(batch) + " rows differ");
     }
   }
+  // The 26B-A4B's attention outputs take Gemma's dense GEMM instead: the
+  // same sums, in row order and grouped.
+  if (m == 2816) {
+    for (const std::uint32_t batch : {kBatch, 40U}) {
+      const std::size_t bytes = std::size_t{batch} * m * sizeof(float);
+      Require(fn::DenseF16Gemm(dw, dx, dy, batch, m, k, nullptr),
+              name + " rejected");
+      HIP_CHECK(hipMemcpy(want.data(), dy, bytes, hipMemcpyDeviceToHost));
+      for (const bool grouped : {false, true}) {
+        HIP_CHECK(hipMemset(dy, 0xFF, bytes));
+        Require(g4k::LaunchDenseHalfGemm(g4k::ExpertFormat::kQ8_0,
+                                         grouped ? dg : dw, dx, dy, nullptr,
+                                         batch, m, k, nullptr, false, grouped),
+                name + " Gemma GEMM rejected");
+        HIP_CHECK(hipMemcpy(got.data(), dy, bytes, hipMemcpyDeviceToHost));
+        Require(std::memcmp(want.data(), got.data(), bytes) == 0,
+                name + ": Gemma GEMM differs at " + std::to_string(batch) +
+                    " rows");
+      }
+    }
+  }
   std::cout << name << ": identical to the row order\n";
   HIP_CHECK(hipFree(dw));
   HIP_CHECK(hipFree(dg));
@@ -852,9 +874,9 @@ int main() {
     }
     // Their prefill GEMM over the grouped layout: 31B attention output with
     // seven-tile walks, [q | k | v], a partial row group; 26B attention
-    // output.
+    // outputs (also on Gemma's dense GEMM).
     const std::pair<std::uint32_t, std::uint32_t> q8_grouped_shapes[] = {
-        {5376, 8192}, {16384, 5376}, {4100, 5376}, {2816, 8192}};
+        {5376, 8192}, {16384, 5376}, {4100, 5376}, {2816, 8192}, {2816, 4096}};
     for (const auto& [m, k] : q8_grouped_shapes) {
       CheckGroupedHalfGemm(formats[3], m, k, rng);
     }
