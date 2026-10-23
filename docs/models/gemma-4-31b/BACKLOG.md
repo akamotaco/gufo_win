@@ -40,6 +40,7 @@ gaps. MTP verify cycles at d0 (~101 ms GPU): target verification projections
 | 5 | Global prefill attention redesign: two heads per wave over one shared LDS arena | Prefill at depth | Hard | +1.5–3% at 32K, +3–6% at 128K | Medium |
 | 6 | AR decode GEMV | Decode AR | Hard | +2–4% | Low |
 | 7 | Measure and validate MTP cycle cost estimates | Decode MTP, 31B and 26B | Medium | Bounded by the oracle replay below; the 2026-10-05 remeasured tables measured neutral | Low |
+| 8 | Sampled MTP siblings: proposals that keep a sibling available | Decode MTP, sampled | Medium (replay first), hard to ship | Sampled +3–4% before row costs and chain-acceptance effects | Low |
 
 ### 1. MTP verification projections
 
@@ -165,8 +166,11 @@ Next steps, in order:
 1. Done 2026-10-20: drafter steps remeasured in place for the 31B assistant
    and the 26B Unsloth drafter; prices now within ~6% of measured ratios,
    throughput unchanged (EXPERIMENTS.md). Other target quantizations (Q8,
-   QAT) and drafters keep these tables: pricing by the loaded files' bytes
-   would cover them deterministically.
+   QAT) and drafters keep these tables. Pricing by the loaded files' bytes
+   was tried 2026-10-23 and rejected: accurate UD-Q8_K_XL prices made the
+   policy draft more on prose for no more accepted tokens (−1.2%), which
+   points at optimistic acceptance estimates for late drafts (EXPERIMENTS.md;
+   patch in `artifacts/verify-price-scale-2026-10-23.patch`).
 2. Bound the gain first: replay labelled chains (`gemma4_draft_replay
    simulate` over a `--draft-policy fixed --draft-tokens 15` trace) with each
    cycle's measured costs (oracle prices) and with tables perturbed by ±2/5/10%;
@@ -181,6 +185,67 @@ prices unchanged, then new prices as a separate scheduling change, on both
 models, with prose and high-acceptance code. Judge streaming gaps per
 emitted token (or p99 alongside tokens per cycle), not as one maximum: a
 longer cycle that emits more tokens is not a pause regression.
+
+### 8. Sampled MTP siblings
+
+Added 2026-10-23. Sampled decoding is bound by acceptance, not overhead:
+without `--draft-trace` the host adds nothing measurable (decode GPU idle
+1.9% sampled against 1.8% greedy), the same kernels just run ~8.7% more
+often, and the calibrated policy beats fixed and confidence draft lengths
+on story and code-sampled (EXPERIMENTS.md, 2026-10-23). The lever left is
+how many extra tokens a cycle can win when a chain draft is rejected.
+
+A sibling is one extra verification row holding the drafter's alternative
+at a depth; if the chain's draft there is rejected, the sibling can be
+accepted for one more token. On UD-Q8_K_XL a row costs ~1.6 ms of a
+~163–188 ms verification (2–16 rows), and the calibrated policy adds one
+only when its estimated hit rate pays for it.
+
+Greedy siblings are the drafter's runner-up and always exist. Sampled
+output must follow the target's distribution exactly, so verification is
+recursive rejection sampling (`VerifyWithSibling`, `engine.cpp`) and the
+sibling must be drawn from the drafter's proposal q with the draft removed
+(`SampledAlternative`). q is the drafter's distribution after the request's
+filters; at top-p 0.95 it collapses to one token whenever the drafter is
+fairly sure, leaving nothing to draw. Traced HTTP cycles on UD-Q8_K_XL
+(greedy prose and code-write against sampled story and code-sampled, so
+directional):
+
+| | Greedy | Sampled |
+| --- | ---: | ---: |
+| Drafts whose proposal holds one token (q ≥ 0.999) | 40% | 68% |
+| Drafts whose unfiltered drafter top-1 ≥ 0.999 | 40% | 41% |
+| Cycles with a sibling | 71% | 25% |
+| Sibling hit rate where its draft was rejected | 0.43 | 0.38 |
+| Sibling tokens per cycle | 0.187 | 0.062 |
+
+About 27% of sampled drafts lose their sibling to top-p truncation alone.
+Matching greedy's 0.187 sibling tokens per cycle would add ~0.125 tokens to
+~3.5 emitted per cycle: sampled +3–4% before the extra rows and before any
+change in chain acceptance.
+
+Candidates, all exact (rejection sampling stays exact for any q):
+
+1. Draw drafts from a less truncated drafter distribution (its own top-k,
+   no top-p, or a drafter-specific top-p or temperature). Siblings stay
+   available more often, but chain acceptance, the overlap of p and q, may
+   fall; the balance needs measuring.
+2. Several siblings per depth drawn without replacement (recursive
+   rejection sampling over k candidates, as in "Recursive Speculative
+   Decoding"), priced per row by the policy.
+3. Multi-candidate verification such as SpecTr's optimal-transport
+   matching: a larger rewrite of verification.
+
+Next steps, in order:
+
+1. Bound it offline, with no engine change: extend the cycle trace to log
+   each verified row's target candidates and the drafter's logits, then
+   extend `gemma4_draft_replay` to simulate expected tokens per cycle and
+   per millisecond for each proposal choice above, at the measured row
+   costs. Stop if the best choice gains under ~1%.
+2. Build only the winner; check seeded output distributions against the
+   target (`gemma4.kernel_ops` style) and A/B story and code-sampled with
+   ≥48 seeds (12-seed runs swung ±4%), on 31B and 26B.
 
 ## Opt-in levers (quality trade, default off)
 
