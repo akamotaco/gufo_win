@@ -545,11 +545,13 @@ struct Encoder::Impl {
   }
 
   /// y[rows][out] = x[rows][in] * W[out][in]^T with binary16 inputs.
+  /// 128 x 128 tiles from 128 rows: a 630-row layer (a 70-token image) takes
+  /// 0.75 instead of 1.14 ms; below 128 rows the narrow tiles still win.
   void Gemm(const Allocation& w, const Act* x, float* y, unsigned rows,
             unsigned out, unsigned in) {
     if (qwen38_flash_next::rocm::UnquantizedF16Gemm(
             w.data, reinterpret_cast<const __half*>(x), y, rows, out, in,
-            stream))
+            stream, /*wide_from=*/128))
       return;
     constexpr float alpha = 1, beta = 0;
     CheckBlas(hipblasGemmEx(blas, HIPBLAS_OP_T, HIPBLAS_OP_N, out, rows, in,

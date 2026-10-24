@@ -726,9 +726,12 @@ void Executor::ProjectHalf(const DeviceTensor& w, const float* x,
         x, x_half_, false, std::size_t{rows} * w.cols, stream_);
     xh = x_half_;
   }
+  // Every Gemma projection is thousands of outputs wide: 128 x 128 tiles
+  // from 128 rows (31B Q8 binary16 layers at 512 rows: q 1.91 -> 1.23 ms,
+  // down 5.03 -> 3.46 ms).
   if (!qwen38_flash_next::rocm::UnquantizedF16Gemm(
           w.data, static_cast<const __half*>(xh), y, rows, w.rows, w.cols,
-          stream_)) {
+          stream_, /*wide_from=*/128)) {
     throw std::runtime_error("gemma4 binary16 prefill shape unsupported");
   }
 }

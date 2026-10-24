@@ -227,9 +227,12 @@ bool HcMixF16Gemm(const void* up, const __half* low_rank, const __half* xn,
 
 /// F16 activation rows [batch][k], Q8_0 weights dequantized to F16 in LDS,
 /// F32 accumulation. out is [batch][m]. Unsupported shapes launch nothing.
+/// Batches from `wide_from` rows take 128 x 128 tiles instead of 64 x 64,
+/// with identical results; wide outputs (m in the thousands) gain from far
+/// fewer rows than Flash-Next's narrow router and gate projections.
 bool UnquantizedF16Gemm(const void* w, const __half* x, float* out,
                         std::size_t batch, std::size_t m, std::size_t k,
-                        hipStream_t stream);
+                        hipStream_t stream, std::size_t wide_from = 1024);
 /// Wide-batch tile plans a caller may choose for DenseF16Gemm; kAuto keeps
 /// the Flash-Next dispatch. The others apply from 1024 rows: eight row groups
 /// (each weight fragment reused across the token tiles), optionally with the
