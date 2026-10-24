@@ -2588,7 +2588,14 @@ __global__ void SelectScoreKernel(const float* q, const __half* blocks,
     key[i] = reinterpret_cast<const std::uint32_t*>(
         blocks)[std::size_t{b} * kSelectDim / 2 + i];
   float total = 0.0F;
+#if __clang_major__ >= 23
+  // Newer LLVM versions hoist queries from all four unrolled heads,
+  // overflowing the scalar register file. LLVM 23 also spills into private
+  // memory. Keep one head live without changing the FMA or reduction order.
+#pragma unroll 1
+#else
 #pragma unroll
+#endif
   for (unsigned h = 0; h < kSelectHeads; ++h) {
     __builtin_amdgcn_sched_barrier(0);
     const auto* query = q + (std::size_t{t0} * kSelectHeads + h) * kSelectDim;
@@ -7248,13 +7255,14 @@ bool HcMixF16Gemm(const void* up, const __half* low_rank, const __half* xn,
 
 bool UnquantizedF16Gemm(const void* w, const __half* x, float* out,
                         std::size_t batch, std::size_t m, std::size_t k,
-                        hipStream_t stream) {
+                        hipStream_t stream, std::size_t wide_from) {
   if (m == 0 || batch == 0 || k == 0 || k % 32 != 0)
     return false;
   // Wide batches reuse each staged fragment across twice the rows and
   // tokens (router 0.61 to 0.52 ms, GDN alpha/beta 0.14 to 0.09 ms at 4,096
-  // tokens). Every output keeps its two K16 chains in K order.
-  if (batch >= 1024) {
+  // tokens). Every output keeps its two K16 chains in K order, so the tile
+  // choice never changes a result.
+  if (batch >= wide_from) {
     hipLaunchKernelGGL(
         (DenseF16GEMMKernel<128, 128, 2, 2, 4, 1, false, false, false, true>),
         dim3((batch + 127) / 128, (m + 127) / 128), dim3(kThreads), 0, stream,

@@ -4,6 +4,15 @@ Changes made in this fork's Gemma 4 engine, newest first. Each entry is a brief
 summary; its pull request has the details, measurements and validation.
 Upstream Gufo's changes are in [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-24: Upstream v0.23.0 and faster small binary16 GEMMs ([#9](https://github.com/franzmoca/gufo/pull/9))
+
+- Merged upstream Gufo v0.22.0–v0.23.0. Repeated `--served-model-name` works
+  for Gemma models.
+- The vision encoder and binary16 prefill layers use wide GEMM tiles from
+  128 rows instead of 1024. A 70-token image's prompt time drops from 104 to
+  97 ms on the 26B-A4B; 31B UD-Q8_K_XL pp768 is +2.3%. Results are
+  bit-identical.
+
 ## 2026-10-23: Faster UD-Q8_K_XL prefill and MTP decoding ([#8](https://github.com/franzmoca/gufo/pull/8))
 
 - Q8_0 projections verify MTP drafts on the WMMA kernel over the grouped

@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "src/core/sampling.hpp"
+#include "src/core/speculative/prompt_lookup.hpp"
 #include "src/models/gemma4/config.hpp"
 #include "src/models/gemma4/cycle_trace.hpp"
 #include "src/models/gemma4/draft_policy.hpp"
@@ -23,7 +24,6 @@
 #include "src/models/gemma4/tokenizer.hpp"
 #include "src/models/qwen38_flash_next/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
-#include "src/models/qwen38_flash_next/prompt_lookup.hpp"
 
 namespace gufo::core {
 class GgufReader;
@@ -470,7 +470,7 @@ private:
   std::vector<ImageSpan> images_;
   /// Prompt-lookup index over tokens_; cleared whenever tokens_ is rewritten
   /// rather than appended to.
-  qwen38_flash_next::PromptLookup lookup_;
+  speculative::PromptLookup<> lookup_;
   /// The request's draft vocabulary over tokens_ (PrepareDraftHead), reset
   /// with lookup_.
   qwen38_flash_next::MtpDraftVocab draft_vocab_{kDraftTableRows};

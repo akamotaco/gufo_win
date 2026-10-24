@@ -34,7 +34,8 @@ REQUIRED_DOC_FILES = [
       for model in ("deepseek-v4-flash", "gemma-4-26b-a4b", "gemma-4-31b",
                     "qwen3.8-27b",
                     "qwen3.8-flash-next",
-                    "qwen3-asr", "qwen3-tts", "qwen-image-2.1", "minimax-h3")
+                    "qwen3-asr", "qwen3-tts", "qwen-image-2.1", "minimax-h3",
+                    "embeddinggemma-2")
       for document in ("README", "BENCHMARKS", "QUALITY", "EXPERIMENTS")],
 ]
 
