@@ -4,7 +4,7 @@ Changes made in this fork's Gemma 4 engine, newest first. Each entry is a brief
 summary; its pull request has the details, measurements and validation.
 Upstream Gufo's changes are in [CHANGELOG.md](CHANGELOG.md).
 
-## 2026-10-24: Upstream v0.23.0 and faster small binary16 GEMMs
+## 2026-10-24: Upstream v0.23.0 and faster small binary16 GEMMs ([#9](https://github.com/franzmoca/gufo/pull/9))
 
 - Merged upstream Gufo v0.22.0–v0.23.0. Repeated `--served-model-name` works
   for Gemma models.
