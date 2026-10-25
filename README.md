@@ -6,6 +6,19 @@
 
 ## gufo_win: native Windows build with Gemma 4
 
+> [!IMPORTANT]
+> **This is a temporary repository.** Upstream Gufo has started its own Windows
+> support: since v0.23.0 the OS facilities live in `src/core/platform/` with
+> Windows implementations ([#752](https://github.com/gufo-org/gufo/pull/752)),
+> and CI builds and runs the platform and cache tests for Windows
+> ([#757](https://github.com/gufo-org/gufo/pull/757)). As of October 2026 the
+> server, model engines and HIP kernels still build on Linux only, so this
+> port is still needed to run Gufo on Windows. Each merge replaces the parts of
+> this port that upstream now covers with the upstream code. Once upstream
+> builds and serves on Windows, this repository will be retired in favour of
+> [gufo-org/gufo](https://github.com/gufo-org/gufo) (plus
+> [franzmoca/gufo](https://github.com/franzmoca/gufo) `feat/gemma` for Gemma 4).
+
 This repository runs Gufo **natively on Windows 11** (no WSL) on AMD Strix Halo
 (`gfx1151`), and includes the **Gemma 4 engine** from the `feat/gemma` fork.
 It combines three sources:

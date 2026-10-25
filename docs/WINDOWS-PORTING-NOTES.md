@@ -18,6 +18,13 @@
     `src/core/platform/`(소켓, 장치 메모리, 튜닝 스위치), `#ifdef _WIN32` 분기에만 둔다.
   - 본가 코드를 고치기보다 `compat/win32`에 POSIX 함수를 추가하는 쪽을 먼저 택한다. rebase 충돌이 줄어든다.
   - 충돌에서 본가가 같은 기능을 다르게 구현했다면 본가 쪽을 택한다(아래 4절 사례).
+  - **본가 Windows 지원 (v0.22~0.23, 2026-10-24부터)**: 본가가 `src/core/platform/`에 OS별 leaf(`fs`, `pages`,
+    `page_pin`, `mapped_file`, `net`, `socket`, `shutdown_signal`)를 두고 Windows 구현을 넣기 시작했다(#752, #757,
+    `AGENTS.md` 규칙 #754). 다만 Windows에서 빌드되는 것은 `GUFO_PLATFORM_ONLY`(leaf, CPU 캐시, 그 테스트)뿐이고
+    서버·엔진·HIP 커널은 아직 Linux 전용이다. 그래서 이 포트는 아직 필요하다. 방침: 본가 leaf가 대체하는 우리 코드
+    (io_uring pin 분기, `MapBlocks`, `gguf_identity`의 캐시 디렉터리 등)는 본가 쪽으로 버리고, 본가에 대응이 없는
+    부분(`compat/win32`, 소켓 함수들, serve/엔진/빌드 수정)만 유지한다. 본가가 전체를 Windows에서 빌드하게 되면
+    이 저장소는 폐기한다(README 상단 안내).
 
 ## 2. 툴체인 (이 장비)
 
@@ -103,6 +110,11 @@ grep -rn 'syscall(SYS_\|/proc/\|/sys/\|io_uring' src                           #
 | `src/models/qwen/chat_template.hpp` | 본가 `RenderedPromptBoundBytes`(#288) 유지. 포팅의 8MiB 고정값과 `require_tool_call`은 버림 |
 | `src/cli/serve/openai_chat.cpp` | `top_logprobs: 0` 허용만 가져옴. `response_format: text`는 본가가 구조화 출력으로 처리하므로 버림 |
 | `docs/WINDOWS.md` "Other text models" | 해당 커밋(27B, A3B)을 넣지 않았으므로 제외 |
+| `src/core/hip/committed_backing.cpp`, `host_allocations.cpp` (v0.23 병합) | 본가 `platform::CommitZeroedPages`/`PinHostPages` leaf를 택함(Windows는 `VirtualAlloc`, pin 없음). 우리 `MapBlocks` `_WIN32` 분기와 io_uring `#ifdef`는 버림. `hipHostRegister` 실패 시 last error를 지우고 로그 남기는 로컬 수정(`4eb08b11`)만 유지 |
+| `src/core/platform/socket.hpp` (v0.23 병합, add/add) | 본가의 헤더 블록과 `kSocketCloexec`를 앞에 두고, 우리 `CloseSocket`/`SocketRecv`/`SetSocketTimeout` 등은 그 뒤에 유지 |
+| `src/core/gguf_identity.cpp` (v0.23 병합) | 본가 `platform::fs` 구현을 택함. `%LOCALAPPDATA%` 캐시 경로는 본가 `UserCacheDirectory()`가 처리 |
+| `CMakeLists.txt` (v0.23 병합) | 본가 `GUFO_PLATFORM_ONLY` 블록을 먼저 두고 우리 `if (WIN32)` compat 블록은 그 뒤에. 첫 줄의 Linux/Windows 허용 검사는 우리 쪽 유지 |
+| 테스트 파일들 (v0.23 병합) | 본가가 테스트를 portable 기능으로 옮겼으므로(#767) 모두 본가 쪽 |
 
 ## 5. 열린 항목
 
