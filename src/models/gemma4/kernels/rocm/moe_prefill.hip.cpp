@@ -1505,8 +1505,9 @@ bool LaunchDenseHalfGemm(ExpertFormat format, const void* w, const void* x,
                          std::uint32_t m, std::uint32_t k, hipStream_t stream,
                          bool geglu, bool grouped) {
   // Q4_0 and Q5_0 take the down kernel's 64-value stages.
-  const bool blockwise =
-      format == ExpertFormat::kQ4_0 || format == ExpertFormat::kQ5_0;
+  const bool blockwise = format == ExpertFormat::kQ4_0 ||
+                         format == ExpertFormat::kQ5_0 ||
+                         format == ExpertFormat::kQ8_0;
   if (rows == 0 || k % (blockwise ? kDownStageK : 256) != 0 ||
       (out == nullptr) == (out_half == nullptr) ||
       (geglu && (out_half == nullptr || m % 2 != 0)) ||
@@ -1516,8 +1517,11 @@ bool LaunchDenseHalfGemm(ExpertFormat format, const void* w, const void* x,
   }
   // Seven 16-token tiles: each decoded weight fragment feeds seven products
   // instead of six, and the 30 KB of staged activations still let four blocks
-  // share a WGP (128 tokens take 35 KB and three).
+  // share a WGP (128 tokens take 35 KB and three). Q6_K, whose decode costs
+  // the most, takes nine from 4096 rows (three blocks per WGP): llama.cpp
+  // Q6_K 31B pp2048 +1.3%; the 26B's 2816-row outputs lose 8% that way.
   constexpr int kTile = 112;
+  constexpr int kQ6Tile = 144;
   // Token tiles per row-block sweep (cold 2048-row Gemma 31B shapes: 2 or 3
   // beat both one and every tile).
   constexpr std::uint32_t kGroup = 2;
@@ -1545,21 +1549,31 @@ bool LaunchDenseHalfGemm(ExpertFormat format, const void* w, const void* x,
     };
     grouped ? go.template operator()<true>() : go.template operator()<false>();
   };
-  const auto launch = [&]<ExpertFormat F>() {
+  const auto launch_tile = [&]<ExpertFormat F, int kT>() {
+    const dim3 tiles(((rows + kT - 1) / kT) * row_blocks);
     const auto go = [&]<bool kGrouped>() {
       if (geglu) {
-        RoutedHalfKQuantKernel<F, kTile, true, true, 0, kGrouped>
-            <<<grid, kThreads, 0, stream>>>(wb, xh, nullptr, nullptr, nullptr,
-                                            nullptr, out, oh, m, k, rows,
-                                            kGroup);
+        RoutedHalfKQuantKernel<F, kT, true, true, 0, kGrouped>
+            <<<tiles, kThreads, 0, stream>>>(wb, xh, nullptr, nullptr, nullptr,
+                                             nullptr, out, oh, m, k, rows,
+                                             kGroup);
       } else {
-        RoutedHalfKQuantKernel<F, kTile, false, true, 0, kGrouped>
-            <<<grid, kThreads, 0, stream>>>(wb, xh, nullptr, nullptr, nullptr,
-                                            nullptr, out, oh, m, k, rows,
-                                            kGroup);
+        RoutedHalfKQuantKernel<F, kT, false, true, 0, kGrouped>
+            <<<tiles, kThreads, 0, stream>>>(wb, xh, nullptr, nullptr, nullptr,
+                                             nullptr, out, oh, m, k, rows,
+                                             kGroup);
       }
     };
     grouped ? go.template operator()<true>() : go.template operator()<false>();
+  };
+  const auto launch = [&]<ExpertFormat F>() {
+    if constexpr (F == ExpertFormat::kQ6_K) {
+      if (m >= 4096) {
+        launch_tile.template operator()<F, kQ6Tile>();
+        return;
+      }
+    }
+    launch_tile.template operator()<F, kTile>();
   };
   switch (format) {
     case ExpertFormat::kQ4_K:
@@ -1576,6 +1590,9 @@ bool LaunchDenseHalfGemm(ExpertFormat format, const void* w, const void* x,
       return true;
     case ExpertFormat::kQ5_0:
       launch_blockwise.template operator()<ExpertFormat::kQ5_0>();
+      return true;
+    case ExpertFormat::kQ8_0:
+      launch_blockwise.template operator()<ExpertFormat::kQ8_0>();
       return true;
     default:
       return false;

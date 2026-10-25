@@ -19,6 +19,7 @@
 #include "src/models/gemma4/draft_vocab.hpp"
 #include "src/models/gemma4/kernels/rocm/device_model.hpp"
 #include "src/models/gemma4/kernels/rocm/executor.hpp"
+#include "src/models/gemma4/sibling_verification.hpp"
 #include "src/models/gemma4/weights.hpp"
 #include "src/models/qwen/hip/ops/token.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
@@ -886,72 +887,52 @@ Alternative SampledAlternative(const qwen38_flash_next::MtpProposal& proposal,
           static_cast<float>(proposal.probabilities[last] / rest)};
 }
 
-struct SiblingVerification {
-  sampling::TokenId token;
-  bool accepted;  ///< the chain's draft
-  bool sibling;   ///< the sibling, after the draft's rejection
-};
+/// Whether a sampler's target distributions can come from the verification
+/// rows' LogitCandidates: random top-k sampling within kCandidateTop with no
+/// constraint mask now (FinishCycle checks each row again).
+bool CandidateSampling(const sampling::SamplerState& sampler) {
+  const auto& config = sampler.config();
+  return config.uses_random_sampling() && config.top_k > 0 &&
+         static_cast<std::uint32_t>(config.top_k) <= rocm::kCandidateTop &&
+         config.min_keep <= rocm::kCandidateTop &&
+         !sampler.NeedsConstraintMask();
+}
 
-/// p/q verification of a draft with a sibling drawn from q without it:
-/// recursive rejection sampling. The draft is accepted with min(1, p/q);
-/// else the sibling, against the residual r = norm(max(p - q, 0)) and its
-/// own proposal q' = q without the draft, with min(1, r/q'); else the token
-/// comes from norm(max(r - q', 0)). The emitted token follows p exactly.
-SiblingVerification VerifyWithSibling(std::span<const float> logits,
-                                      const qwen38_flash_next::MtpProposal& q,
-                                      sampling::TokenId sibling,
-                                      sampling::SamplerState& sampler) {
-  const auto target = sampler.Distribution(logits);
-  if (sampler.Uniform() * q.probability < target.probability(q.token)) {
-    return {q.token, true, false};
+/// Adds to `extra` the tokens a cycle's sampler may penalize in any of its
+/// rows: those it penalizes now and the cycle's own rows (accepting them
+/// adds no others). Sorted and unique once the caller sorts it.
+void AddPenalizable(const sampling::SamplerState& sampler,
+                    std::span<const TokenId> rows,
+                    std::span<const TokenId> siblings,
+                    std::vector<std::uint32_t>* extra) {
+  if (!sampler.config().penalties_enabled()) {
+    return;
   }
-  const auto draft = [&q](sampling::TokenId token) {
-    for (std::size_t i = 0; i < q.size; ++i) {
-      if (q.ids[i] == token) {
-        return static_cast<double>(q.probabilities[i]);
-      }
-    }
-    return 0.0;
-  };
-  std::vector<sampling::Probability> residual;
-  double total = 0.0;
-  for (const auto& entry : target.entries()) {
-    const double value = std::max(entry.value - draft(entry.token), 0.0);
-    if (value > 0.0) {
-      residual.push_back({.token = entry.token, .value = value});
-      total += value;
-    }
+  for (const auto& penalty : sampler.penalties()) {
+    extra->push_back(penalty.token);
   }
-  if (!(total > 0.0) || !std::isfinite(total)) {
-    return {target.Sample(sampler.mutable_rng_state()), false, false};
-  }
-  const double rest = 1.0 - static_cast<double>(q.probability);
-  const double own = draft(sibling) / rest;
-  const double r =
-      std::max(target.probability(sibling) - draft(sibling), 0.0) / total;
-  if (sampler.Uniform() * own < r) {
-    return {sibling, false, true};
-  }
-  std::vector<sampling::Probability> second;
-  for (const auto& entry : residual) {
-    const double other =
-        entry.token == q.token ? 0.0 : draft(entry.token) / rest;
-    const double value = std::max(entry.value / total - other, 0.0);
-    if (value > 0.0) {
-      second.push_back({.token = entry.token, .value = value});
-    }
-  }
-  if (second.empty()) {
-    return {sampling::SamplingDistribution(std::move(residual))
-                .Sample(sampler.mutable_rng_state()),
-            false, false};
-  }
-  return {sampling::SamplingDistribution(std::move(second))
-              .Sample(sampler.mutable_rng_state()),
-          false, false};
+  extra->insert(extra->end(), rows.begin(), rows.end());
+  extra->insert(extra->end(), siblings.begin(), siblings.end());
+}
+
+void SortUnique(std::vector<std::uint32_t>* tokens) {
+  std::ranges::sort(*tokens);
+  tokens->erase(std::ranges::unique(*tokens).begin(), tokens->end());
 }
 
 }  // namespace
+
+/// A cycle's view of its verification forward's LogitCandidates. Every row
+/// carries the logits of `extra`, which holds each token the sampler could
+/// penalize, so the candidates hold every row's top-k after penalties; rows
+/// a constraint masks, or whose candidates overflowed, read `full`.
+struct Session::VerifyCandidates {
+  const rocm::Executor::Candidates* rows{nullptr};
+  std::uint32_t first{0};  ///< the cycle's first row in `rows`
+  std::span<const std::uint32_t> extra;
+  /// The cycle's full logit rows, copied on first use.
+  std::function<std::span<const float>()> full;
+};
 
 /// One cycle's drafting: the length policy, sampled proposals and
 /// prompt-lookup copies, asked for one proposal per drafter step.
@@ -986,8 +967,17 @@ struct Session::CycleDraft {
       // of a cycle without them.
       sibling_rng = draft_rng ^ 0x9E3779B97F4A7C15ULL;
       // Drafts are proposals: only the target's verification is
-      // constrained (a grammar may exclude every drafter candidate).
+      // constrained (a grammar may exclude every drafter candidate). Dense
+      // targets' drafts skip top-p too, which keeps a sibling candidate
+      // beside each draft: at top-p 0.95, 59% of 31B UD-Q8_K_XL story and
+      // code-sampled proposals held one token, while chain acceptance
+      // sum(min(p, q)) is 0.541 without it against 0.544 (rejection sampling
+      // is exact for any q). The 26B-A4B's verification rows cost too much
+      // for siblings to pay, so its drafts keep top-p.
       draft_sampler = cycle.sampler->WithoutConstraint();
+      if (!session.model_->config().HasExperts()) {
+        draft_sampler = draft_sampler.WithoutTopP();
+      }
     }
   }
 
@@ -1038,7 +1028,7 @@ struct Session::CycleDraft {
     }
     std::size_t agreed = 0;
     const auto match = session.lookup_.Find(
-        session.tokens_, context, qwen38_flash_next::PromptLookup::kMinMatch,
+        session.tokens_, context, speculative::PromptLookup<>::kMinMatch,
         /*require_resume=*/false, &agreed);
     if (match.length == 0) {
       return false;
@@ -1149,6 +1139,9 @@ struct Session::CycleDraft {
           qwen38_flash_next::SampleMtpProposal(c, draft_sampler, &draft_rng);
       if (cycle.trace) {
         cycle.trace->proposal_q.push_back(proposal.probability);
+        CycleRecord::Sparse& raw = cycle.trace->draft_candidates.emplace_back();
+        raw.ids.assign(c.ids.begin(), c.ids.begin() + c.size);
+        raw.values.assign(c.logits.begin(), c.logits.begin() + c.size);
       }
       if (Stop(cycle.proposals.size(), proposal.probability, c)) {
         (void)Copy();
@@ -1223,6 +1216,15 @@ bool Session::DecodeStep(std::size_t max_tokens,
   auto& executor = *model_->executor_;
   const bool use_argmax =
       !cycle.sampled && sampler.config().can_use_unmodified_argmax();
+  bool use_candidates = !use_argmax && !cycle.trace &&
+                        executor.CanReadCandidates() &&
+                        CandidateSampling(sampler);
+  std::vector<std::uint32_t> extra;
+  if (use_candidates) {
+    AddPenalizable(sampler, cycle.rows, cycle.siblings, &extra);
+    SortUnique(&extra);
+    use_candidates = extra.size() <= rocm::kMaxCandidateExtra;
+  }
   std::span<const float> logits;
   std::span<const std::uint32_t> argmax;
   try {
@@ -1232,15 +1234,24 @@ bool Session::DecodeStep(std::size_t max_tokens,
     }
     executor.Forward(*cache_, cycle.rows, cycle.position, logit_rows, {},
                      static_cast<std::uint32_t>(cycle.siblings.size()));
+    rocm::Executor::Candidates candidates;
+    VerifyCandidates view;
     if (use_argmax) {
       argmax = executor.ReadArgmax(cycle.rows.size());
+    } else if (use_candidates) {
+      candidates = executor.ReadCandidates(cycle.rows.size(), extra);
+      view = {.rows = &candidates,
+              .extra = extra,
+              .full = [&executor, n = cycle.rows.size()] {
+                return executor.ReadLogits(n);
+              }};
     } else {
       logits = executor.ReadLogits(cycle.rows.size());
     }
     if (cycle.trace) {
       cycle.trace->verified_ns = CycleTrace::Now();
     }
-    FinishCycle(cycle, logits, argmax, 0);
+    FinishCycle(cycle, logits, argmax, 0, use_candidates ? &view : nullptr);
   } catch (const std::exception& e) {
     Reset();
     return Fail(error_msg, e.what());
@@ -1505,6 +1516,14 @@ void Session::TraceRows(Cycle& cycle, std::span<const float> logits,
         cycle.sampler->Distribution(logits.subspan(r * vocab, vocab));
     trace.row_acceptance.push_back(static_cast<float>(std::min(
         1.0, p.probability(q.token) / static_cast<double>(q.probability))));
+    CycleRecord::Sparse& qd = trace.proposal_dist.emplace_back();
+    qd.ids.assign(q.ids.begin(), q.ids.begin() + q.size);
+    qd.values.assign(q.probabilities.begin(), q.probabilities.begin() + q.size);
+    CycleRecord::Sparse& pd = trace.target_dist.emplace_back();
+    for (const auto& entry : p.entries()) {
+      pd.ids.push_back(static_cast<std::int32_t>(entry.token));
+      pd.values.push_back(static_cast<float>(entry.value));
+    }
     if (!beside) {
       continue;
     }
@@ -1536,7 +1555,8 @@ void Session::TraceRows(Cycle& cycle, std::span<const float> logits,
 
 void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
                           std::span<const std::uint32_t> argmax,
-                          std::uint32_t first_hidden_row) {
+                          std::uint32_t first_hidden_row,
+                          const VerifyCandidates* candidates) {
   auto& sampler = *cycle.sampler;
   auto* result = cycle.result;
   const auto& rows = cycle.rows;
@@ -1552,12 +1572,44 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
   const std::size_t siblings = cycle.siblings.size();
   const std::size_t chain = rows.size() - siblings;
   const std::size_t vocab = model_->VocabSize();
+  // Row r's candidates give its exact target distribution while the sampler
+  // needs no constraint mask (nor forces a token) and holds no deferred draw.
+  const auto compact = [&](std::size_t r) {
+    return candidates != nullptr &&
+           candidates->rows->Complete(candidates->first + r) &&
+           !sampler.NeedsConstraintMask() && !sampler.SaveDrawState().pending;
+  };
+  const auto full_row = [&](std::size_t r) {
+    if (logits.empty()) {
+      logits = candidates->full();
+    }
+    return logits.subspan(r * vocab, vocab);
+  };
+  const auto candidate_row = [&](std::size_t r) {
+    const std::size_t row = candidates->first + r;
+    candidate_row_.clear();
+    for (const auto& candidate : candidates->rows->Top(row)) {
+      if (!std::ranges::binary_search(candidates->extra, candidate.token)) {
+        candidate_row_.push_back(candidate);
+      }
+    }
+    const auto extra = candidates->rows->Extra(row);
+    candidate_row_.insert(candidate_row_.end(), extra.begin(), extra.end());
+    return std::span<const sampling::LogitCandidate>(candidate_row_);
+  };
+  const auto target = [&](std::size_t r) {
+    return compact(r) ? sampler.DistributionFromCandidates(candidate_row(r))
+                      : sampler.Distribution(full_row(r));
+  };
   const auto sample_row = [&](std::size_t r) {
     if (!argmax.empty()) {
       return static_cast<TokenId>(hip::CheckedSampleToken(argmax[r], vocab));
     }
-    return static_cast<TokenId>(
-        sampler.Sample(logits.subspan(r * vocab, vocab)));
+    if (compact(r)) {
+      return static_cast<TokenId>(
+          target(r).Sample(sampler.mutable_rng_state()));
+    }
+    return static_cast<TokenId>(sampler.Sample(full_row(r)));
   };
   if (cycle.trace) {
     TraceRows(cycle, logits, argmax, chain);
@@ -1570,16 +1622,15 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
     agrees = false;
     const bool beside = row < siblings && row + 1 < chain;
     if (cycle.sampled && row + 1 < chain) {
-      const auto row_logits = logits.subspan(row * vocab, vocab);
       if (beside) {
         const auto verified = VerifyWithSibling(
-            row_logits, cycle.proposals[row], cycle.siblings[row], sampler);
+            target(row), cycle.proposals[row], cycle.siblings[row], sampler);
         emit(static_cast<TokenId>(verified.token));
         agrees = verified.accepted;
         sibling = verified.sibling;
       } else {
-        const auto verified = qwen38_flash_next::VerifyMtpProposal(
-            row_logits, cycle.proposals[row], sampler);
+        const auto verified = qwen38_flash_next::VerifyMtpTarget(
+            vocab, cycle.proposals[row], sampler, [&] { return target(row); });
         emit(static_cast<TokenId>(verified.token));
         agrees = verified.accepted;
       }
@@ -1634,9 +1685,9 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
   const auto committed_row =
       first_hidden_row + static_cast<std::uint32_t>(last);
   model_->executor_->CommitHidden(*cache_, committed_row);
-  // Greedy decode keeps the row on the device: nothing reads it on the
-  // host before the next cycle (EnsureLogits).
-  if (!argmax.empty()) {
+  // Greedy and candidate-sampled decode keep the row on the device: nothing
+  // reads it on the host before the next cycle (EnsureLogits).
+  if (!argmax.empty() || candidates != nullptr) {
     model_->executor_->CommitLogits(*cache_, committed_row);
     logits_on_device_ = true;
   } else {
@@ -1682,6 +1733,12 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
     CycleRecord& trace = *cycle.trace;
     trace.position = cycle.position;
     trace.sampled = cycle.sampled;
+    if (cycle.sampled) {
+      const auto& config = cycle.sampler->config();
+      trace.temperature = config.temperature;
+      trace.top_k = config.top_k;
+      trace.top_p = config.top_p;
+    }
     trace.rows = static_cast<std::uint32_t>(rows.size());
     trace.copied = static_cast<std::uint32_t>(cycle.copied);
     trace.siblings = static_cast<std::uint32_t>(siblings);
@@ -1805,10 +1862,30 @@ bool Session::DecodeBatch(std::span<BatchDecode> decodes) {
     ++model.forwards_;
   }
   auto& executor = *model.executor_;
-  bool use_argmax = true;
+  // Each cycle reads argmax ids (greedy) or sampling candidates; if any
+  // needs full logits, all read them.
+  std::vector<std::uint8_t> sample(cycles.size(), 0);
+  bool any_argmax = false;
+  bool any_candidates = false;
+  bool full = model.trace_ != nullptr || !executor.CanReadCandidates();
+  std::vector<std::uint32_t> extra;
   for (const std::size_t i : active) {
-    use_argmax = use_argmax && !cycles[i].sampled &&
-                 cycles[i].sampler->config().can_use_unmodified_argmax();
+    const auto& sampler = *cycles[i].sampler;
+    if (!cycles[i].sampled && sampler.config().can_use_unmodified_argmax()) {
+      any_argmax = true;
+    } else if (CandidateSampling(sampler)) {
+      sample[i] = 1;
+      any_candidates = true;
+      AddPenalizable(sampler, cycles[i].rows, cycles[i].siblings, &extra);
+    } else {
+      full = true;
+    }
+  }
+  SortUnique(&extra);
+  full = full || extra.size() > rocm::kMaxCandidateExtra;
+  if (full) {
+    any_argmax = false;
+    any_candidates = false;
   }
   std::span<const float> logits;
   std::span<const std::uint32_t> argmax;
@@ -1818,10 +1895,15 @@ bool Session::DecodeBatch(std::span<BatchDecode> decodes) {
       logit_rows[i] = i;
     }
     executor.Forward(segments, tokens, logit_rows);
-    if (use_argmax) {
-      argmax = executor.ReadArgmax(tokens.size());
-    } else {
+    rocm::Executor::Candidates candidates;
+    if (full) {
       logits = executor.ReadLogits(tokens.size());
+    }
+    if (any_argmax) {
+      argmax = executor.ReadArgmax(tokens.size());
+    }
+    if (any_candidates) {
+      candidates = executor.ReadCandidates(tokens.size(), extra);
     }
     if (model.trace_) {
       const std::int64_t verified = CycleTrace::Now();
@@ -1830,16 +1912,31 @@ bool Session::DecodeBatch(std::span<BatchDecode> decodes) {
       }
     }
     const std::size_t vocab = model.VocabSize();
+    // Rows a candidate cycle needs in full are copied once for the batch.
+    std::span<const float> fetched;
+    const auto fetch = [&] {
+      if (fetched.empty()) {
+        fetched = executor.ReadLogits(tokens.size());
+      }
+      return fetched;
+    };
     std::uint32_t row0 = 0;
     for (const std::size_t i : active) {
       const std::size_t count = cycles[i].rows.size();
+      VerifyCandidates view{.rows = &candidates,
+                            .first = row0,
+                            .extra = extra,
+                            .full = [&fetch, row0, count, vocab] {
+                              return fetch().subspan(row0 * vocab,
+                                                     count * vocab);
+                            }};
       decodes[i].session->FinishCycle(
           cycles[i],
-          use_argmax ? std::span<const float>{}
-                     : logits.subspan(row0 * vocab, count * vocab),
-          use_argmax ? argmax.subspan(row0, count)
-                     : std::span<const std::uint32_t>{},
-          row0);
+          full ? logits.subspan(row0 * vocab, count * vocab)
+               : std::span<const float>{},
+          !full && sample[i] == 0 ? argmax.subspan(row0, count)
+                                  : std::span<const std::uint32_t>{},
+          row0, !full && sample[i] != 0 ? &view : nullptr);
       row0 += static_cast<std::uint32_t>(count);
     }
   } catch (const std::exception& e) {

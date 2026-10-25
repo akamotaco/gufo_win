@@ -4,9 +4,9 @@
 // decoded) on the same weights.
 //
 //   nix develop -c tools/bench/build.sh gemma4_prefill_bench
-//   /tmp/gemma4_prefill_bench [iterations] [rows] [ud|qat] [group] [rounds]
+//   /tmp/gemma4_prefill_bench [iterations] [rows] [ud|qat|q6] [group] [rounds]
 //
-// ud and qat are the 31B UD-Q4_K_XL and QAT shape mixes; group overrides the
+// ud, qat and q6 are the 31B UD-Q4_K_XL, QAT and llama.cpp Q6_K shape mixes; group overrides the
 // copies' token tiles per row-block sweep (0: the launcher's default); each
 // layout keeps its best time over `rounds` alternating rounds. GUFO_G4_SHAPE
 // keeps only the shapes whose name contains it (e.g. for counter profiles).
@@ -256,7 +256,20 @@ int main(int argc, char** argv) {
       {"o sliding [5376x8192]", ExpertFormat::kQ4_0, 5376, 8192, false, 50},
       {"o global [5376x16384]", ExpertFormat::kQ4_0, 5376, 16384, false, 10},
   };
-  const auto& shapes = profile == "qat" ? qat : ud;
+  // A single-format Q6_K 31B (llama.cpp Q6_K): [q | k | v] fused in sliding
+  // layers, [q | k] in global ones.
+  const std::vector<Shape> q6 = {
+      {"gate|up Q6_K [43008x5376]", ExpertFormat::kQ6_K, 43008, 5376, true, 60},
+      {"down Q6_K [5376x21504]", ExpertFormat::kQ6_K, 5376, 21504, false, 60},
+      {"q|k|v sliding Q6_K [16384x5376]", ExpertFormat::kQ6_K, 16384, 5376,
+       false, 50},
+      {"q|k global Q6_K [18432x5376]", ExpertFormat::kQ6_K, 18432, 5376, false,
+       10},
+      {"o sliding Q6_K [5376x8192]", ExpertFormat::kQ6_K, 5376, 8192, false, 50},
+      {"o global Q6_K [5376x16384]", ExpertFormat::kQ6_K, 5376, 16384, false,
+       10},
+  };
+  const auto& shapes = profile == "qat" ? qat : profile == "q6" ? q6 : ud;
   std::printf("\n%-30s %8s %8s %8s %7s %7s\n", "shape (ms, best)", "gguf",
               "compact", "decoded", "compact", "decoded");
   // gguf, compact where supported, decoded where supported (else compact)

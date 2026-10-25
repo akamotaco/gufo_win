@@ -27,6 +27,7 @@ namespace gufo::models::gemma4::rocm {
 namespace {
 
 constexpr std::size_t kAlign = 256;
+constexpr std::size_t kCandidateHeaderBytes = 256;
 
 std::size_t AlignUp(std::size_t n) {
   return (n + kAlign - 1) / kAlign * kAlign;
@@ -342,11 +343,38 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
                               logits_host_.size() * sizeof(float),
                               hipHostRegisterDefault));
   }
+  if (model.vocab_size() % 4 == 0) {
+    const std::size_t work = CandidateWorkBytes(kSplitRows);
+    const std::size_t out =
+        kCandidateHeaderBytes + std::size_t{kSplitRows} *
+                                    (kCandidateTop + 2 * kMaxCandidateExtra) *
+                                    sizeof(sampling::LogitCandidate);
+    const std::size_t extra = kMaxCandidateExtra * sizeof(std::uint32_t);
+    HIP_CHECK(hip::AllocateDevice(&candidate_scratch_, work + out + extra));
+    auto* base = static_cast<std::uint8_t*>(candidate_scratch_);
+    candidate_work_ = CandidateWorkAt(base, kSplitRows, stream_);
+    candidate_out_ = base + work;
+    candidate_extra_ = reinterpret_cast<std::uint32_t*>(base + work + out);
+    candidate_host_.resize(out);
+    candidate_extra_host_.resize(kMaxCandidateExtra);
+    HIP_CHECK(hipHostRegister(candidate_host_.data(), candidate_host_.size(),
+                              hipHostRegisterDefault));
+    HIP_CHECK(hipHostRegister(candidate_extra_host_.data(),
+                              kMaxCandidateExtra * sizeof(std::uint32_t),
+                              hipHostRegisterDefault));
+  }
 }
 
 Executor::~Executor() {
   if (!logits_host_.empty()) {
     hip::LogCleanupError(hipHostUnregister(logits_host_.data()));
+  }
+  if (!candidate_host_.empty()) {
+    hip::LogCleanupError(hipHostUnregister(candidate_host_.data()));
+    hip::LogCleanupError(hipHostUnregister(candidate_extra_host_.data()));
+  }
+  if (candidate_scratch_ != nullptr) {
+    hip::LogCleanupError(hipFree(candidate_scratch_));
   }
   if (argmax_host_ != nullptr) {
     hip::LogCleanupError(hipHostFree(argmax_host_));
@@ -457,21 +485,21 @@ std::optional<GemvFormat> GemvFormatOf(core::GgmlType type) {
   }
 }
 
-/// The binary16 GEMM plan for a Q8_0 projection of the 26B-A4B's width (the
-/// Flash-Next dispatch is tuned on its own shapes): eight row groups, and the
-/// two-block stage over a long K. Attention output (176 blocks, K = 4096 or
-/// 8192) 2013 -> 1759 us per 2048 rows; dense MLP down (K = 2112) 605 ->
-/// 582 us.
+/// The binary16 GEMM plan for a Q8_0 projection of a Gemma width (the
+/// Flash-Next dispatch is tuned on its own shapes): eight row groups for the
+/// 26B-A4B's dense MLP down (K = 2112), 605 -> 582 us per 2048 rows. The
+/// 31B's 5376 outputs (21 row tiles) take two-block stages and walk seven
+/// row tiles of a token tile in launch order: per pp2048 chunk, attention
+/// output 473 -> 344 ms and MLP down 824 -> 769 ms. Its other shapes
+/// measured slower with every staged or walking plan.
 qwen38_flash_next::rocm::DenseF16Plan HalfPlan(std::uint32_t m,
                                                std::uint32_t k) {
   using qwen38_flash_next::rocm::DenseF16Plan;
-  if (m != 2816) {
-    return DenseF16Plan::kAuto;
+  if (m == 5376 && k >= 8192) {
+    return DenseF16Plan::kStagedRowGroups8Walk7;
   }
-  if (k >= 4096) {
-    return DenseF16Plan::kStagedRowGroups8;
-  }
-  return k == 2112 ? DenseF16Plan::kRowGroups8 : DenseF16Plan::kAuto;
+  return m == 2816 && k == 2112 ? DenseF16Plan::kRowGroups8
+                                : DenseF16Plan::kAuto;
 }
 
 /// The formats of the dense binary16 prefill GEMM (LaunchDenseHalfGemm).
@@ -550,10 +578,18 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
       // Binary16 activations: Q8_0, Q4_0 and K-quant weights decode to
       // binary16 in the WMMA GEMMs; other formats keep the W8A8 route on their
       // own Q8_1 rows.
+      // The 26B-A4B's Q8_0 attention outputs (2816 outputs, 11 row tiles
+      // of Flash-Next's 256-row blocks) fill the WGPs better on Gemma's
+      // 128-row blocks, with the same sums: 1.80 -> 1.61 ms per 2048 rows.
+      if (w.type == core::GgmlType::kQ8_0 && w.rows == 2816 && w.cols >= 4096 &&
+          LaunchDenseHalfGemm(ExpertFormat::kQ8_0, w.data, xq, y, nullptr, rows,
+                              w.rows, w.cols, stream_, false, w.grouped)) {
+        return;
+      }
       if (w.type == core::GgmlType::kQ8_0 &&
           qwen38_flash_next::rocm::DenseF16Gemm(
               w.data, static_cast<const __half*>(xq), y, rows, w.rows, w.cols,
-              stream_, 0, HalfPlan(w.rows, w.cols))) {
+              stream_, 0, HalfPlan(w.rows, w.cols), w.grouped)) {
         return;
       }
       if (const auto format = DenseHalfFormat(w.type);
@@ -690,9 +726,12 @@ void Executor::ProjectHalf(const DeviceTensor& w, const float* x,
         x, x_half_, false, std::size_t{rows} * w.cols, stream_);
     xh = x_half_;
   }
+  // Every Gemma projection is thousands of outputs wide: 128 x 128 tiles
+  // from 128 rows (31B Q8 binary16 layers at 512 rows: q 1.91 -> 1.23 ms,
+  // down 5.03 -> 3.46 ms).
   if (!qwen38_flash_next::rocm::UnquantizedF16Gemm(
           w.data, static_cast<const __half*>(xh), y, rows, w.rows, w.cols,
-          stream_)) {
+          stream_, /*wide_from=*/128)) {
     throw std::runtime_error("gemma4 binary16 prefill shape unsupported");
   }
 }
@@ -998,7 +1037,10 @@ void Executor::Forward(std::span<const Segment> segments,
     WmmaPackOut down_pack{};
     const auto gate_up_half = DenseHalfFormat(L.ffn_gate_up.type);
     const bool gate_up_packed = PackedPrefill(L.ffn_gate_up, n);
-    if (!L.ffn_gate_up.empty() && half && (gate_up_half || gate_up_packed) &&
+    const bool gate_up_q8 = L.ffn_gate_up.type == core::GgmlType::kQ8_0;
+    const bool gate_up_f16 = L.ffn_gate_up.type == core::GgmlType::kF16;
+    if (!L.ffn_gate_up.empty() && half &&
+        (gate_up_half || gate_up_packed || gate_up_q8 || gate_up_f16) &&
         half_only({&L.ffn_down}) &&
         ((gate_up_packed &&
           LaunchPackedPrefillGemm(
@@ -1008,7 +1050,15 @@ void Executor::Forward(std::span<const Segment> segments,
          (gate_up_half &&
           LaunchDenseHalfGemm(*gate_up_half, L.ffn_gate_up.data, fq, nullptr,
                               gate_, n, L.ffn_gate_up.rows, L.ffn_gate_up.cols,
-                              stream_, true, L.ffn_gate_up.grouped)))) {
+                              stream_, true, L.ffn_gate_up.grouped)) ||
+         // Q8_0 and binary16: GeGLU of the FP32 [gate | up] sums, as the
+         // separate pass.
+         ((gate_up_q8 || gate_up_f16) && !gate_up_packed &&
+          qwen38_flash_next::rocm::DenseF16GeGluGemm(
+              L.ffn_gate_up.data, static_cast<const __half*>(fq),
+              static_cast<__half*>(static_cast<void*>(gate_)), n,
+              L.ffn_gate_up.rows, L.ffn_gate_up.cols, stream_,
+              L.ffn_gate_up.grouped, gate_up_f16)))) {
       // The GEMM writes GeGLU of each binary16 [gate | up] pair into the
       // (free) gate rows as the down projection's binary16 input.
       gq = gate_;
@@ -1716,6 +1766,44 @@ std::span<const float> Executor::ReadLogits(std::size_t rows) const {
   }
   HIP_CHECK(hipStreamSynchronize(stream_));
   return std::span<const float>(logits_host_.data(), count);
+}
+
+Executor::Candidates Executor::ReadCandidates(
+    std::size_t rows, std::span<const std::uint32_t> extra) const {
+  if (rows == 0 || rows > kSplitRows || extra.size() > kMaxCandidateExtra ||
+      candidate_scratch_ == nullptr) {
+    throw std::invalid_argument("gemma4 candidate rows exceed capacity");
+  }
+  const auto n_extra = static_cast<std::uint32_t>(extra.size());
+  const std::uint32_t top = kCandidateTop + n_extra;
+  if (n_extra != 0) {
+    std::ranges::copy(extra, candidate_extra_host_.begin());
+    HIP_CHECK(hipMemcpyAsync(candidate_extra_, candidate_extra_host_.data(),
+                             n_extra * sizeof(std::uint32_t),
+                             hipMemcpyHostToDevice, stream_));
+  }
+  auto* counts = reinterpret_cast<std::uint32_t*>(candidate_out_);
+  auto* data = reinterpret_cast<sampling::LogitCandidate*>(
+      candidate_out_ + kCandidateHeaderBytes);
+  LogitCandidates(logits_, static_cast<std::uint32_t>(rows),
+                  static_cast<std::uint32_t>(model_.vocab_size()), top,
+                  candidate_extra_, n_extra, candidate_work_, counts, data,
+                  stream_);
+  const std::size_t stride = top + n_extra;
+  HIP_CHECK(hipMemcpyAsync(
+      candidate_host_.data(), candidate_out_,
+      kCandidateHeaderBytes + rows * stride * sizeof(sampling::LogitCandidate),
+      hipMemcpyDeviceToHost, stream_));
+  HIP_CHECK(hipStreamSynchronize(stream_));
+  const auto* host = candidate_host_.data();
+  return {
+      .counts = {reinterpret_cast<const std::uint32_t*>(host), rows},
+      .data = {reinterpret_cast<const sampling::LogitCandidate*>(
+                   host + kCandidateHeaderBytes),
+               rows * stride},
+      .top = top,
+      .stride = static_cast<std::uint32_t>(stride),
+  };
 }
 
 void Executor::CopyLogits(std::size_t rows, std::vector<float>* out) const {

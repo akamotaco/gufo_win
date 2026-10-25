@@ -16,7 +16,7 @@ design (draft counts change the random draws), so they use several seeds.
 Workloads (d0 unless --depth adds a shared earlier turn of that many tokens,
 reused from the prompt cache): `prose` (12 greedy summary-and-story prompts
 over the model-bench synthetic passages, 256 tokens each), `story`
-(temperature 1, top-k 64, top-p 0.95, repeat penalty 1.05, 12 seeds x 128),
+(temperature 1, top-k 64, top-p 0.95, repeat penalty 1.05, 12 seeds x 128; --seeds),
 `code-write` (a new Python module from a spec, greedy, 384), `code-edit`
 (refactor a repository file given in context, greedy, 384), `repetitive`
 (copy the passage verbatim, greedy, 256) and `code-sampled` (the code-write
@@ -46,7 +46,7 @@ CODE_SPEC = ("Write a complete, production-quality Python module implementing a 
 STORY = {"temperature": 1.0, "top_k": 64, "top_p": 0.95, "repeat_penalty": 1.05}
 
 
-def workloads() -> list[tuple[str, int, list[dict]]]:
+def workloads(seeds: int = SEEDS, base: int = 1) -> list[tuple[str, int, list[dict]]]:
     """(name, max_tokens, requests); each request is {prompt, sampling...}."""
     code_file = (ROOT / "tools/gemma4/image_bench.py").read_text()
     edit = ("Here is a Python script:\n\n```python\n" + code_file + "```\n\nRefactor it: add type hints to "
@@ -56,12 +56,12 @@ def workloads() -> list[tuple[str, int, list[dict]]]:
     return [
         ("prose", 256, [{"prompt": synthetic_text(200_000 + i, WORDS) + TASKS["prose"], "temperature": 0}
                         for i in range(SEEDS)]),
-        ("story", 128, [{"prompt": passage + TASKS["story"], **STORY, "seed": s} for s in range(1, SEEDS + 1)]),
+        ("story", 128, [{"prompt": passage + TASKS["story"], **STORY, "seed": s} for s in range(base, base + seeds)]),
         ("code-write", 384, [{"prompt": CODE_SPEC, "temperature": 0}]),
         ("code-edit", 384, [{"prompt": edit, "temperature": 0}]),
         ("repetitive", 256, [{"prompt": passage + TASKS["repetition"], "temperature": 0}]),
         ("code-sampled", 192, [{"prompt": CODE_SPEC, "temperature": 0.6, "top_p": 0.95, "seed": s}
-                               for s in range(1, SEEDS + 1)]),
+                               for s in range(base, base + seeds)]),
     ]
 
 
@@ -97,11 +97,12 @@ def run_policy(args: argparse.Namespace, server_args: list[str]) -> dict:
                     time.sleep(0.5)
             post(args.port, {"model": "bench", "messages": [{"role": "user", "content": "Hi"}], "max_tokens": 8})
             results = {}
-            for name, max_tokens, requests in workloads():
+            for name, max_tokens, requests in workloads(args.seeds, args.seed_base):
                 if args.workloads and name not in args.workloads:
                     continue
                 tokens = ms = drafted = accepted = 0
                 hashes = []
+                per_request = []
                 for request in requests:
                     request = dict(request)
                     prompt = request.pop("prompt")
@@ -110,6 +111,7 @@ def run_policy(args: argparse.Namespace, server_args: list[str]) -> dict:
                     timings = reply["timings"]
                     tokens += timings["predicted_n"]
                     ms += timings["predicted_ms"]
+                    per_request.append([timings["predicted_n"], timings["predicted_ms"]])
                     drafted += timings.get("draft_n", 0)
                     accepted += timings.get("draft_n_accepted", 0)
                     text = reply["choices"][0]["message"]["content"]
@@ -117,7 +119,7 @@ def run_policy(args: argparse.Namespace, server_args: list[str]) -> dict:
                 cycles = tokens - accepted
                 results[name] = {"tok_s": 1000 * tokens / ms, "tokens": tokens,
                                  "drafts_per_cycle": drafted / cycles, "accepted_per_cycle": accepted / cycles,
-                                 "hashes": hashes}
+                                 "hashes": hashes, "requests": per_request}
             return {"server_args": server_args, "workloads": results}
         finally:
             server.terminate()
@@ -182,6 +184,8 @@ def main() -> int:
     run.add_argument("--depth", type=int, default=0, help="tokens of shared earlier conversation")
     run.add_argument("--port", type=int, default=58123)
     run.add_argument("--workloads", nargs="*", default=[])
+    run.add_argument("--seeds", type=int, default=SEEDS, help="seeds per sampled workload (story, code-sampled)")
+    run.add_argument("--seed-base", type=int, default=1, help="first seed of the sampled workloads")
     run.add_argument("policies", nargs="+", help="NAME=SERVER_ARGS, e.g. calibrated='--draft-policy calibrated'")
     table = sub.add_parser("table")
     table.add_argument("files", nargs="+")

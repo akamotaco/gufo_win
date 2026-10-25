@@ -1154,8 +1154,8 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     impl_->runner->SetPromptContext(*request.state, context);
     const auto started = Clock::now();
     // Cold Acquire has already reset the slot. In-place acquisition and live
-    // frontiers retain rows; an attempted restore (or an unusable live
-    // frontier) can also require another reset before cold use.
+    // frontiers retain rows; attempted restores (or an unusable live
+    // frontier) can also dirty a cold slot.
     bool clean = !live && !in_place;
     // A frontier captured between prefill passes cannot select the next token
     // of a prompt that ends there; serve that prompt from a shallower boundary.

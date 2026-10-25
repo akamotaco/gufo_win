@@ -16,6 +16,22 @@ json::Value Floats(const std::vector<float>& values) {
   return array;
 }
 
+/// [{"ids": [...], "v": [...]}, ...]
+json::Value Distributions(const std::vector<CycleRecord::Sparse>& rows) {
+  json::Value array = json::Value::array();
+  for (const CycleRecord::Sparse& row : rows) {
+    json::Value ids = json::Value::array();
+    for (const std::int32_t id : row.ids) {
+      ids.push_back(static_cast<long long>(id));
+    }
+    json::Value entry = json::Value::object();
+    entry["ids"] = std::move(ids);
+    entry["v"] = Floats(row.values);
+    array.push_back(std::move(entry));
+  }
+  return array;
+}
+
 }  // namespace
 
 std::string FormatCycleRecord(const CycleRecord& r) {
@@ -73,6 +89,14 @@ std::string FormatCycleRecord(const CycleRecord& r) {
     v["stop"] = std::move(stop);
   } else {
     v["stop"] = nullptr;
+  }
+  if (r.sampled) {
+    v["temperature"] = static_cast<double>(r.temperature);
+    v["top_k"] = static_cast<long long>(r.top_k);
+    v["top_p"] = static_cast<double>(r.top_p);
+    v["draft_candidates"] = Distributions(r.draft_candidates);
+    v["proposal_dist"] = Distributions(r.proposal_dist);
+    v["target_dist"] = Distributions(r.target_dist);
   }
   v["begin_ns"] = static_cast<long long>(r.begin_ns);
   v["drafted_ns"] = static_cast<long long>(r.drafted_ns);

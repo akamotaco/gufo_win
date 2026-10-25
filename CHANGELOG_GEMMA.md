@@ -4,6 +4,44 @@ Changes made in this fork's Gemma 4 engine, newest first. Each entry is a brief
 summary; its pull request has the details, measurements and validation.
 Upstream Gufo's changes are in [CHANGELOG.md](CHANGELOG.md).
 
+## 2026-10-24: Upstream v0.23.0 and faster small binary16 GEMMs ([#9](https://github.com/franzmoca/gufo/pull/9))
+
+- Merged upstream Gufo v0.22.0–v0.23.0. Repeated `--served-model-name` works
+  for Gemma models.
+- The vision encoder and binary16 prefill layers use wide GEMM tiles from
+  128 rows instead of 1024. A 70-token image's prompt time drops from 104 to
+  97 ms on the 26B-A4B; 31B UD-Q8_K_XL pp768 is +2.3%. Results are
+  bit-identical.
+
+## 2026-10-23: Faster UD-Q8_K_XL prefill and MTP decoding ([#8](https://github.com/franzmoca/gufo/pull/8))
+
+- Q8_0 projections verify MTP drafts on the WMMA kernel over the grouped
+  weight layout. 31B UD-Q8_K_XL MTP decode is +2.2% on mixed text, +19–20%
+  on repetitive text and +10–23% with two users; the 26B-A4B gains up to
+  +2.6%. Results are unchanged.
+- The 31B's Q8_0 attention output and MLP down projections get their own
+  prefill GEMM plan, and GeGLU runs inside the Q8_0 gate/up prefill GEMM.
+  31B UD-Q8_K_XL pp2048 rises from ~565 to ~610 tok/s; 26B-A4B prefill is
+  +1.0–1.1%. Results are bit-identical.
+- `--prefill-weights decoded` no longer copies Q8_0 weights: with GeGLU fused
+  in the default path, the copies were slower and cost 32.4 GiB.
+- The 26B-A4B's Q8_0 attention-output prefill runs on Gemma's dense GEMM
+  (+0.7% pp2048 on UD-Q4_K_XL and UD-Q8_K_XL), and Q6_K prefill projections
+  from 4096 rows take 144-token tiles (+1.3% pp2048 on an all-Q6_K 31B quant,
+  +0.5% on a Q6_K 26B-A4B quant). Results are bit-identical.
+- Sampled MTP on the dense 31B draws its drafts without the request's top-p,
+  so the drafter's runner-up can be verified beside each draft; output still
+  follows the request's sampling exactly. 31B UD-Q8_K_XL sampled decode is
+  +1.8–3.2%; the 26B-A4B keeps top-p.
+
+## 2026-10-23: Faster sampled MTP verification ([#7](https://github.com/franzmoca/gufo/pull/7))
+
+- Sampled MTP cycles verify from each row's exact top logits, selected on the
+  GPU, instead of copying every row's full logits to the host. Output is
+  bit-identical. Sampled MTP decode is +1.0% on 26B-A4B UD-Q4_K_XL (+0.9% with
+  a repeat penalty) and +0.2% on 31B UD-Q4_K_XL.
+- Synced with upstream main through gufo-org/gufo#729 (0.21.0).
+
 ## 2026-10-21: Faster MTP decoding and opt-in prefill weight copies ([#6](https://github.com/franzmoca/gufo/pull/6))
 
 - With an MTP drafter loaded, the target's projection weights are reordered

@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "src/core/sampling.hpp"
+#include "src/core/speculative/prompt_lookup.hpp"
 #include "src/models/gemma4/config.hpp"
 #include "src/models/gemma4/cycle_trace.hpp"
 #include "src/models/gemma4/draft_policy.hpp"
@@ -23,7 +24,6 @@
 #include "src/models/gemma4/tokenizer.hpp"
 #include "src/models/qwen38_flash_next/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/mtp_sampling.hpp"
-#include "src/models/qwen38_flash_next/prompt_lookup.hpp"
 
 namespace gufo::core {
 class GgufReader;
@@ -451,9 +451,13 @@ private:
   /// Brings the draft vocabulary up to tokens_ (loading new table rows) and
   /// picks the head for a chain after `anchor`.
   rocm::DraftHead PrepareDraftHead(TokenId anchor);
+  struct VerifyCandidates;
+  /// Accepts from the verification rows' argmax ids (greedy), candidates
+  /// (sampled; `logits` may then be empty) or full logits.
   void FinishCycle(Cycle& cycle, std::span<const float> logits,
                    std::span<const std::uint32_t> argmax,
-                   std::uint32_t first_hidden_row);
+                   std::uint32_t first_hidden_row,
+                   const VerifyCandidates* candidates = nullptr);
   /// Records each chain row's acceptance probability and the greedy
   /// runner-up hits in the cycle's trace, before verification.
   void TraceRows(Cycle& cycle, std::span<const float> logits,
@@ -466,7 +470,7 @@ private:
   std::vector<ImageSpan> images_;
   /// Prompt-lookup index over tokens_; cleared whenever tokens_ is rewritten
   /// rather than appended to.
-  qwen38_flash_next::PromptLookup lookup_;
+  speculative::PromptLookup<> lookup_;
   /// The request's draft vocabulary over tokens_ (PrepareDraftHead), reset
   /// with lookup_.
   qwen38_flash_next::MtpDraftVocab draft_vocab_{kDraftTableRows};
@@ -475,6 +479,8 @@ private:
   /// cache_->logits holds them (EnsureLogits copies them back).
   mutable std::vector<float> logits_;
   mutable bool logits_on_device_{false};
+  /// FinishCycle's scratch for one row's sampling candidates.
+  std::vector<sampling::LogitCandidate> candidate_row_;
   /// Brings logits_ up to date; the caller holds the model mutex.
   void EnsureLogits() const;
   bool valid_{false};

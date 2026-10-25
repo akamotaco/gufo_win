@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -672,6 +673,8 @@ public:
     result.draft_rounds = verification.draft_count > 0 ? 1 : 0;
     result.draft_tokens = verification.draft_count;
     result.draft_accepted_tokens = verification.accepted_count;
+    result.lookup_tokens = verification.lookup_tokens;
+    result.lookup_accepted_tokens = verification.lookup_accepted_tokens;
     result.execution_plan = {
         .kind = verification.physical_width > 1
                     ? TextExecutionPlanKind::kBatched
@@ -2809,11 +2812,10 @@ public:
     sampling::SamplerState working_sampler = sampler;
     QwenFlashNextSession::DecodeResult decoded;
     std::string error;
-    const auto budget =
-        std::min<std::size_t>(max_tokens, std::uint64_t{max_draft_tokens_} + 1);
     // Use the same request policy as SelectNext and the batched MTP path.
-    // The engine stops before committing EOS or work beyond it.
-    if (!qfn.session().DecodeStep(budget, working_sampler, &decoded, &error,
+    // The engine bounds the physical block and stops at EOS. Preserve the
+    // remaining request budget so its policy can recognize a short tail.
+    if (!qfn.session().DecodeStep(max_tokens, working_sampler, &decoded, &error,
                                   qfn.stop_at_eos())) {
       throw std::runtime_error("Qwen3.8-Flash-Next MTP decode failed: " +
                                error);
@@ -2887,11 +2889,8 @@ public:
       auto& session = state.session();
       auto& sampler = samplers.emplace_back(decodes[i].sampler.get());
       before.push_back(session.Statistics());
-      requests.push_back(
-          {&session,
-           std::min<std::size_t>(decodes[i].max_tokens,
-                                 std::uint64_t{max_draft_tokens_} + 1),
-           &sampler, &results[i], state.stop_at_eos(), &outcomes[i]});
+      requests.push_back({&session, decodes[i].max_tokens, &sampler,
+                          &results[i], state.stop_at_eos(), &outcomes[i]});
     }
     std::string error;
     (void)QwenFlashNextSession::DecodeBatch(requests, &error);
@@ -3777,6 +3776,7 @@ struct InferenceBackend::Impl {
   struct State {
     std::shared_ptr<TextGenerationScheduler> scheduler;
     std::string model_id;
+    std::vector<std::string> extra_model_ids;
     SamplingDefaults sampling_defaults;
     std::uint32_t max_context{0};
     bool supports_images{false};
@@ -3892,17 +3892,14 @@ InferenceBackend::InferenceBackend() : impl_(std::make_unique<Impl>()) {}
 
 InferenceBackend::~InferenceBackend() = default;
 
-bool InferenceBackend::load(const std::string& model_path, std::string* error,
-                            std::uint32_t max_context,
-                            std::size_t session_count,
-                            TextPrefillPolicy prefill_policy,
-                            TextSchedulerPolicy scheduler_policy,
-                            const TextSpeculativeConfig& speculative_config,
-                            const TextDiskCacheConfig& disk_cache_config,
-                            const std::string& vision_model_path,
-                            std::uint32_t image_tokens,
-                            TextRunnerRamCacheOptions ram_cache_config,
-                            bool enable_yarn) {
+bool InferenceBackend::load(
+    const std::string& model_path, std::string* error,
+    std::uint32_t max_context, std::size_t session_count,
+    TextPrefillPolicy prefill_policy, TextSchedulerPolicy scheduler_policy,
+    const TextSpeculativeConfig& speculative_config,
+    const TextDiskCacheConfig& disk_cache_config,
+    const std::string& vision_model_path, std::uint32_t image_tokens,
+    TextRunnerRamCacheOptions ram_cache_config, bool enable_yarn) {
 #if defined(ENGINE_ENABLE_HIP)
   TextDiskCacheConfig resolved_disk_cache_config = disk_cache_config;
   std::string load_error;
@@ -3923,8 +3920,7 @@ bool InferenceBackend::load(const std::string& model_path, std::string* error,
       architecture == "qwen4exp"
           ? reader->GetMetadataUint32("qwen4exp.context_length").value_or(0)
           : 0;
-  if (image_tokens != 0 &&
-      architecture != "gemma4") {
+  if (image_tokens != 0 && architecture != "gemma4") {
     SetError(error, "--image-tokens applies to Gemma 4 models");
     return false;
   }
@@ -4624,6 +4620,20 @@ std::string InferenceBackend::model_id() const {
 #endif
 }
 
+std::vector<std::string> InferenceBackend::model_ids() const {
+#if defined(ENGINE_ENABLE_HIP)
+  const auto state = impl_->Snapshot();
+  if (state == nullptr)
+    return {"unknown"};
+  std::vector<std::string> ids{state->model_id};
+  ids.insert(ids.end(), state->extra_model_ids.begin(),
+             state->extra_model_ids.end());
+  return ids;
+#else
+  return {"unknown"};
+#endif
+}
+
 bool InferenceBackend::ready() const {
 #if defined(ENGINE_ENABLE_HIP)
   return impl_->Snapshot() != nullptr;
@@ -4746,9 +4756,9 @@ void InferenceBackend::set_served_artifact(const std::string& model_path,
 #endif
 }
 
-void InferenceBackend::set_model_id(const std::string& model_id) {
+void InferenceBackend::set_model_ids(std::vector<std::string> model_ids) {
 #if defined(ENGINE_ENABLE_HIP)
-  if (model_id.empty()) {
+  if (model_ids.empty()) {
     return;
   }
   const std::lock_guard<std::mutex> lock(impl_->state_mutex);
@@ -4756,10 +4766,13 @@ void InferenceBackend::set_model_id(const std::string& model_id) {
     return;
   }
   auto updated = std::make_shared<Impl::State>(*impl_->state);
-  updated->model_id = model_id;
+  updated->model_id = std::move(model_ids.front());
+  updated->extra_model_ids.assign(
+      std::make_move_iterator(model_ids.begin() + 1),
+      std::make_move_iterator(model_ids.end()));
   impl_->state = std::move(updated);
 #else
-  (void)model_id;
+  (void)model_ids;
 #endif
 }
 

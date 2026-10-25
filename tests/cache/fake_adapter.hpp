@@ -43,7 +43,8 @@ private:
 
 class FakeAdapter final : public Adapter {
 public:
-  FakeAdapter();
+  // Wider chunks need less capture metadata for the same row bytes.
+  explicit FakeAdapter(Rows rows_per_chunk = 4);
   // Opt in to a fourth, windowed component (kWindow) that mirrors the target
   // tokens in a ring of ring_rows slots, like sliding-window attention: a
   // continuation reads the last window_rows, and appending past the ring

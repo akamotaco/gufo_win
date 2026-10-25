@@ -1,12 +1,15 @@
 // Host contract for the Gemma 4 draft-length policy: option names, the
 // drafter signal, calibration learning, the cost table and the calibrated
-// chain decision (and how it is reported).
+// chain decision (and how it is reported), and sampled verification with a
+// sibling.
 #include "src/models/gemma4/draft_policy.hpp"
 
+#include <array>
 #include <cmath>
 #include <stdexcept>
 #include <string>
 
+#include "src/models/gemma4/sibling_verification.hpp"
 #include "tests/models/gemma4/check.hpp"
 
 namespace g4 = gufo::models::gemma4;
@@ -229,6 +232,67 @@ void CheckSiblings() {
           "a doubtful batched sibling was verified");
 }
 
+/// Sampled verification with a sibling (recursive rejection sampling) keeps
+/// the target's token frequencies, for proposals drawn with the target's
+/// own top-p and without it (Gemma 4 drafts skip top-p): the sibling is a
+/// draw from q without the draft, as the engine draws it.
+void CheckSiblingFrequencies() {
+  namespace qfn = gufo::models::qwen38_flash_next;
+  namespace sampling = gufo::sampling;
+  const std::array<float, 6> logits{0.3F, -0.2F, 1.1F, 0.7F, -1.0F, 0.9F};
+  qfn::MtpCandidateLogits candidates;
+  candidates.size = 5;
+  candidates.ids = {3, 1, 5, 2, 0};
+  candidates.logits = {1.2F, 0.1F, 0.8F, 0.9F, -0.7F};
+  constexpr unsigned kTrials = 120000;
+  for (const float top_p : {0.6F, 0.9F}) {
+    sampling::SamplingConfig config;
+    config.temperature = 1.0F;
+    config.top_k = 5;
+    config.top_p = top_p;
+    config.seed = 53;
+    sampling::SamplerState sampler(config);
+    const auto p = sampler.Distribution(logits);
+    for (const bool unfiltered : {false, true}) {
+      const auto proposals = unfiltered ? sampler.WithoutTopP() : sampler;
+      std::array<unsigned, 6> counts{};
+      std::uint64_t sibling_rng = 7;
+      unsigned siblings = 0;
+      for (unsigned trial = 0; trial < kTrials; ++trial) {
+        auto draft_rng = sampling::NextRandom(sampler.mutable_rng_state());
+        const auto q =
+            qfn::SampleMtpProposal(candidates, proposals, &draft_rng);
+        const double rest = 1.0 - static_cast<double>(q.probability);
+        if (!(rest > 0.0)) {
+          ++counts[qfn::VerifyMtpProposal(logits, q, sampler).token];
+          continue;
+        }
+        const double draw = sampling::Uniform(&sibling_rng) * rest;
+        double cumulative = 0.0;
+        sampling::TokenId sibling = q.ids[0];
+        for (std::size_t i = 0; i < q.size; ++i) {
+          if (q.ids[i] == q.token || q.probabilities[i] <= 0) {
+            continue;
+          }
+          sibling = q.ids[i];
+          cumulative += q.probabilities[i];
+          if (draw < cumulative) {
+            break;
+          }
+        }
+        ++siblings;
+        ++counts[g4::VerifyWithSibling(p, q, sibling, sampler).token];
+      }
+      Require(siblings > kTrials / 4, "too few sibling cycles to check");
+      for (unsigned token = 0; token < counts.size(); ++token) {
+        Require(std::abs(double(counts[token]) / kTrials -
+                         p.probability(token)) < 0.008,
+                "sibling verification distorts target frequencies");
+      }
+    }
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -240,5 +304,6 @@ int main() {
     CheckChain();
     CheckBatch();
     CheckSiblings();
+    CheckSiblingFrequencies();
   });
 }

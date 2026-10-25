@@ -39,7 +39,7 @@ constexpr std::uint32_t kMaxSplits = 6;
 constexpr std::uint32_t kSplitOutputs = 8192;
 
 /// Weight formats of the WMMA projections.
-enum class WmmaFormat { kQ4_K, kQ5_K, kQ6_K, kQ4_0 };
+enum class WmmaFormat { kQ4_K, kQ5_K, kQ6_K, kQ4_0, kQ8_0 };
 
 /// Pack layout for `k`: hi and lo halves [16][k], then per sub-block b and
 /// row t the inverse scale and the sum of x, each [k / 32][16].
@@ -352,6 +352,58 @@ struct Fmt<WmmaFormat::kQ4_0> {
   }
 };
 
+template<>
+struct Fmt<WmmaFormat::kQ8_0> {
+  static constexpr int kSuperBytes = 272;
+  static constexpr int kGroups = 4;
+  static constexpr int kGroupK = 32;
+  static constexpr bool kMin = false;
+  /// The super-block's eight 34-byte blocks as words.
+  struct Raw {
+    std::uint32_t w[69];
+  };
+  /// Super-blocks are 16-byte aligned (272-byte units from a row start).
+  __device__ static Raw Load(const std::uint8_t* sb) {
+    const auto* p = reinterpret_cast<const uint4*>(sb);
+    Raw r;
+#pragma unroll
+    for (int i = 0; i < 17; ++i) {
+      const uint4 v = p[i];
+      r.w[4 * i] = v.x;
+      r.w[4 * i + 1] = v.y;
+      r.w[4 * i + 2] = v.z;
+      r.w[4 * i + 3] = v.w;
+    }
+    r.w[68] = 0;
+    return r;
+  }
+  /// Block 4 n + g: d at its first two bytes, 32 signed byte codes after
+  /// them; w = d q. A code's sign bit flipped is q + 128 (0-255).
+  template<int kN, int kG>
+  __device__ static Group Decode(const Raw& r) {
+    constexpr int kByte = 34 * (4 * kN + kG);
+    constexpr int kWord = kByte / 4;
+    Group g;
+    g.d = HalfBits(kByte % 4 == 0 ? r.w[kWord] : r.w[kWord] >> 16);
+    g.dm = 0.0F;
+#pragma unroll
+    for (int f = 0; f < 2; ++f) {
+      std::uint32_t w[4];
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        constexpr int kCode = (kByte + 2) / 4;
+        const int at = kCode + 4 * f + i;
+        w[i] = ((kByte + 2) % 4 == 0
+                    ? r.w[at]
+                    : __builtin_amdgcn_alignbyte(r.w[at + 1], r.w[at], 2)) ^
+               0x80808080U;
+      }
+      g.frag[f] = Fragment(w, 128.0F);
+    }
+    return g;
+  }
+};
+
 __device__ __forceinline__ v8f Wmma(v16h a, v16h b, v8f c) {
   return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c);
 }
@@ -634,6 +686,8 @@ std::optional<WmmaFormat> FormatOf(core::GgmlType type) {
       return WmmaFormat::kQ6_K;
     case core::GgmlType::kQ4_0:
       return WmmaFormat::kQ4_0;
+    case core::GgmlType::kQ8_0:
+      return WmmaFormat::kQ8_0;
     default:
       return std::nullopt;
   }
@@ -641,9 +695,14 @@ std::optional<WmmaFormat> FormatOf(core::GgmlType type) {
 
 }  // namespace
 
+/// Q8_0 only from 2048 outputs and 4096 inputs: the shared small-batch
+/// kernel reads the shorter shapes faster at one to three rows (cold, one
+/// row: 26B-A4B 4096 x 2816 55.6 vs 62.3 us, 2048 x 2816 29.8 vs 34.2; the
+/// drafters' 1024 outputs alike), while 2816 x 8192 takes 122 vs 121 us.
 bool WmmaGemvSupports(core::GgmlType type, std::uint32_t m,
                       std::uint32_t k) noexcept {
-  return FormatOf(type).has_value() && m > 0 && k > 0 && k % kSuper == 0;
+  return FormatOf(type).has_value() && m > 0 && k > 0 && k % kSuper == 0 &&
+         (type != core::GgmlType::kQ8_0 || (m >= 2048 && k >= 4096));
 }
 
 namespace {
@@ -658,6 +717,8 @@ int SuperBytes(WmmaFormat f) {
       return Fmt<WmmaFormat::kQ6_K>::kSuperBytes;
     case WmmaFormat::kQ4_0:
       return Fmt<WmmaFormat::kQ4_0>::kSuperBytes;
+    case WmmaFormat::kQ8_0:
+      return Fmt<WmmaFormat::kQ8_0>::kSuperBytes;
   }
   return 0;
 }
@@ -777,6 +838,9 @@ bool LaunchWmmaGemv(core::GgmlType type, const void* w, const float* x,
       break;
     case WmmaFormat::kQ4_0:
       launch.template operator()<WmmaFormat::kQ4_0>();
+      break;
+    case WmmaFormat::kQ8_0:
+      launch.template operator()<WmmaFormat::kQ8_0>();
       break;
   }
   if (splits > 1) {

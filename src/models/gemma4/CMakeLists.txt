@@ -21,6 +21,7 @@ if (ENGINE_ENABLE_HIP)
   target_sources(gufo_gemma4 PRIVATE
     ${GEMMA4_ROCM_DIR}/kernels.hip.cpp
     ${GEMMA4_ROCM_DIR}/attention_wmma.hip.cpp
+    ${GEMMA4_ROCM_DIR}/candidates.hip.cpp
     ${GEMMA4_ROCM_DIR}/gemv.hip.cpp
     ${GEMMA4_ROCM_DIR}/wmma_gemv.hip.cpp
     ${GEMMA4_ROCM_DIR}/moe.hip.cpp
@@ -32,6 +33,7 @@ if (ENGINE_ENABLE_HIP)
     engine.cpp)
   set_source_files_properties(${GEMMA4_ROCM_DIR}/kernels.hip.cpp
     ${GEMMA4_ROCM_DIR}/attention_wmma.hip.cpp
+    ${GEMMA4_ROCM_DIR}/candidates.hip.cpp
     ${GEMMA4_ROCM_DIR}/gemv.hip.cpp
     ${GEMMA4_ROCM_DIR}/wmma_gemv.hip.cpp
     ${GEMMA4_ROCM_DIR}/moe.hip.cpp

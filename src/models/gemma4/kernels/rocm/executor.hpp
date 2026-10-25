@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 
+#include "src/models/gemma4/kernels/rocm/candidates.hpp"
 #include "src/models/gemma4/kernels/rocm/device_model.hpp"
 #include "src/models/gemma4/kernels/rocm/kernels.hpp"
 
@@ -215,6 +216,34 @@ public:
 
   /// Copies the logits of the last Forward to the host, [rows][vocab].
   [[nodiscard]] std::span<const float> ReadLogits(std::size_t rows) const;
+  /// LogitCandidates of the last Forward's logit rows, on the host: row r's
+  /// top logits and the logits of the extra tokens.
+  struct Candidates {
+    std::span<const std::uint32_t> counts;
+    std::span<const sampling::LogitCandidate> data;
+    std::uint32_t top{0};
+    std::uint32_t stride{0};
+    /// Whether Top(r) holds row r's top logits; else it needs its full row.
+    [[nodiscard]] bool Complete(std::size_t r) const noexcept {
+      return counts[r] != kCandidateOverflow;
+    }
+    [[nodiscard]] std::span<const sampling::LogitCandidate> Top(
+        std::size_t r) const {
+      return data.subspan(r * stride, counts[r]);
+    }
+    [[nodiscard]] std::span<const sampling::LogitCandidate> Extra(
+        std::size_t r) const {
+      return data.subspan(r * stride + top, stride - top);
+    }
+  };
+  /// The kCandidateTop + extra.size() largest logits of each of the first
+  /// `rows` logit rows (at most kSplitRows) and the logits of `extra` (at
+  /// most kMaxCandidateExtra tokens). Valid until the next call.
+  [[nodiscard]] bool CanReadCandidates() const noexcept {
+    return candidate_scratch_ != nullptr;
+  }
+  [[nodiscard]] Candidates ReadCandidates(
+      std::size_t rows, std::span<const std::uint32_t> extra) const;
   void CopyLogits(std::size_t rows, std::vector<float>* out) const;
   /// Post-norm hidden rows of the last Forward, [tokens][hidden].
   [[nodiscard]] const float* hidden() const noexcept { return h_; }
@@ -344,6 +373,14 @@ private:
   qwen38_flash_next::MtpCandidateLogits* draft_candidates_host_{nullptr};
   std::uint32_t* argmax_host_{nullptr};
   mutable std::vector<float> logits_host_;
+  /// ReadCandidates: workspace, then per-row counts (padded to 256 bytes)
+  /// and candidates, which one copy brings to the host.
+  void* candidate_scratch_{nullptr};
+  CandidateWork candidate_work_{};
+  std::uint8_t* candidate_out_{nullptr};
+  std::uint32_t* candidate_extra_{nullptr};
+  mutable std::vector<std::uint8_t> candidate_host_;
+  mutable std::vector<std::uint32_t> candidate_extra_host_;
 };
 
 /// Longest draft chain one cycle may request; verification then carries
