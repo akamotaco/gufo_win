@@ -827,6 +827,24 @@ int dup(int fd) {
   return WrapHandle(copy, FlagsOf(fd) | O_RDWR);
 }
 
+void* gufo_handle_of_descriptor(int fd) {
+  const HANDLE handle = HandleOf(fd);
+  return handle == INVALID_HANDLE_VALUE ? nullptr : handle;
+}
+
+int gufo_descriptor_from_handle(void* handle) {
+  if (handle == nullptr || handle == INVALID_HANDLE_VALUE) {
+    errno = EBADF;
+    return -1;
+  }
+  HANDLE copy = nullptr;
+  if (!DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(), &copy,
+                       0, FALSE, DUPLICATE_SAME_ACCESS)) {
+    return Fail(GetLastError());
+  }
+  return WrapHandle(copy, O_RDONLY);
+}
+
 int dup2(int fd, int fd2) {
   if (_dup2(fd, fd2) != 0) {
     return -1;

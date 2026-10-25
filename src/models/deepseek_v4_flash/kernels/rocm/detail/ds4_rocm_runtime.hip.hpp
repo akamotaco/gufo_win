@@ -45,6 +45,7 @@ static int g_rocm_mmq_ready;
 #ifdef __HIP_PLATFORM_AMD__
 #include "ds4_rocm_hipblaslt.hip.hpp"
 #include "src/core/hip/snapshot_transfer.hpp"
+#include "src/core/platform/descriptor.hpp"
 #include "src/core/platform/device_memory.hpp"
 #endif
 enum {
@@ -734,7 +735,7 @@ static const char *hip_model_range_ptr_from_fd(
         const gufo::core::GgufMappedRegion region{
             .data = model_map,
             .size = static_cast<size_t>(g_model_registered_size),
-            .file_descriptor = g_model_fd,
+            .file_descriptor = gufo::platform::FileFromDescriptor(g_model_fd),
         };
         g_model_uploader = gufo::hip::WeightUpload::Create({&region, 1}, &error);
     }

@@ -258,6 +258,11 @@ int posix_fadvise(int fd, off_t offset, off_t length, int advice);
 int fcntl(int fd, int cmd, ...);
 int dup(int fd);
 int dup2(int fd, int fd2);
+// Bridges to gufo::platform::PlatformFile (a Win32 HANDLE): the borrowed
+// handle behind a descriptor, and a new descriptor over a duplicate of a
+// handle, which the caller closes.
+void* gufo_handle_of_descriptor(int fd);
+int gufo_descriptor_from_handle(void* handle);
 int pipe(int fds[2]);
 int unlink(const char* path);
 int unlinkat(int dirfd, const char* path, int flags);

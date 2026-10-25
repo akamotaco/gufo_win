@@ -12,6 +12,7 @@
 #include <type_traits>
 
 #include "src/core/gguf_reader.hpp"
+#include "src/core/platform/descriptor.hpp"
 #include "src/models/qwen38_flash_next/continuation_hooks.hpp"
 #include "src/models/qwen38_flash_next/draft_vocab.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/device_model.hpp"
@@ -128,9 +129,10 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
   }
   if (c.ple_layer >= 0) {
     const auto& t = m->weights_->ple_table;
-    m->ngram_ = NgramTable::Open(
-        m->reader_->GetMappedRegions()[t.shard].file_descriptor, t.file_offset,
-        t.rows, c.ple_head_dim, t.type, error_msg);
+    const platform::DescriptorView shard(
+        m->reader_->GetMappedRegions()[t.shard].file_descriptor);
+    m->ngram_ = NgramTable::Open(shard.get(), t.file_offset, t.rows,
+                                 c.ple_head_dim, t.type, error_msg);
     if (!m->ngram_) {
       return nullptr;
     }
