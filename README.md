@@ -4,6 +4,146 @@
   <img src="assets/gufo-logo.jpg" alt="Gufo logo" width="180">
 </p>
 
+## gufo_win: upstream's Windows build with Gemma 4 and AtomicChat Flash-Next
+
+This repository runs Gufo **natively on Windows 11** (no WSL) on AMD Strix Halo
+(`gfx1151`). Since v0.24 upstream Gufo builds and serves on Windows itself
+([#775](https://github.com/gufo-org/gufo/pull/775), see [BUILD-WINDOWS.md](BUILD-WINDOWS.md)),
+so `main` here is upstream plus what upstream does not carry:
+
+| Layer | Source | What it brings |
+| --- | --- | --- |
+| Engine and Windows build | [gufo-org/gufo](https://github.com/gufo-org/gufo) `main` | Gufo itself, the `windows-release` preset and its Windows platform code |
+| Gemma 4 | [franzmoca/gufo](https://github.com/franzmoca/gufo) `feat/gemma` | Native Gemma 4 26B-A4B / 31B engine with MTP, vision and tool calls (described in the next section) |
+| Fork-only fixes | this repository | See below |
+
+The fork-only commits, cherry-picked on top of upstream:
+
+- **Gemma 4 on Windows.** Windows maps registered host memory at a different
+  device address, so the component cache's gather copies run only where the
+  pointer is the device address; without that the first cache capture fails with
+  "unspecified launch failure". Gemma's cache backing keeps 1 GiB segments
+  (128 MiB segments failed 24K-token captures).
+- **[AtomicChat abliterated](https://huggingface.co/AtomicChat/Qwen3.8-Flash-Next-Abliterated-Uncensored-GGUF)
+  Flash-Next (`AD-4.85bpw-Q5_K_M`).** Upstream cannot load this mix: IQ4_XS/IQ4_NL/Q5_0
+  experts, a Q4_1 n-gram table and Q8_0 HC inject weights. They are supported here,
+  with the IQ4 experts on the routed F16 WMMA prefill and a fused IQ4_XS decode path.
+- The per-request image budget is 256 MiB instead of 20 MiB (agents resend every image).
+- `tools\windows\gufo_monitor.py` (a read-only web monitor) and `tools\windows\tdr_delay.bat`
+  (GPU timeout).
+
+Until October 27, 2026 this repository carried its own Windows port (a POSIX
+compatibility layer from [pixmaate/gufo](https://github.com/pixmaate/gufo)); it was
+retired once upstream built on Windows and is kept in history (tag `win-old-port-20261027`).
+If Gemma 4 and the AtomicChat formats reach upstream, this repository can go too.
+
+> [!WARNING]
+> **Windows: raise the GPU timeout (TDR) before long runs.** Windows resets the GPU
+> when submitted work takes longer than 2 seconds (`TdrDelay`). Under long prefills
+> and agent sessions this shows up as `503 GPU context lost; restart required`
+> (`device_lost`) and a "hardware problem" `LiveKernelEvent 141` in Windows, which is a
+> timeout, not a hardware fault. Run `tools\windows\tdr_delay.bat set` (30 s, asks for
+> administrator rights, then reboot; `restore` puts the old values back).
+> Details: [docs/WINDOWS-TDR.md](docs/WINDOWS-TDR.md).
+
+### Measured on Windows
+
+One Strix Halo machine (Windows 11, 96 GB GPU carve-out), this build with TheRock
+10.0.0, October 27, 2026. Server-reported rates, MTP with each model's drafter,
+prompt cache defeated, one server at a time. A 40-identifier verbatim copy test
+passed with no misses at temperature 0 and 0.7, at 400 and 103K prompt tokens, on
+all three models.
+
+| Model | Sessions x context | Prompt | Prefill (tok/s) | Decode, MTP (tok/s) |
+| --- | --- | --- | ---: | ---: |
+| Gemma 4 26B-A4B Q8_0 (MeroMero) | 1 x 262,144 | short, 512 generated | | 54.7 |
+| | | 2.1K | 3,035 | 57.7 |
+| | | 8.5K | 2,988 | 53.7 |
+| | | 31.8K | 2,542 | 52.9 |
+| Qwen3.8-Flash-Next AtomicChat `AD-4.85bpw-Q5_K_M` + vision | 2 x 262,144 | short, 512 generated | | 34.4 |
+| | | 2.1K | 1,355 | 36.4 |
+| | | 8.5K | 1,368 | 51.1 |
+| | | 31.8K | 1,421 | 48.4 |
+| Qwen3.8-Flash-Next Unsloth UD-Q4_K_XL + vision | 1 x 262,144 | short, 512 generated | | 34.6 |
+| | | 2.1K | 1,466 | 39.4 |
+| | | 8.5K | 1,417 | 40.5 |
+| | | 31.8K | 1,494 | 37.6 |
+
+- On the same machine a ROCm llama.cpp `llama-server` (b10967, flash attention, no
+  speculative decoding) prefilled Gemma 4 26B Q8_0 at 1,624–1,735 / 602–608 / 959–965
+  tok/s (2.1K / 8.5K / 31.8K, October 18) and the AtomicChat file at 1,041–1,218 tok/s.
+- Decode with MTP varies with the draft acceptance (49–72% here).
+- The previous Windows port measured 2–9% faster on Gemma decode and ~5% faster on
+  AtomicChat prefill (it built with full host inlining; upstream's preset uses
+  RelWithDebInfo `/O2 /Ob1`). Not investigated yet.
+- Flash-Next MTP uses Unsloth's `MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf`; Gufo
+  rejects the `shared-Q4_K_M` drafter and the F16 vision projector (use `mmproj-BF16.gguf`).
+- Gemma 4 12B loads but fails its first request (`split attention head grouping
+  unsupported`); the Gemma 4 engine does not cover its head layout yet, on any OS.
+
+### Memory setup on a 128 GB machine
+
+- **GPU timeout (TDR): 30 s** with `tools\windows\tdr_delay.bat set`, then reboot.
+- **GPU carve-out (Variable Graphics Memory): 96 GB, no more.** Windows then sees about
+  32 GB of RAM, and its shared-GPU-memory limit is half of that, ~16 GB.
+- **Stay inside the carve-out.** Past it the display driver moves buffers into system
+  memory and Windows writes to the page file. Flash-Next UD-Q4_K_XL fits 1 session x
+  262K + MTP + vision (~91 GB); the AtomicChat file is 3.75 GiB smaller and fits
+  2 sessions x 262K (~92–95 GB). Check what other programs hold before loading.
+- **Keep a large page file** (96 GB initial, 160 GB maximum here): Windows charges GPU
+  allocations to the commit limit. It is reserved, not written.
+- **Pass `--cache-ram-bytes`** (4 GiB for Flash-Next, 2 GiB per Gemma server); the
+  automatic budget pins half of the free RAM.
+- An `mmproj-BF16.gguf` beside the model (or in its parent folder) is loaded
+  automatically. Keep it in a subfolder and pass `--mmproj` to choose vision.
+
+### Build on Windows
+
+Follow [BUILD-WINDOWS.md](BUILD-WINDOWS.md) with **TheRock 10.0.0**. Built the same
+way, TheRock 10.2 produced correct output but decoded about 30x slower here
+(Gemma 4 26B: 15 tok/s prefill, 2 tok/s decode), as upstream warns. Two things
+this machine also needed:
+
+- **CMake 4.3 or newer** (4.4.4 here): Visual Studio's CMake 3.31 fails to detect
+  the HIP compiler through `clang-cl` ("MSVC compiler version not detected properly").
+- **On a non-UTF-8 code page (Korean cp949 here)** vcpkg cannot extract the pkgconf
+  and flac sources, whose tests contain emoji paths (`Invalid empty pathname`).
+  Extracting those archives with Python instead works.
+
+After building, copy TheRock's `.kpack` folder to `build\.kpack`: rocBLAS loads its
+kernels from `..\.kpack` beside its DLL, and the preset does not stage it.
+
+Serve a model with a fixed prompt-cache budget:
+
+```powershell
+build\windows-release\gufo.exe serve --host 127.0.0.1 --port 8093 llm `
+  --model G4-26B-A4B-Q8_0.gguf --speculative mtp --mtp-model mtp-gemma-4-26B-A4B-it-Q8_0.gguf `
+  --context 65536 --cache-ram-bytes 2147483648
+```
+
+To watch the servers, `python tools\windows\gufo_monitor.py --servers 8093 --logs <log folder>`
+serves a page on http://127.0.0.1:8090: each session's phase (prefill progress or
+decode rate), the last requests with cache misses marked, GPU use, GPU and system
+memory, and page-file writes. It only reads, and shows a red banner while the
+Windows GPU timeout is still 2 s.
+
+![gufo monitor with Qwen3.8-Flash-Next on port 8080](assets/windows-monitor.png)
+
+### Troubleshooting
+
+- **`413 payload_too_large` after reading a few images.** Request bodies are capped
+  at 8 MiB by default, and agents such as pi resend every image of the conversation
+  with each turn. Start the server with `--max-request-bytes 134217728` (128 MiB).
+- **`503 device_lost` / "GPU context lost; restart required".** The Windows GPU timeout
+  (TDR, 2 s by default) reset the driver during a long kernel. Raise it to 30 s and
+  reboot: [docs/WINDOWS-TDR.md](docs/WINDOWS-TDR.md).
+- **`logit distribution contains no finite values` followed by `routed F16 gate/up
+  GEMM failed`.** Seen on a Beelink GTR9 Pro with BIOS GTRPR05 (AGESA 1.0.0.0c) right
+  after RAM prompt-cache restores, once while another PyTorch ROCm program used the
+  GPU. Upstream [#599](https://github.com/gufo-org/gufo/issues/599) reports the same
+  pair on the same board and BIOS, fixed by the GTRPRPI1001C (AGESA 1.0.0.1c) update.
+  Restarting the server clears it.
+
 ## About this fork: Gemma 4 on Gufo
 
 This fork of [gufo-org/gufo](https://github.com/gufo-org/gufo) adds a native
