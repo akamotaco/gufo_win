@@ -49,21 +49,21 @@ If Gemma 4 and the AtomicChat formats reach upstream, this repository can go too
 ### Measured on Windows
 
 One Strix Halo machine (Windows 11, 96 GB GPU carve-out), this build with TheRock
-10.0.0, October 27, 2026. Server-reported rates, MTP with each model's drafter,
-prompt cache defeated, one server at a time. A 40-identifier verbatim copy test
-passed with no misses at temperature 0 and 0.7, at 400 and 103K prompt tokens, on
-all three models.
+10.0.0, October 28, 2026 (Unsloth row: October 27). Server-reported rates, MTP with
+each model's drafter, prompt cache defeated, one server at a time. A 40-identifier
+verbatim copy test passed with no misses at temperature 0 and 0.7, at 400 and
+103K–138K prompt tokens, on all three models.
 
 | Model | Sessions x context | Prompt | Prefill (tok/s) | Decode, MTP (tok/s) |
 | --- | --- | --- | ---: | ---: |
-| Gemma 4 26B-A4B Q8_0 (MeroMero) | 1 x 262,144 | short, 512 generated | | 54.7 |
-| | | 2.1K | 3,035 | 57.7 |
-| | | 8.5K | 2,988 | 53.7 |
-| | | 31.8K | 2,542 | 52.9 |
-| Qwen3.8-Flash-Next AtomicChat `AD-4.85bpw-Q5_K_M` + vision | 2 x 262,144 | short, 512 generated | | 34.4 |
-| | | 2.1K | 1,355 | 36.4 |
-| | | 8.5K | 1,368 | 51.1 |
-| | | 31.8K | 1,421 | 48.4 |
+| Gemma 4 26B-A4B Q8_0 (MeroMero) | 1 x 262,144 | short, 512 generated | | 56.3 |
+| | | 2.1K | 3,292 | 59.3 |
+| | | 8.5K | 3,354 | 55.6 |
+| | | 31.8K | 2,811 | 54.2 |
+| Qwen3.8-Flash-Next AtomicChat `AD-4.85bpw-Q5_K_M` + vision | 2 x 262,144 | short, 512 generated | | 34.8 |
+| | | 2.1K | 1,503 | 37.9 |
+| | | 8.5K | 1,490 | 52.7 |
+| | | 31.8K | 1,549 | 49.3 |
 | Qwen3.8-Flash-Next Unsloth UD-Q4_K_XL + vision | 1 x 262,144 | short, 512 generated | | 34.6 |
 | | | 2.1K | 1,466 | 39.4 |
 | | | 8.5K | 1,417 | 40.5 |
@@ -72,10 +72,12 @@ all three models.
 - On the same machine a ROCm llama.cpp `llama-server` (b10967, flash attention, no
   speculative decoding) prefilled Gemma 4 26B Q8_0 at 1,624–1,735 / 602–608 / 959–965
   tok/s (2.1K / 8.5K / 31.8K, October 18) and the AtomicChat file at 1,041–1,218 tok/s.
-- Decode with MTP varies with the draft acceptance (49–72% here).
-- The previous Windows port measured 2–9% faster on Gemma decode and ~5% faster on
-  AtomicChat prefill (it built with full host inlining; upstream's preset uses
-  RelWithDebInfo `/O2 /Ob1`). Not investigated yet.
+- Decode with MTP varies with the draft acceptance (53–72% here).
+- Against the October 27 build of this repository, upstream's October 27–28 changes
+  (Flash-Next prefill stream overlap, #758) raised AtomicChat prefill ~5%, and Gemma 4
+  measured 8–12% faster prefill on the same day. The previous Windows port (full host
+  inlining; upstream's preset uses RelWithDebInfo `/O2 /Ob1`) measured 1,434–1,481 tok/s
+  AtomicChat prefill, now exceeded.
 - Flash-Next MTP uses Unsloth's `MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf`; Gufo
   rejects the `shared-Q4_K_M` drafter and the F16 vision projector (use `mmproj-BF16.gguf`).
 - Gemma 4 12B loads but fails its first request (`split attention head grouping
