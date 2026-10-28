@@ -2120,21 +2120,22 @@ def check_auto_tools(client, model, checks, vision=False, preset=None):
     assert json.loads(calls[0].arguments) == {"value": 7}, result
     record("auto_many_declared_tools", result.to_dict())
     if vision:
+        # The argument stop below requires a color name, not an RGB/hex code.
+        image_prompt = ("Call record with value equal to the image color as a lowercase "
+                        "English color name, not a hex or RGB code. Omit optional.")
         result = client.responses.create(**{
             **response_request, "temperature": 0,
             "input": [{"role": "user", "content": [
-                {"type": "input_text", "text":
-                 "Call record with value equal to the image color. Omit optional."},
+                {"type": "input_text", "text": image_prompt},
                 {"type": "input_image", "image_url":
                  image_content("blue")["image_url"]["url"]}]}]})
         # Either spelling shows the image reached the call (Gemma 4: hex).
         response_signature(result, value=("blue", "#0000FF"))
         record("auto_image_tool", result.to_dict())
         image_request = {**common, "messages": [{"role": "user", "content": [
-            image_content("blue"), {"type": "text", "text":
-            "Call record with value equal to the image color. Omit optional."}]}]}
-        # Stop inside the arguments this prompt produces; its image-first
-        # order may spell the color differently from the Responses prompt.
+            image_content("blue"), {"type": "text", "text": image_prompt}]}]}
+        # Stop inside the arguments this prompt produces; Gemma 4 may still
+        # spell the color as hex.
         chosen = chat_result(client, image_request)
         color = json.loads(chosen["tools"][0]["function"]["arguments"])["value"]
         assert color in ("blue", "#0000FF"), chosen
