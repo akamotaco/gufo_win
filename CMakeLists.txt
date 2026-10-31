@@ -111,6 +111,12 @@ endif()
 
 if (ENGINE_ENABLE_HIP)
   enable_language(HIP)
+  # With /Fo, clang-cl keeps intermediates in the working directory under the
+  # source's name: same-named HIP sources (kernels.hip.cpp, mmid.hip.cpp) share
+  # one .hipfb in a parallel build and can embed each other's device code.
+  # -clang:-o sends them to unique temporary files instead.
+  string(REPLACE "/Fo<OBJECT>" "-clang:-o<OBJECT>" CMAKE_HIP_COMPILE_OBJECT
+    "${CMAKE_HIP_COMPILE_OBJECT}")
   # clang-cl compiles HIP like C++ on Windows, so ccache covers it there.
   if (GUFO_CCACHE_CLANG_CL)
     set(CMAKE_HIP_COMPILER_LAUNCHER "${GUFO_CCACHE_PROGRAM}")
