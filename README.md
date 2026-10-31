@@ -145,6 +145,14 @@ Windows GPU timeout is still 2 s.
   GPU. Upstream [#599](https://github.com/gufo-org/gufo/issues/599) reports the same
   pair on the same board and BIOS, fixed by the GTRPRPI1001C (AGESA 1.0.0.1c) update.
   Restarting the server clears it.
+- **`Cannot find Symbol with name: ...Kernel...` at model load, on a Windows build that
+  passed `gufo diagnose`.** With CMake's `/Fo` rule, `clang-cl` writes each HIP fat
+  binary to the build directory under the source's name, so same-named sources compiled
+  in parallel can embed each other's device code. `kernels.hip.cpp` of Flash-Next picked
+  up Gemma 4's this way. `mmid.hip.cpp` of Flash-Next picked up DeepSeek's with no error,
+  because both define the same kernel names. This build compiles HIP with `-clang:-o`,
+  which sends those files to unique temporary paths. On a build without that change,
+  delete the affected `.obj` files and rebuild them one at a time.
 
 ## About this fork: Gemma 4 on Gufo
 
