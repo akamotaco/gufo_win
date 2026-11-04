@@ -4,7 +4,7 @@
 #include <string_view>
 
 #include "gufo/ext/gguf_reader.hpp"
-#include "src/core/text_sampling_defaults.hpp"
+#include "gufo/ext/text.hpp"
 
 namespace gufo::models::qwen38_flash_next {
 

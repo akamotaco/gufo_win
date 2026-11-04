@@ -627,6 +627,7 @@ public:
   TextRunnerDescriptor Descriptor() const override {
     auto descriptor = SnapshotRunner::Descriptor();
     descriptor.capabilities.in_pass_checkpoint = true;
+    descriptor.capabilities.max_in_pass_checkpoints = 64;
     return descriptor;
   }
   std::optional<std::size_t> PrefillCheckpointBytes(
@@ -638,14 +639,16 @@ public:
       return std::nullopt;
     return sizeof(FakeSnapshot);
   }
-  TextPrefillStep PrefillThrough(
-      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
-      std::size_t offset, std::size_t budget, std::size_t boundary,
-      std::unique_ptr<TextRunnerSnapshot>* checkpoint,
-      const std::function<std::unique_ptr<TextRunnerSnapshot>()>&)
-      const override {
-    ++stats_->snapshot_captures;
-    *checkpoint = std::make_unique<FakeSnapshot>(boundary, 0, 90);
+  using TextModelRunner::PrefillThrough;
+  TextPrefillStep PrefillThrough(TextRunnerState& state,
+                                 std::span<const TextRunnerToken> prompt,
+                                 std::size_t offset, std::size_t budget,
+                                 std::span<const std::size_t> boundaries,
+                                 const InPassConsumer& consume) const override {
+    for (std::size_t i = 0; i < boundaries.size(); ++i) {
+      ++stats_->snapshot_captures;
+      consume(i, std::make_unique<FakeSnapshot>(boundaries[i], 0, 90));
+    }
     auto step = FakeRunner::Prefill(state, prompt, offset, budget);
     if (fail_after_prefill) {
       auto& fake = RequireFakeState(state);
@@ -657,6 +660,58 @@ public:
     return step;
   }
 };
+
+// A runner written against the single-boundary PrefillThrough keeps working
+// through the default boundaries form, one checkpoint per call.
+class LegacyInPassRunner final : public SnapshotRunner {
+public:
+  using SnapshotRunner::SnapshotRunner;
+  mutable std::vector<std::size_t> boundaries;
+  TextRunnerDescriptor Descriptor() const override {
+    auto descriptor = SnapshotRunner::Descriptor();
+    descriptor.capabilities.in_pass_checkpoint = true;
+    return descriptor;
+  }
+  std::optional<std::size_t> PrefillCheckpointBytes(
+      const TextRunnerState&, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t budget,
+      std::size_t boundary) const override {
+    if (boundary <= offset ||
+        boundary >= std::min(prompt.size(), offset + budget))
+      return std::nullopt;
+    return sizeof(FakeSnapshot);
+  }
+  using TextModelRunner::PrefillThrough;
+  TextPrefillStep PrefillThrough(
+      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
+      std::size_t offset, std::size_t budget, std::size_t boundary,
+      std::unique_ptr<TextRunnerSnapshot>* checkpoint,
+      const std::function<std::unique_ptr<TextRunnerSnapshot>()>&)
+      const override {
+    ++stats_->snapshot_captures;
+    boundaries.push_back(boundary);
+    *checkpoint = std::make_unique<FakeSnapshot>(boundary, 0, 90);
+    return FakeRunner::Prefill(state, prompt, offset, budget);
+  }
+};
+
+void TestLegacyInPassCheckpoint() {
+  auto stats = std::make_shared<FakeStats>();
+  auto runner = std::make_shared<LegacyInPassRunner>(stats);
+  TextRunnerPool pool(runner, 1);
+  auto first = pool.Acquire({1, 2, 3, 40, 41}, {}, {}, {}, true, 3);
+  const auto step = first.Prefill(64);
+  Expect(step.consumed_tokens == 5 && step.decode_ready,
+         "single-boundary runner captures the stable boundary in one pass");
+  Expect(runner->boundaries == std::vector<std::size_t>{3} &&
+             stats->prefill_spans == std::vector<std::size_t>{5},
+         "the default boundaries form forwards one boundary");
+  first.Commit();
+  auto second = pool.Acquire({1, 2, 3, 50, 51, 7, 40, 41}, {}, {}, {}, true, 6);
+  Expect(second.cached_prompt_tokens() == 3,
+         "the forwarded native checkpoint restores");
+  second.Invalidate();
+}
 
 void TestInPassStableCheckpoint() {
   auto stats = std::make_shared<FakeStats>();
@@ -1705,6 +1760,21 @@ public:
       std::shared_ptr<const gufo::server::TextPromptContext>) const override {}
 };
 
+template<class Base>
+class AlignedSpanRunner final : public Base {
+public:
+  using Base::Base;
+  TextRunnerDescriptor Descriptor() const override {
+    auto descriptor = Base::Descriptor();
+    descriptor.max_context = 32768;
+    descriptor.capabilities.prefill_alignment = 4;
+    return descriptor;
+  }
+  void SetPromptContext(
+      TextRunnerState&,
+      std::shared_ptr<const gufo::server::TextPromptContext>) const override {}
+};
+
 std::vector<std::size_t> PrefillStops(const FakeStats& stats) {
   std::vector<std::size_t> positions;
   std::size_t position = 0;
@@ -1740,6 +1810,30 @@ void TestIndivisibleInputsAreNotSplit() {
          "an input at the end of the prompt is taken whole");
   Expect(steps(20, 3, MakeSpans({{5, 8}})) == Stops({3, 5, 8, 11, 14, 17, 20}),
          "a budget ending exactly at an input's edges is not moved");
+  {
+    // With an alignment a stop is both aligned and outside every input; only
+    // the prompt end may be off the alignment.
+    const auto aligned = [](std::size_t budget, std::size_t stable,
+                            Context context) {
+      auto stats = std::make_shared<FakeStats>();
+      TextRunnerPool pool(
+          std::make_shared<AlignedSpanRunner<SnapshotRunner>>(stats), 1);
+      auto request = pool.Acquire(std::vector<TextRunnerToken>(42, 1), {}, {},
+                                  std::move(context), true, stable);
+      while (!request.prefill_complete())
+        (void)request.Prefill(budget);
+      request.Cancel();
+      return PrefillStops(*stats);
+    };
+    Expect(aligned(6, 0, MakeSpans({{10, 19}})) ==
+               Stops({4, 8, 20, 24, 28, 32, 36, 40, 42}),
+           "a budget stops aligned before an input, and a step starting there "
+           "runs to the next aligned stop past it");
+    Expect(aligned(64, 30, MakeSpans({{22, 29}})) == Stops({20, 42}),
+           "an aligned boundary landing inside an input moves before it");
+    Expect(aligned(64, 30, MakeSpans({})) == Stops({28, 42}),
+           "without spans a boundary only moves to the alignment");
+  }
   {
     // No declared spans leave every position as without a context.
     const auto none = steps(20, 3, {});
@@ -3072,6 +3166,7 @@ int main() {
   // [cache]" text captured from a redirected sink; a TTY stderr tints it.
   gufo::platform::SetEnv("NO_COLOR", "1");
   TestInPassStableCheckpoint();
+  TestLegacyInPassCheckpoint();
   TestInPassFailureRetainsOnlyCompletedCheckpoints();
   TestNewImageGetsAStableCheckpoint();
   TestIndivisibleInputsAreNotSplit();
