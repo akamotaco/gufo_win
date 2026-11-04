@@ -620,7 +620,7 @@ private:
   bool& cancelled_;
 };
 
-class InPassRunner final : public SnapshotRunner {
+class InPassRunner : public SnapshotRunner {
 public:
   using SnapshotRunner::SnapshotRunner;
   bool fail_after_prefill{false};
@@ -1726,6 +1726,201 @@ void TestFullChatCheckpointRestoresWithoutSuffixPrefill() {
   old.Invalidate();
 }
 
+/// Inputs whose tokens must be evaluated together, such as images. A span is
+/// [first, end): positions strictly inside it are not legal stops.
+struct IndivisibleSpansContext final : gufo::server::TextPromptContext {
+  std::vector<std::pair<std::size_t, std::size_t>> spans;
+  [[nodiscard]] std::size_t PrefillStop(std::size_t position,
+                                        bool up) const override {
+    for (const auto& [first, end] : spans)
+      if (position > first && position < end)
+        return up ? end : first;
+    return position;
+  }
+};
+
+std::shared_ptr<IndivisibleSpansContext> MakeSpans(
+    std::vector<std::pair<std::size_t, std::size_t>> spans) {
+  auto context = std::make_shared<IndivisibleSpansContext>();
+  context->spans = std::move(spans);
+  return context;
+}
+
+template<class Base>
+class SpanRunner final : public Base {
+public:
+  using Base::Base;
+  TextRunnerDescriptor Descriptor() const override {
+    auto descriptor = Base::Descriptor();
+    descriptor.max_context = 32768;
+    return descriptor;
+  }
+  void SetPromptContext(
+      TextRunnerState&,
+      std::shared_ptr<const gufo::server::TextPromptContext>) const override {}
+};
+
+template<class Base>
+class AlignedSpanRunner final : public Base {
+public:
+  using Base::Base;
+  TextRunnerDescriptor Descriptor() const override {
+    auto descriptor = Base::Descriptor();
+    descriptor.max_context = 32768;
+    descriptor.capabilities.prefill_alignment = 4;
+    return descriptor;
+  }
+  void SetPromptContext(
+      TextRunnerState&,
+      std::shared_ptr<const gufo::server::TextPromptContext>) const override {}
+};
+
+std::vector<std::size_t> PrefillStops(const FakeStats& stats) {
+  std::vector<std::size_t> positions;
+  std::size_t position = 0;
+  for (const auto span : stats.prefill_spans)
+    positions.push_back(position += span);
+  return positions;
+}
+
+void TestIndivisibleInputsAreNotSplit() {
+  using Stops = std::vector<std::size_t>;
+  using Context = std::shared_ptr<const gufo::server::TextPromptContext>;
+  // Prefill a prompt in steps of `budget` and report where the steps ended.
+  const auto steps = [](std::size_t tokens, std::size_t budget,
+                        Context context) {
+    auto stats = std::make_shared<FakeStats>();
+    TextRunnerPool pool(std::make_shared<SpanRunner<SnapshotRunner>>(stats), 1);
+    auto request = pool.Acquire(std::vector<TextRunnerToken>(tokens, 1), {}, {},
+                                std::move(context));
+    while (!request.prefill_complete())
+      (void)request.Prefill(budget);
+    request.Cancel();
+    return PrefillStops(*stats);
+  };
+  Expect(steps(20, 3, MakeSpans({{4, 14}})) == Stops({3, 4, 14, 17, 20}),
+         "a budget stops before an indivisible input, and a step starting "
+         "at one takes it whole");
+  Expect(steps(20, 3, MakeSpans({{4, 10}, {10, 16}})) ==
+             Stops({3, 4, 10, 16, 19, 20}),
+         "adjacent inputs are each taken whole");
+  Expect(steps(12, 3, MakeSpans({{0, 6}})) == Stops({6, 9, 12}),
+         "an input at the start of the prompt is taken whole");
+  Expect(steps(12, 3, MakeSpans({{8, 12}})) == Stops({3, 6, 8, 12}),
+         "an input at the end of the prompt is taken whole");
+  Expect(steps(20, 3, MakeSpans({{5, 8}})) == Stops({3, 5, 8, 11, 14, 17, 20}),
+         "a budget ending exactly at an input's edges is not moved");
+  {
+    // With an alignment a stop is both aligned and outside every input; only
+    // the prompt end may be off the alignment.
+    const auto aligned = [](std::size_t budget, std::size_t stable,
+                            Context context) {
+      auto stats = std::make_shared<FakeStats>();
+      TextRunnerPool pool(
+          std::make_shared<AlignedSpanRunner<SnapshotRunner>>(stats), 1);
+      auto request = pool.Acquire(std::vector<TextRunnerToken>(42, 1), {}, {},
+                                  std::move(context), true, stable);
+      while (!request.prefill_complete())
+        (void)request.Prefill(budget);
+      request.Cancel();
+      return PrefillStops(*stats);
+    };
+    Expect(aligned(6, 0, MakeSpans({{10, 19}})) ==
+               Stops({4, 8, 20, 24, 28, 32, 36, 40, 42}),
+           "a budget stops aligned before an input, and a step starting there "
+           "runs to the next aligned stop past it");
+    Expect(aligned(64, 30, MakeSpans({{22, 29}})) == Stops({20, 42}),
+           "an aligned boundary landing inside an input moves before it");
+    Expect(aligned(64, 30, MakeSpans({})) == Stops({28, 42}),
+           "without spans a boundary only moves to the alignment");
+  }
+  {
+    // No declared spans leave every position as without a context.
+    const auto none = steps(20, 3, {});
+    Expect(none == Stops({3, 6, 9, 12, 15, 18, 20}) &&
+               none == steps(20, 3, MakeSpans({})),
+           "an empty span list changes no step");
+  }
+  {
+    const auto grid = [](Context context) {
+      auto stats = std::make_shared<FakeStats>();
+      TextRunnerPool pool(
+          std::make_shared<SpanRunner<SnapshotRunner>>(stats, 64, 256, 4096),
+          1);
+      auto request = pool.Acquire(std::vector<TextRunnerToken>(5000, 1), {}, {},
+                                  std::move(context), true, 4990);
+      while (!request.prefill_complete())
+        (void)request.Prefill(32768);
+      request.Cancel();
+      return PrefillStops(*stats);
+    };
+    // The 4096-token grid checkpoint falls inside the input.
+    Expect(grid(MakeSpans({{4000, 4200}})) == Stops({2048, 4000, 4990, 5000}),
+           "checkpoints move before an indivisible input");
+    Expect(grid(MakeSpans({{4096, 4200}})) == Stops({2048, 4096, 4990, 5000}),
+           "a checkpoint at an input's first row is kept");
+    Expect(grid({}) == Stops({2048, 4096, 4990, 5000}) &&
+               grid(MakeSpans({})) == grid({}),
+           "without spans the grid checkpoint stays where it was");
+  }
+  {
+    // The stable boundary lies inside the input: the snapshot moves before it.
+    const std::vector<TextRunnerToken> prefix(20, 1);
+    auto edited = prefix;
+    edited[12] = 2;
+    for (const bool in_pass : {false, true}) {
+      auto stats = std::make_shared<FakeStats>();
+      const auto spans = MakeSpans({{4, 14}});
+      const auto run = [&](auto runner) {
+        TextRunnerPool pool(runner, 1);
+        auto first = pool.Acquire(prefix, {}, {}, spans, true, 10);
+        while (!first.prefill_complete())
+          (void)first.Prefill(64);
+        first.Commit();
+        auto second = pool.Acquire(edited, {}, {}, spans, true, 10);
+        const auto cached = second.cached_prompt_tokens();
+        second.Invalidate();
+        return cached;
+      };
+      const auto cached =
+          in_pass ? run(std::make_shared<SpanRunner<InPassRunner>>(stats))
+                  : run(std::make_shared<SpanRunner<SnapshotRunner>>(stats));
+      Expect(cached == 4, "the stable snapshot never lands inside an input");
+      Expect(PrefillStops(*stats) == (in_pass ? Stops({20}) : Stops({4, 20})),
+             "the stable boundary moved before the input shapes the steps");
+    }
+  }
+  {
+    // Conversations sharing placeholder tokens diverge inside the input: the
+    // learned shared-prefix boundary moves before it.
+    auto stats = std::make_shared<FakeStats>();
+    auto runner = std::make_shared<SpanRunner<SnapshotRunner>>(
+        stats, 64, std::size_t{1} << 20, 4096);
+    TextRunnerPool pool(runner, 1);
+    const auto spans = MakeSpans({{900, 1100}});
+    const auto run = [&](TextRunnerToken tail) {
+      std::vector<TextRunnerToken> prompt(1000, 100);
+      prompt.insert(prompt.end(), 600, tail);
+      auto request = pool.Acquire(prompt, {}, {}, spans);
+      const auto cached = request.cached_prompt_tokens();
+      const auto before = stats->prefill_spans.size();
+      while (!request.prefill_complete())
+        (void)request.Prefill(4096);
+      (void)request.Commit();
+      return std::pair{cached, std::vector<std::size_t>(
+                                   stats->prefill_spans.begin() + before,
+                                   stats->prefill_spans.end())};
+    };
+    (void)run(1);
+    const auto [cached, second] = run(2);
+    Expect(cached == 0 && second == Stops({900, 700}),
+           "a shared-prefix checkpoint stops before the input it would split");
+    const auto [restored, third] = run(3);
+    Expect(restored == 900 && third == Stops({700}),
+           "later conversations restore the checkpoint before the input");
+  }
+}
+
 void TestNewImageGetsAStableCheckpoint() {
   class ContextRunner final : public SnapshotRunner {
   public:
@@ -2756,6 +2951,7 @@ int main() {
   TestLegacyInPassCheckpoint();
   TestInPassFailureRetainsOnlyCompletedCheckpoints();
   TestNewImageGetsAStableCheckpoint();
+  TestIndivisibleInputsAreNotSplit();
   TestGeneratedFrontierForksBeforeMutation();
   TestGeneratedFrontierPersistsForForks();
   TestCancellationRetainsOnlyCompletedWork();
