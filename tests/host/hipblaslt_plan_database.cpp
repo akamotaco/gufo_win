@@ -1,4 +1,4 @@
-// Copied verbatim from gufo src/core/hip/hipblaslt_plan_database.cpp at 9f6c9f9b5b2e703a57fd978f714a7b94dcb6c552 (blob 802be77e49ff); only the includes are rewritten.
+// Copied verbatim from gufo src/core/hip/hipblaslt_plan_database.cpp at a8844cc6977b4c52349b1622f1b3f02e31fead25 (blob 802be77e49ff); only the includes are rewritten.
 // Regenerate with tools/sync_test_host.py; do not edit.
 #include <gufo/ext/experimental/hipblaslt_plan_database.hpp>
 

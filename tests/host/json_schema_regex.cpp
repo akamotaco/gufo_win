@@ -1,4 +1,4 @@
-// Copied verbatim from gufo src/core/json_schema_regex.cpp at 9f6c9f9b5b2e703a57fd978f714a7b94dcb6c552 (blob dc21bcd4eb44); only the includes are rewritten.
+// Copied verbatim from gufo src/core/json_schema_regex.cpp at a8844cc6977b4c52349b1622f1b3f02e31fead25 (blob dc21bcd4eb44); only the includes are rewritten.
 // Regenerate with tools/sync_test_host.py; do not edit.
 #include "tests/host/json_schema_regex.hpp"
 

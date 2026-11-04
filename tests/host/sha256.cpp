@@ -1,4 +1,4 @@
-// Copied verbatim from gufo src/core/crypto/sha256.cpp at 9f6c9f9b5b2e703a57fd978f714a7b94dcb6c552 (blob 2157044ba9ea); only the includes are rewritten.
+// Copied verbatim from gufo src/core/crypto/sha256.cpp at a8844cc6977b4c52349b1622f1b3f02e31fead25 (blob 2157044ba9ea); only the includes are rewritten.
 // Regenerate with tools/sync_test_host.py; do not edit.
 #include <gufo/ext/crypto.hpp>
 

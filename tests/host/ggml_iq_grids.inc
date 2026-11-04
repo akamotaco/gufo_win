@@ -1,4 +1,4 @@
-// Copied verbatim from gufo src/core/quant/ggml_iq_grids.inc at 9f6c9f9b5b2e703a57fd978f714a7b94dcb6c552 (blob 125897e1faf6); only the includes are rewritten.
+// Copied verbatim from gufo src/core/quant/ggml_iq_grids.inc at a8844cc6977b4c52349b1622f1b3f02e31fead25 (blob 125897e1faf6); only the includes are rewritten.
 // Regenerate with tools/sync_test_host.py; do not edit.
 // GGML importance-quant tables, verbatim from ggml-common.h (llama.cpp,
 // MIT; see THIRD_PARTY_NOTICES.md). Included by ggml_dequant.cpp inside its

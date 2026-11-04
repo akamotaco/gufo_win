@@ -54,5 +54,5 @@
     "gemma4_vision_generate_probe":   {"requires": ["hip", "testing"], "role": "test"},
     "gemma4_gpu_probe":               {"requires": ["hip", "testing"], "role": "test"}
   },
-  "licenses": ["LICENSE"]
+  "licenses": ["LICENSE", "LICENSES/gufo.txt"]
 }
