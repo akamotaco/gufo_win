@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "name": "gemma4",
+  "version": "0.1.0",
+  "api_version": ">= 0.1.17",
+  "entry": "gemma4_register",
+  "registration_target": "gufo_gemma4",
+  "depends": [],
+  "platforms": ["linux"],
+  "providers": [
+    {
+      "id": "gemma4",
+      "capability": "text_generation",
+      "keys": ["gguf:gemma4"],
+      "model_ids": [
+        "gemma-4-31B-it",
+        "gemma-4-31B-it-qat",
+        "gemma-4-26B-A4B-it"
+      ],
+      "target": "gufo_gemma4",
+      "entry": "gemma4_provider_register"
+    }
+  ],
+  "options": [],
+  "targets": {
+    "gufo_gemma4": { "requires": [] }
+  },
+  "licenses": ["LICENSE"]
+}
