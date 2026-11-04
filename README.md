@@ -13,8 +13,10 @@ batched sessions, native tool calls and the shared serving cache.
 **Status:** in progress. The engine is moving here from the
 [franzmoca/gufo](https://github.com/franzmoca/gufo) `feat/gemma` branch
 ([gufo-org/gufo#426](https://github.com/gufo-org/gufo/pull/426)). This revision
-registers provider metadata only; use `feat/gemma` to run the models until the
-port is complete.
+builds the configuration, tokenizer, chat template, tool syntax, vision prompt,
+CPU reference and HIP engine libraries with their unit tests, and registers
+provider metadata; it does not run the models yet. Use `feat/gemma` to run
+them until the port is complete.
 
 Maintainer: Francesco Moca ([@franzmoca](https://github.com/franzmoca)).
 

@@ -1,0 +1,157 @@
+{
+ "schema": "gufo.kernel-resources.v1",
+ "note": "Gemma 4 kernels that use scratch by design. The gufo::models::gemma4 entries come from feat/gemma 83b764b4 (release binary, ROCm 7.2.3 and the ROCm 10.1 additions). The gufo::models::gemma4::qwen entries are the copied Qwen kernels, measured on the gpu-test test binaries with ROCm 10.1; the host build of the same Qwen kernels uses the same scratch. Check a binary that links the HIP library: python3 GUFO/tools/ci/check-kernel-resources.py BINARY --baseline tools/ci/kernel-resources.json",
+ "default_max_scratch": 0,
+ "allow": {
+  "_ZN4gufo6models6gemma44qwen33BatchedExactBf16GEMMFp32VecKernelILj16ELm24ELm2ELb1ELj64ELm1ELb0EEEvPK12hip_bfloat16PKfPfmm": {
+   "max_scratch": 28
+  },
+  "_ZN4gufo6models6gemma44qwen35SmallBatchKQuantExactFp32GEMMKernelILj16ELm6ELm3ELNS_4core8GgmlTypeE12ELm2ELj12ELm1ELb1ELm6ELj64ELj32ELb0ELb0ELb0EEEvPKvPKfPfmmm": {
+   "max_scratch": 16
+  },
+  "_ZN4gufo6models6gemma44qwen35SmallBatchKQuantExactFp32GEMMKernelILj16ELm7ELm3ELNS_4core8GgmlTypeE12ELm1ELj12ELm1ELb0ELm7ELj32ELj32ELb0ELb0ELb0EEEvPKvPKfPfmmm": {
+   "max_scratch": 36
+  },
+  "_ZN4gufo6models6gemma44qwen35SmallBatchKQuantExactFp32GEMMKernelILj16ELm7ELm3ELNS_4core8GgmlTypeE12ELm1ELj12ELm1ELb1ELm7ELj64ELj32ELb0ELb0ELb0EEEvPKvPKfPfmmm": {
+   "max_scratch": 16
+  },
+  "_ZN4gufo6models6gemma44qwen35SmallBatchKQuantExactFp32GEMMKernelILj16ELm8ELm3ELNS_4core8GgmlTypeE2ELm1ELj12ELm1ELb0ELm8ELj32ELj32ELb0ELb0ELb0EEEvPKvPKfPfmmm": {
+   "max_scratch": 16
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_110GemvKernelILNS3_10WmmaFormatE4ELb0ELi4ELb1EEEvPKhNS3_4PackEPfjjjj": {
+   "max_scratch": 12
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_111GeGluKernelEPKfS5_Pfm": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_117GeGluPackedKernelEPKfPfjmP6__half": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_117GeGluPackedKernelEPKfPfjmP6__halfNS2_11WmmaPackOutE": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_119GeGluQuantizeKernelEPKfS5_Pvjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_120RoutedHalfDownKernelILNS2_12ExpertFormatE3ELi112ELb1ELb0ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_120RoutedHalfDownKernelILNS2_12ExpertFormatE3ELi112ELb1ELb1ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_120RoutedHalfDownKernelILNS2_12ExpertFormatE3ELi112ELb1ELb1ELb1EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_120RoutedHalfDownKernelILNS2_12ExpertFormatE3ELi96ELb1ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_120RoutedHalfDownKernelILNS2_12ExpertFormatE5ELi112ELb1ELb0ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_120RoutedHalfDownKernelILNS2_12ExpertFormatE5ELi96ELb1ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_120RoutedHalfDownKernelILNS2_12ExpertFormatE6ELi112ELb1ELb0ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_120RoutedHalfDownKernelILNS2_12ExpertFormatE6ELi112ELb1ELb1ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_120RoutedHalfDownKernelILNS2_12ExpertFormatE6ELi112ELb1ELb1ELb1EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_120RoutedHalfDownKernelILNS2_12ExpertFormatE6ELi96ELb1ELb1EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_120RoutedHalfDownKernelILNS2_12ExpertFormatE7ELi112ELb1ELb1ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_120RoutedHalfDownKernelILNS2_12ExpertFormatE7ELi112ELb1ELb1ELb1EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_121GeGluPackedHalfKernelEPK6__halfPS4_jm": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_121RepackQ8_0AsQ4KKernelEPKhPhj": {
+   "max_scratch": 36
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE0ELi112ELb1ELb0ELi0ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE0ELi112ELb1ELb0ELi1ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE0ELi112ELb1ELb1ELi0ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE0ELi112ELb1ELb1ELi0ELb1EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE0ELi112ELb1ELb1ELi1ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE0ELi112ELb1ELb1ELi2ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE0ELi96ELb1ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE0ELi96ELb1ELb1EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE1ELi112ELb1ELb0ELi0ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE1ELi112ELb1ELb0ELi1ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE1ELi112ELb1ELb1ELi0ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE1ELi112ELb1ELb1ELi0ELb1EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE1ELi112ELb1ELb1ELi1ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE1ELi96ELb1ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE1ELi96ELb1ELb1EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE2ELi112ELb1ELb0ELi0ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE2ELi112ELb1ELb0ELi1ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE2ELi112ELb1ELb1ELi0ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE2ELi112ELb1ELb1ELi0ELb1EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE2ELi112ELb1ELb1ELi1ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE2ELi144ELb1ELb1ELi0ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE2ELi144ELb1ELb1ELi0ELb1EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE2ELi96ELb1ELb0EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_122RoutedHalfKQuantKernelILNS2_12ExpertFormatE2ELi96ELb1ELb1EEEvPKhPK6__halfPKiSC_SC_SC_PfPS8_jjjj": {
+   "max_scratch": 8
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_126WmmaPrefillAttentionKernelILj256ELj2ELj4ELb0EEEvNS2_13AttentionArgsE": {
+   "max_scratch": 28
+  },
+  "_ZN4gufo6models6gemma44rocm12_GLOBAL__N_126WmmaPrefillAttentionKernelILj512ELj4ELj1ELb1EEEvNS2_13AttentionArgsE": {
+   "max_scratch": 20
+  }
+ }
+}
