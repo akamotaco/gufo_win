@@ -133,6 +133,10 @@ ValidatedRunner ValidateRunner(std::shared_ptr<TextModelRunner> runner,
     throw std::invalid_argument(
         "text runner maximum context must be at least one token");
   }
+  if (runner->ReasoningDelimiters().close.empty()) {
+    throw std::invalid_argument(
+        "text runner reasoning close delimiter must not be empty");
+  }
   if (descriptor.capabilities.fork && !descriptor.capabilities.snapshot) {
     throw std::invalid_argument(
         "text runner fork capability requires snapshot support");
