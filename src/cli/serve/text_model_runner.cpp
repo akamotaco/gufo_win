@@ -559,6 +559,18 @@ struct TextRunnerPool::Request::Impl {
     // Freeze it before prefill, then retain this turn's own stable boundary
     // before mutable assistant framing.
     auto count = cache_prefix_tokens == 0 ? prompt.size() : cache_prefix_tokens;
+    // Neither snapshots nor any other planned stop may split an indivisible
+    // input. Without declared spans every position is unchanged.
+    const auto legal = [this](std::size_t position) {
+      return context ? context->PrefillStop(position, false) : position;
+    };
+    // A stable boundary inside the first input leaves nothing to retain.
+    count = legal(count);
+    if (count == 0)
+      count = prompt.size();
+    for (auto& boundary : boundaries)
+      boundary = legal(boundary);
+    boundaries.erase(std::ranges::unique(boundaries).begin(), boundaries.end());
     // A newly consumed image needs its own stable checkpoint. Otherwise the
     // next assistant turn can invalidate the complete prompt's framing and
     // force the image through prefill again from the older text frontier.
@@ -654,8 +666,9 @@ struct TextRunnerPool::Request::Impl {
       const auto count =
           std::min(grid_points, TextRunnerPool::Impl::kIntermediateCheckpoints);
       for (std::size_t point = 1; point <= count; ++point) {
-        const auto position = grid_points * point / count * interval;
+        const auto position = legal(grid_points * point / count * interval);
         if (position > prefill_offset &&
+            (checkpoints.empty() || position > checkpoints.back()) &&
             position - prefill_offset >= interval &&
             prompt.size() - position > tail &&
             position != snapshot_tokens.size() &&
@@ -667,7 +680,7 @@ struct TextRunnerPool::Request::Impl {
     }
     if (lease.component())
       checkpoints = lease.PlannedCaptures(cache_prefix_tokens);
-    if (alignment > 1) {
+    if (alignment > 1 || context) {
       for (auto& position : checkpoints)
         position = Aligned(position);
       std::erase_if(checkpoints, [&](std::size_t position) {
@@ -679,8 +692,33 @@ struct TextRunnerPool::Request::Impl {
     }
   }
 
-  [[nodiscard]] std::size_t Aligned(std::size_t position) const noexcept {
-    return position - position % alignment;
+  /// The nearest position at or before `position` where a pass may end: on
+  /// the prefill alignment and outside every indivisible input.
+  [[nodiscard]] std::size_t Aligned(std::size_t position) const {
+    for (;;) {
+      auto next = position - position % alignment;
+      if (context)
+        next = context->PrefillStop(next, false);
+      if (next == position)
+        return position;
+      position = next;
+    }
+  }
+
+  /// The nearest such position after `position`, or the prompt end.
+  [[nodiscard]] std::size_t NextStop(std::size_t position) const {
+    for (;;) {
+      if (position >= prompt.size())
+        return prompt.size();
+      auto next = position;
+      if (const auto over = next % alignment; over != 0)
+        next += alignment - over;
+      if (context && next < prompt.size())
+        next = context->PrefillStop(next, true);
+      if (next == position)
+        return position;
+      position = next;
+    }
   }
 
   ~Impl() {
@@ -1304,6 +1342,16 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
             ? max_input_tokens - over
             : std::min(max_input_tokens + impl_->alignment - over,
                        impl_->prompt.size() - impl_->prefill_offset);
+  }
+  // Nor does it end inside an indivisible input: it ends before one, or a
+  // step starting at one consumes it whole, beyond the budget. Every planned
+  // stop is legal already, so later clamps keep the step legal.
+  if (const auto end = impl_->prefill_offset + max_input_tokens;
+      impl_->context && end < impl_->prompt.size()) {
+    auto stop = impl_->Aligned(end);
+    if (stop <= impl_->prefill_offset)
+      stop = impl_->NextStop(impl_->prefill_offset + 1);
+    max_input_tokens = stop - impl_->prefill_offset;
   }
 
   auto& state = dynamic_cast<TextRunnerState&>(impl_->lease.state());
