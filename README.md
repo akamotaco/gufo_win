@@ -54,6 +54,10 @@ Still missing:
   command-line option works.
 - **Cache features not upstream:** in-place same-slot restore and shared
   transfer streams (batches of 256 jobs instead of 16).
+- **Known failures:** `reasoning-budget` (budgets are ignored; the runner
+  declares no single-token budget tags) and `tool-images` (with thinking off,
+  the model's empty `thought\n<channel|>` after a tool response reaches the
+  content). Both also fail on `feat/gemma`.
 - **Model cards and documentation** (benchmarks, quality, experiments) still
   live in `feat/gemma`; the Python tools in `tools/` are untested here.
 

@@ -1,4 +1,4 @@
-// Copied verbatim from gufo src/core/sampling_logit_row.hpp at a8844cc6977b4c52349b1622f1b3f02e31fead25 (blob bcfec0cdc388); only the includes are rewritten.
+// Copied verbatim from gufo src/core/sampling_logit_row.hpp at a8774bbc4b8231d49fa772fc0eb7690672267653 (blob bcfec0cdc388); only the includes are rewritten.
 // Regenerate with tools/sync_test_host.py; do not edit.
 #ifndef GUFO_CORE_SAMPLING_LOGIT_ROW_HPP_
 #define GUFO_CORE_SAMPLING_LOGIT_ROW_HPP_
