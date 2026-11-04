@@ -12,7 +12,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <gufo/ext/experimental/ggml_gemm.hpp>
+#include <gufo/ext/experimental/ggml_dequant.hpp>
 #include <gufo/ext/experimental/hip_utils.hpp>
 #include <iostream>
 #include <optional>
@@ -157,7 +157,9 @@ void CheckShape(const Format& f, std::size_t m, std::size_t k,
   std::vector<float> row(k);
   double worst = 0.0;
   for (std::size_t o = 0; o < m; o += std::max<std::size_t>(1, m / 97)) {
-    gufo::quant::Dequantize(f.type, w.data() + o * encoded_row, row.data(), k);
+    Require(gufo::quant::DequantizeRow(f.type, w.data() + o * encoded_row,
+                                       row.data(), k),
+            "weight row decodes");
     for (std::size_t r = 0; r < 2; ++r) {
       double want = 0.0, magnitude = 0.0;
       for (std::size_t c = 0; c < k; ++c) {
@@ -184,8 +186,9 @@ void CheckShape(const Format& f, std::size_t m, std::size_t k,
     HIP_CHECK(hipMemcpy(one.data(), dy, one.size() * 4, hipMemcpyDeviceToHost));
     double gworst = 0.0;
     for (std::size_t o = 0; o < m; o += std::max<std::size_t>(1, m / 97)) {
-      gufo::quant::Dequantize(f.type, w.data() + o * encoded_row, row.data(),
-                              k);
+      Require(gufo::quant::DequantizeRow(f.type, w.data() + o * encoded_row,
+                                         row.data(), k),
+              "weight row decodes");
       for (std::size_t r = 0; r < 2; ++r) {
         double want = 0.0, magnitude = 0.0;
         for (std::size_t c = 0; c < k; ++c) {
@@ -329,7 +332,9 @@ void CheckHalfShape(std::size_t m, std::size_t k, std::mt19937& rng) {
   std::vector<float> row(k);
   double worst = 0.0;
   for (std::size_t o = 0; o < m; o += std::max<std::size_t>(1, m / 97)) {
-    gufo::quant::Dequantize(GgmlType::kF16, w.data() + o * k, row.data(), k);
+    Require(gufo::quant::DequantizeRow(GgmlType::kF16, w.data() + o * k,
+                                       row.data(), k),
+            "weight row decodes");
     for (std::size_t r = 0; r < 2; ++r) {
       double want = 0.0, magnitude = 0.0;
       for (std::size_t c = 0; c < k; ++c) {
@@ -472,7 +477,9 @@ void CheckWmmaShape(const Format& f, std::uint32_t m, std::uint32_t k,
   std::vector<float> row(k);
   double worst = 0.0;
   for (std::uint32_t o = 0; o < m; o += std::max<std::uint32_t>(1, m / 61)) {
-    gufo::quant::Dequantize(f.type, w.data() + o * row_bytes, row.data(), k);
+    Require(gufo::quant::DequantizeRow(f.type, w.data() + o * row_bytes,
+                                       row.data(), k),
+            "weight row decodes");
     for (std::uint32_t r = 0; r < kRows; r += 5) {
       double want = 0.0, magnitude = 0.0;
       for (std::uint32_t c = 0; c < k; ++c) {
@@ -750,10 +757,14 @@ void CheckRepack(std::mt19937& rng) {
   std::vector<float> want(kCols), got(kCols);
   double error = 0.0, energy = 0.0;
   for (std::size_t r = 0; r < kRows; ++r) {
-    gufo::quant::Dequantize(GgmlType::kQ8_0, src.data() + r * kCols / 32 * 34,
-                            want.data(), kCols);
-    gufo::quant::Dequantize(GgmlType::kQ4_K, dst.data() + r * kCols / 256 * 144,
-                            got.data(), kCols);
+    Require(gufo::quant::DequantizeRow(GgmlType::kQ8_0,
+                                       src.data() + r * kCols / 32 * 34,
+                                       want.data(), kCols),
+            "weight row decodes");
+    Require(gufo::quant::DequantizeRow(GgmlType::kQ4_K,
+                                       dst.data() + r * kCols / 256 * 144,
+                                       got.data(), kCols),
+            "weight row decodes");
     for (std::size_t c = 0; c < kCols; ++c) {
       error += (double{got[c]} - want[c]) * (double{got[c]} - want[c]);
       energy += double{want[c]} * want[c];

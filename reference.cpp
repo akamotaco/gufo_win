@@ -1,9 +1,10 @@
 #include "reference.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
-#include <gufo/ext/experimental/ggml_gemm.hpp>
+#include <gufo/ext/experimental/ggml_dequant.hpp>
 #include <stdexcept>
 
 namespace gufo::models::gemma4 {
@@ -104,15 +105,21 @@ void Reference::MatMul(const TensorRef& weight, const float* x_in,
   }
   const std::size_t outputs = weight.rows;
   const std::size_t row_bytes = weight.RowBytes();
+  // Exceptions cannot leave the parallel region; a row that does not decode
+  // is reported after it.
+  std::atomic<bool> undecodable{false};
 #pragma omp parallel
   {
     std::vector<float> w(cols);
 #pragma omp for schedule(static)
     for (std::size_t o = 0; o < outputs; ++o) {
-      quant::Dequantize(
-          weight.type,
-          static_cast<const std::uint8_t*>(weight.data) + o * row_bytes,
-          w.data(), cols);
+      if (!quant::DequantizeRow(
+              weight.type,
+              static_cast<const std::uint8_t*>(weight.data) + o * row_bytes,
+              w.data(), cols)) {
+        undecodable.store(true, std::memory_order_relaxed);
+        continue;
+      }
       for (std::size_t r = 0; r < rows; ++r) {
         const float* xr = x + r * cols;
         double acc = 0.0;
@@ -123,6 +130,9 @@ void Reference::MatMul(const TensorRef& weight, const float* x_in,
       }
     }
   }
+  if (undecodable.load(std::memory_order_relaxed))
+    throw std::invalid_argument(
+        "gemma4 reference: unsupported projection weight type");
 }
 
 void Reference::Attention(std::uint32_t layer, const float* q, std::size_t rows,
@@ -261,11 +271,13 @@ void Reference::Forward(std::span<const TokenId> tokens,
   const float embed_scale = std::sqrt(static_cast<float>(d));
   const std::size_t embed_row = weights_.token_embd.RowBytes();
   for (std::size_t r = 0; r < n; ++r) {
-    quant::Dequantize(
-        weights_.token_embd.type,
-        static_cast<const std::uint8_t*>(weights_.token_embd.data) +
-            static_cast<std::size_t>(tokens[r]) * embed_row,
-        x.data() + r * d, d);
+    if (!quant::DequantizeRow(
+            weights_.token_embd.type,
+            static_cast<const std::uint8_t*>(weights_.token_embd.data) +
+                static_cast<std::size_t>(tokens[r]) * embed_row,
+            x.data() + r * d, d))
+      throw std::invalid_argument(
+          "gemma4 reference: unsupported token embedding type");
     for (std::size_t i = 0; i < d; ++i) {
       x[r * d + i] *= embed_scale;
     }

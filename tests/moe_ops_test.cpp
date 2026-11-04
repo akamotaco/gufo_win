@@ -14,7 +14,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
-#include <gufo/ext/experimental/ggml_gemm.hpp>
+#include <gufo/ext/experimental/ggml_dequant.hpp>
 #include <gufo/ext/experimental/hip_utils.hpp>
 #include <iostream>
 #include <numeric>
@@ -394,8 +394,9 @@ void CheckProjection(const Format& f, std::uint32_t m, std::uint32_t k,
     const std::size_t e = static_cast<std::size_t>(ids[s]);
     const float* xs = &x[std::size_t{s / x_div} * k];
     for (std::uint32_t o = 0; o < m; o += std::max<std::uint32_t>(1, m / 61)) {
-      gufo::quant::Dequantize(f.type, w.data() + (e * m + o) * row_bytes,
-                              row.data(), k);
+      Require(gufo::quant::DequantizeRow(
+                  f.type, w.data() + (e * m + o) * row_bytes, row.data(), k),
+              "weight row decodes");
       double want = 0.0, magnitude = 0.0;
       for (std::uint32_t c = 0; c < k; ++c) {
         const double p = double{row[c]} * xs[c];
@@ -803,8 +804,9 @@ void CheckRoutedPrefill(const Format& f, std::uint32_t m, std::uint32_t k,
   for (std::size_t s = 0; s < slots; s += 13) {
     const std::size_t e = static_cast<std::size_t>(ids[s]);
     for (std::uint32_t o = 0; o < m; o += 37) {
-      gufo::quant::Dequantize(f.type, w.data() + (e * m + o) * row_bytes,
-                              row.data(), k);
+      Require(gufo::quant::DequantizeRow(
+                  f.type, w.data() + (e * m + o) * row_bytes, row.data(), k),
+              "weight row decodes");
       double want = 0.0, magnitude = 0.0;
       for (std::uint32_t c = 0; c < k; ++c) {
         const double p = double{row[c]} * __half2float(xh[(s / kUsed) * k + c]);
@@ -1019,8 +1021,9 @@ void CheckDenseBlockwise(const Format& f, std::uint32_t m, std::uint32_t k,
     double worst = 0.0;
     for (std::uint32_t r = 0; r < rows; r += 7) {
       for (std::uint32_t o = 0; o < m; o += 13) {
-        gufo::quant::Dequantize(f.type, w.data() + o * row_bytes, row.data(),
-                                k);
+        Require(gufo::quant::DequantizeRow(f.type, w.data() + o * row_bytes,
+                                           row.data(), k),
+                "weight row decodes");
         double expect = 0.0, magnitude = 0.0;
         for (std::uint32_t c = 0; c < k; ++c) {
           const double p = double{row[c]} * __half2float(xh[r * k + c]);
@@ -1085,7 +1088,9 @@ void CheckDenseGemv(const Format& f, std::uint32_t m, std::uint32_t k,
   std::vector<float> row(k);
   double worst = 0.0;
   for (std::uint32_t o = 0; o < m; o += 7) {
-    gufo::quant::Dequantize(f.type, w.data() + o * row_bytes, row.data(), k);
+    Require(gufo::quant::DequantizeRow(f.type, w.data() + o * row_bytes,
+                                       row.data(), k),
+            "weight row decodes");
     for (std::uint32_t r = 0; r < kRows; r += 3) {
       double want = 0.0, magnitude = 0.0;
       for (std::uint32_t c = 0; c < k; ++c) {
