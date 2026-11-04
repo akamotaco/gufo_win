@@ -26,6 +26,8 @@
     "gufo_gemma4":                    {"requires": []},
     "gufo_gemma4_hip":                {"requires": ["hip"]},
     "gufo_gemma4_reference":          {"requires": ["testing"]},
+    "gufo_gemma4_test_host":          {"requires": ["testing"]},
+    "gufo_gemma4_test_host_hip":      {"requires": ["hip", "testing"]},
     "gemma4_config_test":             {"requires": ["testing"], "role": "test"},
     "gemma4_cycle_trace_test":        {"requires": ["testing"], "role": "test"},
     "gemma4_draft_policy_test":       {"requires": ["testing"], "role": "test"},
