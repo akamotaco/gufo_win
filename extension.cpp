@@ -1,15 +1,16 @@
-#include <gufo/ext/generated/gemma4_constants.hpp>
 #include <gufo/ext/registry.hpp>
 #include <gufo/ext/text.hpp>
 
 #include "probe.hpp"
+#include "text_contract.hpp"
 
-// The engine libraries build here; the text runner and the prompt, chat and
-// bench drivers are not ported yet, so every build registers the probes with
-// unavailable execution factories.
-void gemma4_provider_register(gufo::ext::Registry& registry) {
-  registry.AddProvider(
-      gufo::ext::generated::extension_gemma4::kProvider_gemma4);
+// The tool dialect is host-side and registers in every build, before any
+// runner is created. HIP builds register the provider from gufo_gemma4_text
+// (provider.cpp); without HIP the probes register with no execution
+// factories.
+void gemma4_register(gufo::ext::Registry& registry) {
+  gufo::ext::RegisterToolDialect(gufo::models::gemma4::ToolDialect());
+#if !defined(ENGINE_ENABLE_HIP)
   registry.AddTextProvider({
       .id = "gemma4",
       .probe = &gufo::models::gemma4::ProbeGemma4,
@@ -18,9 +19,9 @@ void gemma4_provider_register(gufo::ext::Registry& registry) {
       .bench_driver = nullptr,
       .prompt_driver = nullptr,
       .chat_driver = nullptr,
+      .sampling_defaults = &gufo::models::gemma4::ProbeSamplingDefaults,
   });
-}
-
-void gemma4_register(gufo::ext::Registry& registry) {
+#else
   (void)registry;
+#endif
 }

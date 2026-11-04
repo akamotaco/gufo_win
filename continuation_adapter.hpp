@@ -76,6 +76,11 @@ public:
       const cache::Slot&) const override;
   [[nodiscard]] std::vector<cache::Rows> PlanPrefill(
       const cache::Slot&, cache::Rows first, cache::Rows end) const override;
+  /// Every component of an in-pass checkpoint stands at the boundary, as
+  /// after a Sync to it.
+  [[nodiscard]] std::vector<cache::ComponentPosition>
+  PrefillCheckpointPositions(const cache::Slot&,
+                             cache::Rows boundary) const override;
   void BeginRestore(cache::Slot&,
                     std::span<const cache::ComponentPosition>) override;
   [[nodiscard]] cache::Completion CapturePrivate(const cache::Slot&,

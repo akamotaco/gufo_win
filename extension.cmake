@@ -14,6 +14,7 @@ gufo_extension_target(
     draft_vocab.cpp
     extension.cpp
     probe.cpp
+    text_contract.cpp
     tokenizer.cpp
     tool_syntax.cpp
     vision/prompt.cpp
@@ -30,6 +31,11 @@ if(TARGET gufo_gemma4)
   target_include_directories(gufo_gemma4 PUBLIC
     "$<BUILD_INTERFACE:${GUFO_EXTENSION_BUILD_ROOT}>"
   )
+  # Registration leaves the provider to gufo_gemma4_text in HIP builds.
+  if(ENGINE_ENABLE_HIP)
+    set_property(SOURCE "${GUFO_EXTENSION_BUILD_ROOT}/extension.cpp"
+      APPEND PROPERTY COMPILE_DEFINITIONS ENGINE_ENABLE_HIP=1)
+  endif()
 endif()
 
 # Device side: Gemma's kernels, executor, engine, vision encoder and
@@ -121,6 +127,26 @@ if(TARGET gufo_gemma4_hip)
   target_include_directories(gufo_gemma4_hip SYSTEM PRIVATE
     ${HIPCUB_INCLUDE_DIR}
     ${ROCPRIM_INCLUDE_DIR}
+  )
+endif()
+
+# The serving runner, the prompt, chat and bench drivers and the provider
+# registration.
+gufo_extension_target(
+  NAME gufo_gemma4_text
+  SOURCES
+    drivers.cpp
+    provider.cpp
+    runner.cpp
+  LINK_LIBRARIES
+    gufo_gemma4_hip
+    gufo_gemma4
+    gufo_ext_runtime
+    hip::host
+)
+if(TARGET gufo_gemma4_text)
+  target_compile_options(gufo_gemma4_text PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-O3>
   )
 endif()
 
@@ -256,6 +282,8 @@ _gemma4_test(tool_syntax "cpu;tools"
   SOURCES tests/tool_syntax_test.cpp LINK_LIBRARIES gufo_gemma4)
 _gemma4_test(vision_prompt "cpu;vision"
   SOURCES tests/vision_prompt_test.cpp LINK_LIBRARIES gufo_gemma4)
+_gemma4_test(text_contract "cpu;tools;reasoning;vision"
+  SOURCES tests/text_contract_test.cpp LINK_LIBRARIES gufo_gemma4)
 _gemma4_test(artifact "cpu;tokenization;chat_template;external-model"
   SOURCES tests/artifact_test.cpp LINK_LIBRARIES gufo_gemma4)
 

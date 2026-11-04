@@ -17,7 +17,8 @@
         "gemma-4-31B-it-qat",
         "gemma-4-26B-A4B-it"
       ],
-      "target": "gufo_gemma4",
+      "speculative": ["mtp"],
+      "target": "gufo_gemma4_text",
       "entry": "gemma4_provider_register"
     }
   ],
@@ -25,6 +26,7 @@
   "targets": {
     "gufo_gemma4":                    {"requires": []},
     "gufo_gemma4_hip":                {"requires": ["hip"]},
+    "gufo_gemma4_text":               {"requires": ["hip"]},
     "gufo_gemma4_reference":          {"requires": ["testing"]},
     "gufo_gemma4_test_host":          {"requires": ["testing"]},
     "gufo_gemma4_test_host_hip":      {"requires": ["hip", "testing"]},
@@ -36,6 +38,7 @@
     "gemma4_template_test":           {"requires": ["testing"], "role": "test"},
     "gemma4_tool_syntax_test":        {"requires": ["testing"], "role": "test"},
     "gemma4_vision_prompt_test":      {"requires": ["testing"], "role": "test"},
+    "gemma4_text_contract_test":      {"requires": ["testing"], "role": "test"},
     "gemma4_artifact_test":           {"requires": ["testing"], "role": "test"},
     "gemma4_attention_ops_test":      {"requires": ["hip", "testing"], "role": "test"},
     "gemma4_kernel_ops_test":         {"requires": ["hip", "testing"], "role": "test"},

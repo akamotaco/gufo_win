@@ -43,6 +43,9 @@ struct KvCache;
 /// Draft tokens per cycle when the caller sets none: the longest chain, which
 /// the calibrated policy shortens by itself (rows cost little up to 16).
 inline constexpr std::uint32_t kDefaultDraftTokens = 15;
+/// Most prompt lookahead rows one prefill forward evaluates past its
+/// frontier (Session::Sync).
+inline constexpr std::size_t kLookaheadRows = 64;
 
 struct ModelOptions {
   /// Largest context any session may use.

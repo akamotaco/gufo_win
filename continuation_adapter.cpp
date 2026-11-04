@@ -489,6 +489,20 @@ std::vector<cache::ComponentPosition> ContinuationAdapter::Positions(
     positions.push_back({d.id, state.session->Position()});
   return positions;
 }
+std::vector<cache::ComponentPosition>
+ContinuationAdapter::PrefillCheckpointPositions(const cache::Slot& slot,
+                                                Rows boundary) const {
+  const auto& state = As(slot);
+  if (!state.IsValid() || state.pending)
+    throw std::logic_error("Gemma 4 slot is not ready for checkpoint planning");
+  if (boundary <= state.session->Position() || boundary > context_)
+    throw std::invalid_argument("unsupported Gemma 4 in-pass boundary");
+  std::vector<cache::ComponentPosition> positions;
+  positions.reserve(descriptors_.size());
+  for (const auto& d : descriptors_)
+    positions.push_back({d.id, boundary});
+  return positions;
+}
 std::vector<Rows> ContinuationAdapter::PlanPrefill(const cache::Slot& slot,
                                                    Rows first, Rows end) const {
   const auto& state = As(slot);
