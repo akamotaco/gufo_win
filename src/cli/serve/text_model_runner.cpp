@@ -556,6 +556,18 @@ struct TextRunnerPool::Request::Impl {
     // Freeze it before prefill, then retain this turn's own stable boundary
     // before mutable assistant framing.
     auto count = cache_prefix_tokens == 0 ? prompt.size() : cache_prefix_tokens;
+    // Neither snapshots nor any other planned stop may split an indivisible
+    // input. Without declared spans every position is unchanged.
+    const auto legal = [this](std::size_t position) {
+      return context ? context->PrefillStop(position, false) : position;
+    };
+    // A stable boundary inside the first input leaves nothing to retain.
+    count = legal(count);
+    if (count == 0)
+      count = prompt.size();
+    for (auto& boundary : boundaries)
+      boundary = legal(boundary);
+    boundaries.erase(std::ranges::unique(boundaries).begin(), boundaries.end());
     // A newly consumed image needs its own stable checkpoint. Otherwise the
     // next assistant turn can invalidate the complete prompt's framing and
     // force the image through prefill again from the older text frontier.
@@ -616,8 +628,9 @@ struct TextRunnerPool::Request::Impl {
       const auto count =
           std::min(grid_points, TextRunnerPool::Impl::kIntermediateCheckpoints);
       for (std::size_t point = 1; point <= count; ++point) {
-        const auto position = grid_points * point / count * interval;
+        const auto position = legal(grid_points * point / count * interval);
         if (position > prefill_offset &&
+            (checkpoints.empty() || position > checkpoints.back()) &&
             position - prefill_offset >= interval &&
             prompt.size() - position > tail &&
             position != snapshot_tokens.size() &&
@@ -627,8 +640,15 @@ struct TextRunnerPool::Request::Impl {
           checkpoints.push_back(position);
       }
     }
-    if (lease.component())
-      checkpoints = lease.PlannedCaptures(cache_prefix_tokens);
+    if (lease.component()) {
+      checkpoints.clear();
+      for (const auto planned : lease.PlannedCaptures(cache_prefix_tokens)) {
+        const auto position = legal(planned);
+        if (position > prefill_offset &&
+            (checkpoints.empty() || position > checkpoints.back()))
+          checkpoints.push_back(position);
+      }
+    }
   }
 
   ~Impl() {
@@ -1112,7 +1132,9 @@ std::size_t TextRunnerPool::Request::ShareCheckpoint(
     return 0;
   // The complete prompt is retained only after decoding starts; share the
   // last prefill position instead so peers can start sooner.
-  const auto target = std::min(common_tokens, impl_->prompt.size() - 1);
+  auto target = std::min(common_tokens, impl_->prompt.size() - 1);
+  if (impl_->context)
+    target = impl_->context->PrefillStop(target, false);
   const auto offset = impl_->prefill_offset;
   if (target <= offset)
     return 0;
@@ -1203,6 +1225,18 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
   if (!impl_->checkpoints.empty())
     max_input_tokens = std::min(
         max_input_tokens, impl_->checkpoints.front() - impl_->prefill_offset);
+  // Never end a step inside an indivisible input. A step starting at one
+  // consumes it whole, beyond the budget. Every planned stop is already legal,
+  // so the step cannot cross one by extending.
+  if (impl_->context) {
+    const auto offset = impl_->prefill_offset;
+    auto stop = impl_->context->PrefillStop(
+        offset + std::min(max_input_tokens, impl_->prompt.size() - offset),
+        false);
+    if (stop <= offset)
+      stop = impl_->context->PrefillStop(offset + 1, true);
+    max_input_tokens = std::min(stop, impl_->prompt.size()) - offset;
+  }
 
   auto& state = dynamic_cast<TextRunnerState&>(impl_->lease.state());
   bool in_pass = false;
