@@ -15,7 +15,7 @@ provenance (host revision, patch hash) in `provenance.json`.
 ```sh
 G=~/projects/gufo-ext M=~/models/gemma-4
 nix develop $G -c python3 tests/functional/run.py --host $G -- \
-  --output out/31b-mtp --sampling-preset gemma4 \
+  --output out/31b-mtp --record-baseline --sampling-preset gemma4 \
   --expected-input-modalities text,image --suite tools --suite cache -- \
   $G/build/gemma-ext-release/gufo serve llm \
   --model $M/gemma-31b-it/gemma-4-31B-it-UD-Q4_K_XL.gguf \
