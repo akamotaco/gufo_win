@@ -1,0 +1,1600 @@
+diff --git a/README.md b/README.md
+index 5c0cdd9..2797f02 100644
+--- a/README.md
++++ b/README.md
+@@ -437,7 +437,7 @@ only affected suites. Reuse matching baseline evidence; do not repeat the whole
+ correctness matrix on main. A baseline must match the revision, harness,
+ toolchain, weights, settings and preceding cache history.
+ 
+-Use `deepseek4` for DeepSeek. Pass the model's normal speculative options for
++Use `deepseek4` for DeepSeek and `gemma4` for Gemma 4. Pass the model's normal speculative options for
+ DFlash2, MTP or DSpark. Server sampling arguments become the expected defaults;
+ `--mmproj` enables image cases. Keep informational server logging enabled.
+ 
+@@ -457,8 +457,11 @@ or timing margins; retain the original timeout failure when investigating it.
+ | Qwen27B Q8_K_XL | `off`, `dflash2` | `--dflash-model` |
+ | Flash-Next Q4_K_XL | `off`, `mtp` | `--mtp-model` |
+ | DeepSeek Flash 0731 | `off`, `dspark` | `--dspark-model` |
++| Gemma 4 31B UD-Q4_K_XL | `off`, `mtp` | `--mtp-model` |
++| Gemma 4 26B-A4B UD-Q4_K_XL | `off`, `mtp` | `--mtp-model` |
+ 
+ Keep the sidecar path in the `off` command to test the explicit override.
++Gemma 4 `mtp` needs `--draft-calibration request` for seeded replay checks.
+ `report.json` checks the loaded mode and records observed draft counts; `off`
+ must perform zero drafts. `state-edges` requires actual draft execution when
+ enabled, so a loaded-but-unused sidecar cannot qualify that mode. Use the normal
+@@ -851,7 +854,12 @@ nix develop -c python3 tests/functional/publication_wait.py \
+   --mtp-model /path/to/mtp.gguf --speculative mtp --sessions 1 --context 65536
+ ```
+ 
+-Unchanged retries must reproduce the complete output with zero prefill. After a
++Unchanged retries must reproduce the complete output with zero prefill. Once
++the RAM cache's 128 snapshot records are full, the cache deliberately keeps
++other conversations' last checkpoints instead of new exact-retry copies. The
++runner therefore restarts the server before a suite after its cache logged that
++pressure, and before `sampling-defaults`, `progress`, `cache-edits` and
++`cache-growth`. `report.json` maps each suite to its server log in `server_logs`. After a
+ restart, disk restores may re-prefill less than one 2048-token disk step;
+ greedy and zero-prefill restores must still reproduce their output. Edited
+ histories must retain a useful earlier prefix and match their cold answer;
+diff --git a/cache_concurrency.py b/cache_concurrency.py
+index bd55a28..825a29b 100644
+--- a/cache_concurrency.py
++++ b/cache_concurrency.py
+@@ -22,6 +22,11 @@ CODES = ("ALPHA", "BETA", "GAMMA", "DELTA")
+ TAIL_ALLOWANCE = 96
+ 
+ 
++def skip_check(checks, name, reason):
++    checks[name] = {"skipped": reason}
++    print(f"SKIP {name}: {reason}", file=sys.stderr, flush=True)
++
++
+ def system_prompt(label, lines):
+     return (f"{label}\nReply with only the requested code word.\n" +
+             "".join(f"Reference note {index}: the build uses CMake presets and every "
+@@ -48,7 +53,7 @@ def abandon_request(client, body, delay):
+ 
+ 
+ def check_cache_concurrency(client, model, checks, chat_result, concurrency,
+-                            abandon=abandon_request):
++                            abandon=abandon_request, preset=None):
+     failures = []
+     width = max(2, min(concurrency, len(CODES)))
+     request = dict(model=model, temperature=0, seed=31, max_completion_tokens=16,
+@@ -100,15 +105,16 @@ def check_cache_concurrency(client, model, checks, chat_result, concurrency,
+ 
+     # Sharing needs concurrent sessions and a runner that reuses prefixes.
+     probe = [{"role": "system", "content": system_prompt("cache_concurrency_probe", 8)},
+-             {"role": "user", "content": "Reply with only the code ALPHA."}]
++             {"role": "user", "content": "Reply with only the code word: ALPHA"}]
+     chat("probe_cold", body_for(probe))
+     reuse = chat("probe_warm", body_for(probe))["usage"]["cached_tokens"] > 0
+     sharing = reuse and concurrency > 1
+ 
+-    def group(label, conversations, codes, share, streaming=()):
++    def group(label, conversations, codes, share, streaming=(), answers=True):
+         results = together(label, [body_for(m) for m in conversations], streaming)
+         for result, code in zip(results, codes):
+-            answer(result, code)
++            if answers:
++                answer(result, code)
+         waited = [index for index, result in enumerate(results) if wait_ms(result) > 0]
+         if not (share and sharing):
+             if waited:
+@@ -139,13 +145,13 @@ def check_cache_concurrency(client, model, checks, chat_result, concurrency,
+     # Identical prompts: one prefill, the rest restore it.
+     system = system_prompt("cache_concurrency_identical", 220)
+     identical = [{"role": "system", "content": system},
+-                 {"role": "user", "content": "Reply with only the code ALPHA."}]
++                 {"role": "user", "content": "Reply with only the code word: ALPHA"}]
+     group("identical", [identical] * width, ["ALPHA"] * width, share=True)
+ 
+     # Subagent fan-out: one system prompt, a different short task each.
+     system = system_prompt("cache_concurrency_fanout", 220)
+     fanout = [[{"role": "system", "content": system},
+-               {"role": "user", "content": f"Task {index}. Reply with only the code {code}."}]
++               {"role": "user", "content": f"Task {index}. Reply with only the code word: {code}"}]
+               for index, code in enumerate(CODES[:width])]
+     group("fanout", fanout, CODES[:width], share=True, streaming={1, 3})
+ 
+@@ -153,7 +159,7 @@ def check_cache_concurrency(client, model, checks, chat_result, concurrency,
+     system = system_prompt("cache_concurrency_long_tasks", 220)
+     long_tasks = [[{"role": "system", "content": system},
+                    {"role": "user", "content": background(code, 60) +
+-                    f"Reply with only the code {code}."}]
++                    f"Reply with only the code word: {code}"}]
+                   for code in CODES[:width]]
+     group("long_tasks", long_tasks, CODES[:width], share=True)
+ 
+@@ -161,13 +167,20 @@ def check_cache_concurrency(client, model, checks, chat_result, concurrency,
+     system = system_prompt("cache_concurrency_short_shared", 1)
+     short_shared = [[{"role": "system", "content": system},
+                      {"role": "user", "content": background(code, 60) +
+-                      f"Reply with only the code {code}."}]
++                      f"Reply with only the code word: {code}"}]
+                     for code in CODES[:width]]
+-    group("short_shared", short_shared, CODES[:width], share=False)
++    # Gemma 4 summarizes this repetitive background instead of answering, even
++    # uncached and alone; llama.cpp b11069 does for DELTA (ALPHA 0.77, GAMMA 0.65).
++    paraphrases = preset == "gemma4"
++    if paraphrases:
++        skip_check(checks, "short_shared_answers",
++                   "model paraphrases the background; uncached answers are compared")
++    group("short_shared", short_shared, CODES[:width], share=False,
++          answers=not paraphrases)
+ 
+     # Unrelated prompts share nothing beyond template framing.
+     unrelated = [[{"role": "system", "content": system_prompt(f"cache_concurrency_{code}", 120)},
+-                  {"role": "user", "content": f"Reply with only the code {code}."}]
++                  {"role": "user", "content": f"Reply with only the code word: {code}"}]
+                  for code in CODES[:width]]
+     group("unrelated", unrelated, CODES[:width], share=False)
+ 
+@@ -175,13 +188,13 @@ def check_cache_concurrency(client, model, checks, chat_result, concurrency,
+     # for a new request that shares only its system prompt.
+     system = system_prompt("cache_concurrency_history", 220)
+     history = [{"role": "system", "content": system},
+-               {"role": "user", "content": "Reply with only the code ALPHA."}]
++               {"role": "user", "content": "Reply with only the code word: ALPHA"}]
+     first = chat("history_turn_0", body_for(history))
+     answer(first, "ALPHA")
+     history += [{"role": "assistant", "content": first["text"]},
+-                {"role": "user", "content": "Reply with only the code BETA."}]
++                {"role": "user", "content": "Reply with only the code word: BETA"}]
+     newcomer = [{"role": "system", "content": system},
+-                {"role": "user", "content": "Task 9. Reply with only the code GAMMA."}]
++                {"role": "user", "content": "Task 9. Reply with only the code word: GAMMA"}]
+     turn, fresh = together("history_turn_1", [body_for(history), body_for(newcomer)])
+     answer(turn, "BETA")
+     answer(fresh, "GAMMA")
+@@ -194,7 +207,7 @@ def check_cache_concurrency(client, model, checks, chat_result, concurrency,
+     # A cancelled leader must release the requests waiting for it.
+     system = system_prompt("cache_concurrency_cancelled", 220)
+     cancelled = [{"role": "system", "content": system},
+-                 {"role": "user", "content": "Reply with only the code DELTA."}]
++                 {"role": "user", "content": "Reply with only the code word: DELTA"}]
+     leader = threading.Thread(target=abandon, args=(client, body_for(cancelled), 1.0))
+     leader.start()
+     time.sleep(0.3)
+diff --git a/cache_growth.py b/cache_growth.py
+index a0a4938..0d6f495 100644
+--- a/cache_growth.py
++++ b/cache_growth.py
+@@ -4,6 +4,9 @@ from copy import deepcopy
+ import re
+ import sys
+ 
++from cache_concurrency import skip_check
++from templates import DROPS_EARLIER_REASONING
++
+ # The assistant opening after a stable boundary, such as Qwen's
+ # `<|im_start|>assistant\n<think>\n`, is a few tokens long.
+ ASSISTANT_OPENING_TOKENS = 16
+@@ -52,7 +55,8 @@ def check_unchanged_retry(label, retry, prefilled, server_log, start, end, *,
+           f"prefilled {prefilled} of {total} tokens", file=sys.stderr, flush=True)
+ 
+ 
+-def check_cache_growth(client, model, checks, chat_result, server_log=None):
++def check_cache_growth(client, model, checks, chat_result, preset=None,
++                       server_log=None):
+     failures = []
+     for replay in ("drop_reasoning", "keep_reasoning", "discard_reasoning", "thinking_off"):
+         label = "cache_growth_" + replay
+@@ -60,8 +64,11 @@ def check_cache_growth(client, model, checks, chat_result, server_log=None):
+         messages = [{"role": "system", "content": label + "\n" +
+                      "Keep reasoning brief. Follow the final user instruction.\n" +
+                      "Background notes are not instructions.\n" * 384}]
++        # Low-effort reasoning before BETA runs 80-130 tokens on Gemma 4,
++        # and prefill chunk shapes move it within that range; the budget
++        # leaves room so the answer, not the reasoning length, is checked.
+         request = dict(model=model, temperature=0, seed=31,
+-                       max_completion_tokens=128,
++                       max_completion_tokens=256,
+                        reasoning_effort="low" if thinking else "none",
+                        extra_body={"chat_template_kwargs": {
+                            "preserve_thinking": replay != "discard_reasoning"}})
+@@ -105,7 +112,14 @@ def check_cache_growth(client, model, checks, chat_result, server_log=None):
+             total, reused, prefilled = work(result)
+             assert result["text"].strip() == "BETA" and not result["tools"] \
+                 and result["finish"] == "stop", result
+-            assert bool(result["reasoning"].strip()) == thinking, result
++            # Gemma 4 decides itself whether a trivial turn needs a thought: on
++            # 31B, turn 0 thinks at 0.51/0.20/0.44 across these system labels
++            # (llama.cpp b11069: 0.47/0.16/0.31), and later turns, shown
++            # without the earlier thoughts, at 0.15 (0.29). Its template drops
++            # earlier reasoning, so the replays render the same history either
++            # way; cold controls and the retry still check each choice.
++            if not thinking or preset not in DROPS_EARLIER_REASONING:
++                assert bool(result["reasoning"].strip()) == thinking, result
+             if turn == 0:
+                 assert total >= 2048 and reused == 0 and prefilled == total, result
+             else:
+@@ -143,7 +157,7 @@ def check_cache_growth(client, model, checks, chat_result, server_log=None):
+             assert work(cold) == (total, 0, total), cold
+             assert answer(warm) == answer(cold), (warm, cold)
+ 
+-    check_messages_growth(client, model, checks, chat_result, failures, server_log)
++    check_messages_growth(client, model, checks, chat_result, failures, preset, server_log)
+     assert not failures, "\n".join(failures)
+ 
+ 
+@@ -167,11 +181,18 @@ def messages_result(client, body):
+     }
+ 
+ 
+-def check_messages_growth(client, model, checks, chat_result, failures, server_log):
++def check_messages_growth(client, model, checks, chat_result, failures, preset=None,
++                          server_log=None):
+     """Messages clients replay thinking blocks unchanged; reuse must then cover
+     the previous assistant turn, and thinking must never reach the text block."""
+     for replay in ("keep_thinking", "thinking_off"):
+         label = "cache_growth_messages_" + replay
++        if replay == "keep_thinking" and preset == "gemma4":
++            # Whether Gemma 4 thinks on turn 1 is a near-tie (llama.cpp b11069:
++            # "The" 0.66, empty thought 0.33). Computing the same tokens in a
++            # 2907+3 instead of a 2910 prefill split flips it, without a cache.
++            skip_check(checks, label, "turn 1 thinking is a near-tie the prefill split flips")
++            continue
+         thinking = replay != "thinking_off"
+         system = (label + "\n" + "Keep reasoning brief. Follow the final user instruction.\n" +
+                   "Background notes are not instructions.\n" * 384)
+diff --git a/cache_shared_prefix.py b/cache_shared_prefix.py
+index e99f91b..03cb13c 100644
+--- a/cache_shared_prefix.py
++++ b/cache_shared_prefix.py
+@@ -9,7 +9,7 @@ grid checkpoint, and must answer as uncached controls do.
+ from copy import deepcopy
+ import sys
+ 
+-from cache_concurrency import background, system_prompt
++from cache_concurrency import background, skip_check, system_prompt
+ 
+ CODES = ("ALPHA", "BETA", "GAMMA", "DELTA")
+ # Tokens around the divergence point a restore may still miss: template
+@@ -18,9 +18,12 @@ BOUNDARY_ALLOWANCE = 96
+ # Below this gain the server keeps the nearest existing checkpoint instead of
+ # capturing another one (TextRunnerPool::Request::kSharedPrefixMinTokens).
+ LEARN_MIN_TOKENS = 512
++# Gemma 4 copies the last background label into the short DELTA task: uncached
++# Gufo and llama.cpp b11069 also answer "DELTA.3" ("." 0.503 vs end 0.497).
++COPIED_LABEL_ANSWERS = {"gemma4": {("short_tasks", "DELTA")}}
+ 
+ 
+-def check_cache_shared_prefix(client, model, checks, chat_result):
++def check_cache_shared_prefix(client, model, checks, chat_result, preset=None):
+     failures = []
+     request = dict(model=model, temperature=0, seed=31, max_completion_tokens=16,
+                    reasoning_effort="none")
+@@ -49,12 +52,16 @@ def check_cache_shared_prefix(client, model, checks, chat_result):
+         system = system_prompt(f"cache_shared_prefix_{label}", 220)
+         conversations = [[{"role": "system", "content": system},
+                           {"role": "user", "content": background(code, tail_lines) +
+-                           f"Reply with only the code {code}."}]
++                           f"Reply with only the code word: {code}"}]
+                          for code in CODES]
+         results = []
+         for index, (messages, code) in enumerate(zip(conversations, CODES)):
+             result = chat(f"{label}_{index}", messages)
+-            answer(result, code)
++            if (label, code) in COPIED_LABEL_ANSWERS.get(preset, ()):
++                skip_check(checks, f"{label}_{index}_answer",
++                           "model copies the background label; uncached answers match")
++            else:
++                answer(result, code)
+             results.append(result)
+         # The shared prefix ends where the user message starts. An uncached
+         # probe with a one-word user message measures it.
+diff --git a/image_inputs.py b/image_inputs.py
+index caa336b..2c45b6c 100644
+--- a/image_inputs.py
++++ b/image_inputs.py
+@@ -6,6 +6,8 @@ import struct
+ import sys
+ import zlib
+ 
++from templates import THINKING_OFF_OPENING_TOKENS
++
+ 
+ # Solid red, 128x128. Fixed fixtures keep this suite independent of image tools.
+ JPEG = (
+@@ -184,7 +186,7 @@ def check_messages_images(client, model, checks, image_content):
+ 
+ 
+ def check_image_count(client, model, checks, image_content, chat_result, response_result,
+-                      context, concurrency):
++                      context, concurrency, sampling_preset="qwen38"):
+     """Image count is bounded by actual prompt size, including replayed history."""
+     from concurrent.futures import ThreadPoolExecutor
+     from openai import BadRequestError
+@@ -244,7 +246,9 @@ def check_image_count(client, model, checks, image_content, chat_result, respons
+                           *next_body[key]]
+         continued = save(f"image_count_{endpoint}_18",
+                           call(client, next_body, True), "red")
+-        assert counts(continued)[1] >= counts(first)[0], (first, continued)
++        # History may drop the thinking-off opening (templates.py).
++        opening = THINKING_OFF_OPENING_TOKENS.get(sampling_preset, 0)
++        assert counts(continued)[1] >= counts(first)[0] - opening, (first, continued)
+ 
+     body = request("chat", 17, "blue")
+     schema = {"type": "object", "properties": {
+diff --git a/metrics.py b/metrics.py
+index 7e9663f..ffe0580 100644
+--- a/metrics.py
++++ b/metrics.py
+@@ -678,9 +678,12 @@ def qualify(comparisons, controls=()):
+ def join_server_timings(directory):
+     """Join after shutdown, when cancelled work and disk restoration have drained."""
+     root = Path(directory)
++    report = root / "report.json"
++    logs = json.loads(report.read_text()).get("server_logs", {}) if report.is_file() else {}
+     for path in root.glob("*.requests.json"):
+-        log = root / ("server-restarted.log" if path.name.endswith("-disk.requests.json")
+-                      else "server.log")
++        label = path.name.removesuffix(".requests.json")
++        log = root / logs.get(label, "server-restarted.log" if label.endswith("-disk")
++                              else "server.log")
+         completed = {}
+         for line in log.read_text().splitlines():
+             if "event=completed " in line:
+diff --git a/openai_sdk.py b/openai_sdk.py
+index 90e72d5..3cc48ab 100644
+--- a/openai_sdk.py
++++ b/openai_sdk.py
+@@ -73,20 +73,25 @@ class CheckResults(dict):
+         super().__init__()
+         self.report, self.output = report, output
+         self.recorder = recorder
++        # Concurrent cases record checks from several threads: each save
++        # serializes this report and renames the same temporary file.
++        self.lock = threading.RLock()
+ 
+     def save(self):
+         if self.output:
+-            self.output.parent.mkdir(parents=True, exist_ok=True)
+-            temporary = self.output.with_suffix(".tmp")
+-            temporary.write_text(json.dumps(self.report, indent=2) + "\n")
+-            temporary.replace(self.output)
++            with self.lock:
++                self.output.parent.mkdir(parents=True, exist_ok=True)
++                temporary = self.output.with_suffix(".tmp")
++                temporary.write_text(json.dumps(self.report, indent=2) + "\n")
++                temporary.replace(self.output)
+ 
+     def __setitem__(self, name, value):
+-        if name in self:
+-            raise AssertionError(f"duplicate functional check: {name}")
+-        super().__setitem__(name, value)
+-        self.recorder.mark(name)
+-        self.save()
++        with self.lock:
++            if name in self:
++                raise AssertionError(f"duplicate functional check: {name}")
++            super().__setitem__(name, value)
++            self.recorder.mark(name)
++            self.save()
+ 
+ 
+ def chat_result(client, request, streaming=False, on_chunk=None, on_open=None):
+@@ -321,10 +326,13 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
+         print(f"CHECK {name}", file=sys.stderr, flush=True)
+         return result
+ 
++    # Gemma 4 defaults to thinking off; the other presets default to on.
++    server_thinks = (server_thinking == "on" if preset == "gemma4"
++                     else server_thinking != "off")
+     if not overrides:
+         # A default server must use the model's recommended thinking mode,
+         # including the same effort instructions as an explicit request.
+-        thinking = server_thinking != "off"
++        thinking = server_thinks
+         effort = ("high" if preset == "deepseek4" else "xhigh") if thinking else "none"
+         request = {
+             "model": model, "seed": 73, "max_completion_tokens": 8,
+@@ -332,7 +340,13 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
+             "extra_body": {"cache_prompt": False},
+         }
+         default = chat_result(client, request)
+-        explicit = chat_result(client, {**request, "reasoning_effort": effort}, True)
++        if preset == "gemma4":
++            # Gemma 4 has no effort instructions; request the mode itself.
++            explicit = chat_result(client, {**request, "extra_body": {
++                "cache_prompt": False,
++                "chat_template_kwargs": {"enable_thinking": thinking}}}, True)
++        else:
++            explicit = chat_result(client, {**request, "reasoning_effort": effort}, True)
+         assert bool(default["reasoning"]) == thinking, default
+         assert signature(default) == signature(explicit), (default, explicit)
+         record("default_thinking_effort", default)
+@@ -350,7 +364,7 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
+             "frequency_penalty": 0.,
+             "seed": 73,
+         }
+-        native = {"top_k": 20 if preset == "qwen38" else 0,
++        native = {"top_k": {"qwen38": 20, "gemma4": 64}.get(preset, 0),
+                   "min_p": 0., "min_keep": 0, "repeat_penalty": 1.,
+                   "repeat_last_n": 64}
+         assert overrides.keys() <= (expected.keys() | native.keys()), overrides
+@@ -520,7 +534,7 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
+ 
+         # Raw Completions has no chat template control; its preset follows the
+         # server's configured thinking mode rather than this Chat request.
+-        if thinking == (server_thinking != "off"):
++        if thinking == server_thinks:
+             raw = dict(model=model, prompt="One, two, three,",
+                        max_tokens=8, seed=73, extra_body={})
+             if inherited_seed:
+@@ -1525,7 +1539,7 @@ def check_strict_tools(client, model, checks):
+     record("strict_tool_invalid_schema", {"status": 400})
+ 
+ 
+-def check_native_tools(client, model, checks, vision=False):
++def check_native_tools(client, model, checks, vision=False, preset=None):
+     """Shared function semantics over both SDK transports and concurrent users."""
+     from concurrent.futures import ThreadPoolExecutor
+ 
+@@ -1591,8 +1605,15 @@ def check_native_tools(client, model, checks, vision=False):
+         final = events[-1].response
+         assert final.status == "incomplete", final
+         assert final.incomplete_details.reason == "max_output_tokens", final
+-        assert all(item.status == "incomplete" for item in final.output
+-                   if item.type == "function_call"), final
++        # An interrupted call may be reported, but never as executable.
++        for item in final.output:
++            if item.type == "function_call":
++                assert item.status == "incomplete", final
++                try:
++                    json.loads(item.arguments)
++                except json.JSONDecodeError:
++                    continue
++                raise AssertionError(("interrupted tool was made executable", final))
+         record(f"responses_tool_limit_{limit}", final.to_dict())
+ 
+     def isolated(index):
+@@ -1652,6 +1673,8 @@ def check_native_tools(client, model, checks, vision=False):
+     signature(result, value=nested)
+     record("responses_literal_call_argument", result.to_dict())
+ 
++    # Gemma 4 has no reasoning effort levels: "low" enables full-length
++    # thinking, which does not reach the call within this 256-token budget.
+     thinking_function = json.loads(json.dumps(function))
+     thinking_function["parameters"]["properties"]["value"] = {
+         "type": "string", "const": "alpha"}
+@@ -1964,7 +1987,7 @@ def check_state_edges(client, model, checks, speculative, vision=False, server_l
+     checks["schema_error_did_not_poison_cache"] = replay
+ 
+ 
+-def check_auto_tools(client, model, checks, vision=False):
++def check_auto_tools(client, model, checks, vision=False, preset=None):
+     """Automatic calls retain prose, loose schemas, replay and both transports."""
+     from concurrent.futures import ThreadPoolExecutor
+ 
+@@ -2005,6 +2028,8 @@ def check_auto_tools(client, model, checks, vision=False):
+         assert signature(first) == signature(replay), (first, replay)
+         assert replay["usage"]["cached_tokens"] > 0, replay
+         record(f"auto_chat_sampled{sampled}_cache_replay", replay)
++        if not sampled:
++            call_tokens = replay["usage"]["completion_tokens"]
+     prose = {**common, "messages": [{"role": "user", "content":
+              "Do not call any tools. Reply with the single word Hello."}]}
+     for thinking in (False, True):
+@@ -2021,7 +2046,9 @@ def check_auto_tools(client, model, checks, vision=False):
+         "extra_body": {"presence_penalty": 0}}, True)
+     signature(thought)
+     record("auto_chat_thinking_high", thought)
+-    for limit in (2, 12):
++    # Stop inside the call. Compact call syntaxes (Gemma 4: 12 tokens here)
++    # can finish within 12 tokens, so cut one token before the complete call.
++    for limit in (2, min(12, call_tokens - 1)):
+         result = chat_result(client, {**common, "max_completion_tokens": limit}, True)
+         assert result["finish"] == "length" and not result["tools"], result
+         record(f"auto_chat_limit{limit}", result)
+@@ -2041,8 +2068,9 @@ def check_auto_tools(client, model, checks, vision=False):
+         # Parallel auto permits more than one call; cardinality is enforced
+         # separately by the nonparallel suite, not by prompt obedience.
+         assert result.status == "completed" and calls, result
+-        assert all(call.name == "record" and json.loads(call.arguments) == {"value": value}
+-                   for call in calls), result
++        values = value if isinstance(value, tuple) else (value,)
++        assert all(call.name == "record" and json.loads(call.arguments)["value"] in values
++                   and len(json.loads(call.arguments)) == 1 for call in calls), result
+         return [(call.name, call.arguments) for call in calls]
+ 
+     result = client.responses.create(**response_request)
+@@ -2103,16 +2131,22 @@ def check_auto_tools(client, model, checks, vision=False):
+                 {"type": "input_text", "text": image_prompt},
+                 {"type": "input_image", "image_url":
+                  image_content("blue")["image_url"]["url"]}]}]})
+-        response_signature(result, value="blue")
++        # Either spelling shows the image reached the call (Gemma 4: hex).
++        response_signature(result, value=("blue", "#0000FF"))
+         record("auto_image_tool", result.to_dict())
+         image_request = {**common, "messages": [{"role": "user", "content": [
+             image_content("blue"), {"type": "text", "text": image_prompt}]}]}
+-        stopped = chat_result(client, {**image_request, "stop": "blue"}, True)
++        # Stop inside the arguments this prompt produces; its image-first
++        # order may spell the color differently from the Responses prompt.
++        chosen = chat_result(client, image_request)
++        color = json.loads(chosen["tools"][0]["function"]["arguments"])["value"]
++        assert color in ("blue", "#0000FF"), chosen
++        stopped = chat_result(client, {**image_request, "stop": color}, True)
+         assert stopped["finish"] == "stop" and not stopped["tools"], stopped
+         retry = chat_result(client, image_request, True)
+         assert retry["usage"]["cached_tokens"] > 0 and retry["tools"], retry
+         assert all(call["function"]["name"] == "record"
+-                   and json.loads(call["function"]["arguments"]) == {"value": "blue"}
++                   and json.loads(call["function"]["arguments"]) == {"value": color}
+                    for call in retry["tools"]), retry
+         record("auto_image_argument_stop_retry", {"stopped": stopped, "retry": retry})
+ 
+@@ -2776,7 +2810,8 @@ def main():
+     parser.add_argument("--suite", choices=("all", *SDK_SUITES), default="all")
+     parser.add_argument("--vision", action="store_true",
+                         help="Add image checks; the server needs its matching --mmproj")
+-    parser.add_argument("--sampling-preset", choices=("qwen38", "deepseek4"),
++    parser.add_argument("--sampling-preset",
++                        choices=("qwen38", "deepseek4", "gemma4"),
+                         help="Expected text defaults; required for all/sampling-defaults")
+     parser.add_argument("--sampling-overrides", type=json.loads, default={},
+                         help="JSON object of explicit server sampling CLI values")
+@@ -2862,22 +2897,25 @@ def main():
+                 client, args.model, checks, image_content, chat_result, response_result),
+             "image-count": lambda: check_image_count(
+                 client, args.model, checks, image_content, chat_result, response_result,
+-                args.context, args.concurrency),
++                args.context, args.concurrency, args.sampling_preset),
+             "tool-images": lambda: check_tool_images(
+                 client, args.model, checks, image_content, chat_result, response_result,
+                 args.server_log),
+             "image-detail": lambda: check_image_detail(client, args.model, checks, chat_result),
+             "structured": lambda: check_structured_outputs(client, args.model, checks, args.vision),
+             "structured-limits": lambda: check_structured_limits(client, args.model, checks, args.vision),
+-            "native-tools": lambda: check_native_tools(client, args.model, checks, args.vision),
+-            "auto-tools": lambda: check_auto_tools(client, args.model, checks, args.vision),
++            "native-tools": lambda: check_native_tools(
++                client, args.model, checks, args.vision, args.sampling_preset),
++            "auto-tools": lambda: check_auto_tools(
++                client, args.model, checks, args.vision, args.sampling_preset),
+             "tool-edges": lambda: check_tool_edges(
+                 client, args.model, checks, args.sampling_preset),
+             "tool-reasoning": lambda: check_tool_reasoning(
+                 client, args.model, checks, chat_result, args.sampling_preset),
+             "reasoning-separator": lambda: check_reasoning_separator(
+-                client, args.model, checks, chat_result, args.server_log),
+-            "tool-streaming": lambda: check_tool_streaming(client, args.model, checks, chat_result),
++                client, args.model, checks, chat_result, args.sampling_preset, args.server_log),
++            "tool-streaming": lambda: check_tool_streaming(
++                client, args.model, checks, chat_result, args.sampling_preset),
+             "reasoning-budget": lambda: check_reasoning_budget(
+                 client, args.model, checks, chat_result),
+             "tool-agent": lambda: check_tool_agent(
+@@ -2888,7 +2926,8 @@ def main():
+             "messages-tools": lambda: check_messages_tools(
+                 client, args.model, checks, chat_result),
+             "tool-untyped": lambda: check_untyped_agent_tools(
+-                client, args.model, checks, chat_result, args.vision, image_content),
++                client, args.model, checks, chat_result, args.vision, image_content,
++                args.sampling_preset),
+             "tool-mixed": lambda: check_mixed_tool_schemas(
+                 client, args.model, checks, chat_result, args.vision, image_content,
+                 args.sampling_preset),
+@@ -2897,13 +2936,15 @@ def main():
+                 image_content("red") if args.vision else None),
+             "tool-native-types": lambda: check_finite_argument_types(
+                 client, args.model, checks, chat_result,
+-                image_content("red") if args.vision else None),
++                image_content("red") if args.vision else None, args.sampling_preset),
+             "tool-choice-cache": lambda: check_tool_choice_cache(
+-                client, args.model, checks, chat_result, args.server_log),
++                client, args.model, checks, chat_result, server_log=args.server_log,
++                sampling_preset=args.sampling_preset),
+             "tool-parameter-order": lambda: check_tool_parameter_order(
+                 client, args.model, checks, chat_result),
+             "tool-schema-edges": lambda: check_tool_schema_edges(
+-                client, args.model, checks, chat_result, args.vision, image_content, args.server_log),
++                client, args.model, checks, chat_result, args.vision, image_content,
++                args.sampling_preset, args.server_log),
+             "state-edges": lambda: check_state_edges(
+                 client, args.model, checks, args.speculative, args.vision, args.server_log),
+             "sampling-defaults": lambda: check_sampling_defaults(
+@@ -2928,7 +2969,8 @@ def main():
+             "cache-edits": lambda: check_cache_edits(
+                 client, args.model, checks, chat_result, args.server_log),
+             "cache-growth": lambda: check_cache_growth(
+-                client, args.model, checks, chat_result, args.server_log),
++                client, args.model, checks, chat_result, args.sampling_preset,
++                args.server_log),
+             "cache-depth": lambda: check_cache_depth(
+                 client, args.model, checks, chat_result, args.concurrency, args.server_log),
+             "cache-stalls": lambda: check_cache_stalls(
+@@ -2936,9 +2978,10 @@ def main():
+                 args.server_log),
+             "cache-rotation": lambda: check_cache_rotation(client, args.model, checks, chat_result),
+             "cache-concurrency": lambda: check_cache_concurrency(
+-                client, args.model, checks, chat_result, args.concurrency),
++                client, args.model, checks, chat_result, args.concurrency,
++                preset=args.sampling_preset),
+             "cache-shared-prefix": lambda: check_cache_shared_prefix(
+-                client, args.model, checks, chat_result),
++                client, args.model, checks, chat_result, args.sampling_preset),
+             "cache-bridge": lambda: check_cache_bridge(
+                 client, args.model, checks, chat_result, args.snapshot_capacity_bytes),
+             "cache-compaction": lambda: check_cache_compaction(
+@@ -2951,7 +2994,7 @@ def main():
+             "cache-messages-loop": lambda: check_cache_messages_loop(
+                 client, args.model, checks, chat_result, args.context),
+             "system-injection": lambda: check_system_injection(
+-                client, args.model, checks, chat_result),
++                client, args.model, checks, chat_result, args.sampling_preset),
+         }
+         selected = ([name for name in suites if name not in ("tool-native-types", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "prefill-scheduling")
+                      and (name not in ("image-inputs", "image-count", "tool-images", "image-detail") or args.vision)]
+diff --git a/run.py b/run.py
+index 62087f1..98c2c34 100644
+--- a/run.py
++++ b/run.py
+@@ -44,6 +44,14 @@ SAMPLING = {
+     "--repeat-penalty": ("repeat_penalty", float),
+     "--repeat-last-n": ("repeat_last_n", int),
+ }
++# Suites check that an identical retry reuses its whole prompt. Once earlier
++# suites' conversations fill the RAM cache's snapshot records, the cache
++# deliberately keeps another conversation's last checkpoint instead of a new
++# exact-retry copy, so a retry recomputes its few reply-framing tokens. The
++# runner restarts the server before a suite once its cache logged that pressure,
++# and always for these suites, which alone make dozens of cached requests.
++FRESH_SERVER_SUITES = ("sampling-defaults", "progress", "cache-edits", "cache-growth")
++CACHE_PRESSURE = "reason=entry_capacity"
+ COMPARISON_FIELDS = ("comparison_command", "sampling_preset", "sampling_overrides", "request_timeout", "tier",
+                      "vision", "speculative", "environment", "harness_sha256", "build_inputs_sha256",
+                      "expected_input_modalities")
+@@ -129,9 +137,7 @@ def write_json(path, value):
+ 
+ def execution_coverage(directory, requested):
+     """Verify the loaded mode and actual draft work, including after restart."""
+-    logs = [directory / "server.log"]
+-    if (directory / "server-restarted.log").is_file():
+-        logs.append(directory / "server-restarted.log")
++    logs = [directory / "server.log", *sorted(directory.glob("server-*.log"))]
+     for path in logs:
+         modes = [match.group(1) for line in path.read_text().splitlines()
+                  if "event=load_completed" in line and "kind=text" in line
+@@ -260,7 +266,8 @@ def main():
+     parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument("--output", type=Path, required=True,
+                         help="New report directory; existing results are never overwritten")
+-    parser.add_argument("--sampling-preset", choices=("qwen38", "deepseek4"), required=True)
++    parser.add_argument("--sampling-preset", choices=("qwen38", "deepseek4", "gemma4"),
++                        required=True)
+     parser.add_argument("--suite", action="append", choices=("all", *SUITES), required=True,
+                         help="Repeat to select affected suites; use all for an explicit full run")
+     parser.add_argument("--expected-input-modalities", choices=("text", "text,image"),
+@@ -334,9 +341,11 @@ def main():
+         port = reserve.getsockname()[1]
+     command = [command[0], "serve", "--host", "127.0.0.1", "--port", str(port),
+                *command[2:]]
++    # The metrics suite sends sessions + 1 requests at once; when they arrive
++    # within the scheduler's first pop, all of them are pending together.
+     for flag, default in (("--sessions", "4"), ("--context", "8192"),
+                           ("--served-model-name", "functional-test"),
+-                          ("--max-pending-per-client", str(max(4, sessions)))):
++                          ("--max-pending-per-client", str(max(4, sessions + 1)))):
+         if option(command, flag) is None:
+             command += [flag, default]
+     if disk_enabled:
+@@ -360,15 +369,18 @@ def main():
+               "vision": vision, "speculative": speculative,
+               "suites": {}, "through_case": args.through_case,
+               "allow_missing_progress": args.allow_missing_progress,
+-              "started_ns": time.time_ns(), "status": "running"}
++              "started_ns": time.time_ns(), "status": "running", "server_logs": {}}
+     report["expected_input_modalities"] = args.expected_input_modalities
+     report_path = output / "report.json"
+     write_json(report_path, report)
+ 
++    current_log = output / "server.log"
++
+     def run(label, script, arguments):
+         started = time.monotonic()
+         row = {"status": "running", "report": label + ".json"}
+         report["suites"][label] = row
++        report["server_logs"][label] = current_log.name
+         write_json(report_path, report)
+         try:
+             with (output / (label + ".log")).open("w") as log:
+@@ -422,15 +434,51 @@ def main():
+                                       "--reasoning-effort", "low",
+                                       "--image", str(output / "red.png")]),
+         ]
++    def sdk_arguments(suite):
++        arguments = ["--base-url", base_url + "/v1", "--model", model,
++                     "--suite", suite, "--output", str(output / (suite + ".json")),
++                     "--sampling-preset", args.sampling_preset,
++                     "--sampling-overrides", json.dumps(overrides),
++                     "--request-timeout", str(args.request_timeout),
++                     "--concurrency", str(sessions), "--speculative", speculative,
++                     "--context", option(command, "--context"),
++                     "--server-log", str(current_log)]
++        if vision:
++            arguments += ["--vision"]
++        if args.expected_input_modalities is not None:
++            arguments += ["--expected-input-modalities", args.expected_input_modalities]
++        if option(command, "--think") is not None:
++            arguments += ["--server-thinking", option(command, "--think")]
++        if suite in ("cache-bridge", "cache-pressure") and configured:
++            arguments += ["--snapshot-capacity-bytes", configured[1]]
++        if suite == through_suite:
++            arguments += ["--through-case", through_case]
++        if args.allow_missing_progress:
++            arguments += ["--allow-missing-progress"]
++        return arguments
++
+     ready_to_restore = []
+     spacing = False
+     persist = False
++    segment = contextlib.ExitStack()
++
++    def ensure_fresh_cache(label, always=False):
++        """Restart before a suite if this server's cache was already used/full."""
++        nonlocal current_log
++        pressure = current_log.exists() and CACHE_PRESSURE in current_log.read_text()
++        if not report["suites"] or not (always or pressure):
++            return
++        segment.close()
++        current_log = output / f"server-{label}.log"
++        segment.enter_context(server(command, current_log, args.startup_timeout))
++
+     try:
+         if "cache-rotation" in selected:
+             from cache_rotation import check_snapshot_budget, host_available_bytes
+             available_before_load = host_available_bytes(Path("/proc/meminfo").read_text())
+         startup_started = time.monotonic()
+-        with server(command, output / "server.log", args.startup_timeout):
++        with segment:
++            segment.enter_context(server(command, current_log, args.startup_timeout))
+             report["startup_ms"] = (time.monotonic() - startup_started) * 1000
+             if "cache-rotation" in selected:
+                 report["snapshot_budget"] = check_snapshot_budget(
+@@ -442,29 +490,11 @@ def main():
+             for suite in selected:
+                 if suite == "cache":
+                     continue
+-                sdk_args = ["--base-url", base_url + "/v1", "--model", model,
+-                            "--suite", suite, "--output", str(output / (suite + ".json")),
+-                            "--sampling-preset", args.sampling_preset,
+-                            "--sampling-overrides", json.dumps(overrides),
+-                            "--request-timeout", str(args.request_timeout),
+-                            "--concurrency", str(sessions), "--speculative", speculative,
+-                            "--context", option(command, "--context"),
+-                            "--server-log", str(output / "server.log")]
+-                if vision:
+-                    sdk_args += ["--vision"]
+-                if args.expected_input_modalities is not None:
+-                    sdk_args += ["--expected-input-modalities", args.expected_input_modalities]
+-                if option(command, "--think") is not None:
+-                    sdk_args += ["--server-thinking", option(command, "--think")]
+-                if suite in ("cache-bridge", "cache-pressure") and configured:
+-                    sdk_args += ["--snapshot-capacity-bytes", configured[1]]
+-                if suite == through_suite:
+-                    sdk_args += ["--through-case", through_case]
+-                if args.allow_missing_progress:
+-                    sdk_args += ["--allow-missing-progress"]
+-                run(suite, "openai_sdk.py", sdk_args)
++                ensure_fresh_cache(suite, suite in FRESH_SERVER_SUITES)
++                run(suite, "openai_sdk.py", sdk_arguments(suite))
+             if "image-count" in selected and not through_case:
+                 label = "image-count-cancel"
++                ensure_fresh_cache(label)
+                 if run(label, "continuation.py", [
+                         "--url", base_url, "--model", model,
+                         "--prefix-repetitions", "2",
+@@ -473,13 +503,15 @@ def main():
+                         "--output", str(output / (label + ".json"))]):
+                     ready_to_restore.append(label)
+             if "cache" in selected:
++                ensure_fresh_cache("cache")
+                 for label, extra in cache_cases:
+                     if run(label, "continuation.py", [
+                             "--url", base_url, "--model", model, "--prefix-repetitions", "16",
+                             "--output", str(output / (label + ".json")), *extra]):
+                         ready_to_restore.append(label)
+                 # Retain the window; checkpoint IDs identify fixture-owned writes.
+-                spacing_offset = (output / "server.log").stat().st_size
++                spacing_log = current_log
++                spacing_offset = spacing_log.stat().st_size
+                 spacing = run("disk-spacing", "cache_disk_spacing.py", [
+                     "--url", base_url, "--model", model,
+                     "--output", str(output / "disk-spacing.json")])
+@@ -488,7 +520,8 @@ def main():
+                     "--output", str(output / "cache-persist.json")])
+         if ready_to_restore or spacing or persist:
+             startup_started = time.monotonic()
+-            with server(command, output / "server-restarted.log", args.startup_timeout):
++            current_log = output / "server-restarted.log"
++            with server(command, current_log, args.startup_timeout):
+                 report["restart_ms"] = (time.monotonic() - startup_started) * 1000
+                 for label in ready_to_restore:
+                     run(label + "-disk", "continuation.py", [
+@@ -507,7 +540,7 @@ def main():
+                         "--output", str(output / "disk-spacing-disk.json")])
+         if spacing:
+             from cache_disk_spacing import check_disk_spacing
+-            with (output / "server.log").open() as log:
++            with spacing_log.open() as log:
+                 log.seek(spacing_offset)
+                 grown_log = log.read()
+             report["disk_spacing"] = check_disk_spacing(
+diff --git a/server_metrics.py b/server_metrics.py
+index 109b604..720d8fc 100644
+--- a/server_metrics.py
++++ b/server_metrics.py
+@@ -101,8 +101,10 @@ def validate_metrics_report(directory):
+     """Account for cancelled work too, after terminal server logs have drained."""
+     checks = json.loads((directory / "metrics.json").read_text())["checks"]
+     requests = json.loads((directory / "metrics.requests.json").read_text())["requests"]
++    logs = json.loads((directory / "report.json").read_text()).get("server_logs", {}) \
++        if (directory / "report.json").is_file() else {}
+     completed = {}
+-    for line in (directory / "server.log").read_text().splitlines():
++    for line in (directory / logs.get("metrics", "server.log")).read_text().splitlines():
+         if "event=completed " in line:
+             fields = dict(re.findall(r"(?:^|\s)(\w+)=([^\s]+)", line))
+             if "request" in fields:
+diff --git a/system_injection.py b/system_injection.py
+index acd12b2..260b59b 100644
+--- a/system_injection.py
++++ b/system_injection.py
+@@ -9,6 +9,8 @@ required. The message then stays put, so the following turn must reuse it all.
+ from copy import deepcopy
+ import sys
+ 
++from templates import THINKING_OFF_OPENING_TOKENS
++
+ 
+ def history(label):
+     # A long conversation body after a short system prompt, as in agent
+@@ -27,8 +29,10 @@ REMINDER = ("Reminder: the status word changed. From now on, whenever the user "
+ QUESTION = "Reply with only the status word."
+ 
+ 
+-def check_system_injection(client, model, checks, chat_result):
++def check_system_injection(client, model, checks, chat_result, sampling_preset="qwen38"):
+     failures = []
++    # Thinking-off framing that history does not render (templates.py).
++    opening = THINKING_OFF_OPENING_TOKENS.get(sampling_preset, 0)
+ 
+     def record(name, result):
+         checks[name] = result
+@@ -56,7 +60,7 @@ def check_system_injection(client, model, checks, chat_result):
+             "previous_prompt_tokens": previous_total, "prompt_tokens": total,
+             "cached_tokens": reused, "prefill_tokens": prefilled,
+             "full_reuse_required": required}
+-        if required and reused < previous_total:
++        if required and reused < previous_total - opening:
+             failures.append(f"{label}: earlier prompt was not reused: "
+                             f"{checks[label + '_evidence']}")
+ 
+diff --git tests/functional/templates.py tests/functional/templates.py
+new file mode 100644
+index 0000000..25e74e7
+--- /dev/null
++++ b/templates.py
+@@ -0,0 +1,40 @@
++"""Chat-template facts that bound how much of a generated turn history reuses.
++
++Reuse is an exact token prefix. Where a model's own template renders a turn
++differently from the tokens the model generated, the next request diverges at
++that point and resumes from the stable boundary before it.
++"""
++
++# Gemma 4 (tokenizer.chat_template of the Unsloth GGUFs): with thinking off the
++# generation prompt opens an empty thought, `<|turn>model\n<|channel>thought\n
++# <channel|>`, but a model turn in history renders a thought only when it has
++# text. The next request reuses up to the stable boundary before these seven
++# tokens of the previous prompt, not the generated turn.
++THINKING_OFF_OPENING_TOKENS = {"gemma4": 7}
++
++# Gemma 4 renders a turn's reasoning only after the last user message (unless
++# preserve_thinking keeps it on tool calls): a later user turn reuses the
++# previous prompt, not the reasoning generated after it.
++DROPS_EARLIER_REASONING = {"gemma4"}
++
++
++# Gufo's Gemma 4 template shows a string `const` as a one-value `enum` (the
++# official template drops `const`, and Gemma then deliberated far longer), so a
++# control that renames `const` must show the same `enum`.
++SHOWS_STRING_CONST_AS_ENUM = {"gemma4"}
++
++# Gemma 4 calls carry typed values (`call:NAME{key:value}`), so a root `const`
++# is enforced as that value; Qwen and DeepSeek tags declare no parameters for
++# a root that is not a plain object, as llama.cpp's parsers do.
++TYPED_NATIVE_CALLS = {"gemma4"}
++
++# Gemma 4's declaration shows `enum` only for strings and never `const`, so a
++# non-string `const` (integer, array) is invisible to the model; a prompt that
++# relies on one must state the value.
++HIDES_NON_STRING_CONST = {"gemma4"}
++
++# Gemma 4 with thinking on decides itself whether to think, and may close its
++# thought channel at once. On the tool-streaming record call, 26B-A4B
++# UD-Q4_K_XL closes it first at P 0.67 (llama.cpp reference: 0.77) and 31B
++# UD-Q4_K_XL at 0.03 (0.05).
++MAY_SKIP_THINKING = {"gemma4"}
+diff --git a/test_runner.py b/test_runner.py
+index ed085e4..aa355db 100644
+--- a/test_runner.py
++++ b/test_runner.py
+@@ -802,7 +802,7 @@ class FunctionalRunnerTest(unittest.TestCase):
+                 seen.add(label)
+                 if not cold:
+                     previous[key] = total
+-            code = re.search(r"code (\w+)\.$", messages[-1]["content"])
++            code = re.search(r"code word: (\w+)$", messages[-1]["content"])
+             return {"text": code[1] if code else "Z", "reasoning": "", "tools": [], "finish": "stop",
+                     "usage": {"prompt_tokens": total, "cached_tokens": cached,
+                               "completion_tokens": 2,
+@@ -838,7 +838,7 @@ class FunctionalRunnerTest(unittest.TestCase):
+         tasks = [body["messages"][-1]["content"] for body in requests
+                  if body["messages"][0]["content"].startswith("cache_concurrency_fanout\n")
+                  and not body.get("extra_body", {}).get("cache_prompt") is False]
+-        self.assertEqual(tasks, [f"Task {index}. Reply with only the code {code}."
++        self.assertEqual(tasks, [f"Task {index}. Reply with only the code word: {code}"
+                                  for index, code in enumerate(("ALPHA", "BETA", "GAMMA", "DELTA"))])
+ 
+     def test_cache_concurrency_rejects_followers_that_prefill_everything(self):
+@@ -871,7 +871,7 @@ class FunctionalRunnerTest(unittest.TestCase):
+                     cached = 2048
+                 elif count >= 2:
+                     cached = 2048 if regress else tokens(messages[:1])
+-            code = re.search(r"code (\w+)\.$", messages[-1]["content"])
++            code = re.search(r"code word: (\w+)$", messages[-1]["content"])
+             return {"text": code[1] if code else "Z", "reasoning": "", "tools": [],
+                     "finish": "stop",
+                     "usage": {"prompt_tokens": total, "cached_tokens": cached,
+@@ -1448,6 +1448,30 @@ class FunctionalRunnerTest(unittest.TestCase):
+                 {"startup_ms": 100, "suites": {"text-cancel-disk": {}}},
+                 {"startup_ms": 100, "suites": {"text-cancel-disk": {}}})
+ 
++    def test_fresh_server_suites_use_their_own_logs(self):
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            loaded = "[loader] event=load_completed kind=text speculative=mtp\n"
++            (root / "server.log").write_text(loaded)
++            (root / "server-cache-edits.log").write_text(
++                loaded + "[INFO] request=r1 event=completed duration_ms=9 queue_ms=2\n")
++            (root / "report.json").write_text(json.dumps(
++                {"server_logs": {"cache-edits": "server-cache-edits.log"}}))
++            path = root / "cache-edits.requests.json"
++            path.write_text(json.dumps({"version": 1, "requests": [{
++                "index": 0, "endpoint": "/v1/chat/completions", "request_id": "r1",
++                "metrics": {"completion_tokens": 1, "draft_tokens": 2,
++                            "draft_tokens_accepted": 1}}]}))
++            join_server_timings(root)
++            self.assertEqual(json.loads(path.read_text())["requests"][0]["metrics"]["queue_ms"], 2)
++            self.assertTrue(functional.execution_coverage(root, "mtp")["draft_execution_observed"])
++            (root / "server-cache-edits.log").write_text(
++                "[loader] event=load_completed kind=text speculative=off\n")
++            with self.assertRaisesRegex(ValueError, "server-cache-edits"):
++                functional.execution_coverage(root, "mtp")
++        self.assertTrue({"sampling-defaults", "progress", "cache-edits", "cache-growth"}
++                        <= set(functional.FRESH_SERVER_SUITES) <= set(functional.SUITES))
++
+     def test_nullable_parallel_responses_keeps_default(self):
+         response = {"status": "completed", "output": [
+             {"type": "function_call", "name": "f", "call_id": f"call_{i}",
+diff --git a/tool_agent.py b/tool_agent.py
+index 2ef5c91..128425d 100644
+--- a/tool_agent.py
++++ b/tool_agent.py
+@@ -5,6 +5,7 @@ from copy import deepcopy
+ import json
+ import sys
+ 
++from templates import TYPED_NATIVE_CALLS
+ from tool_reasoning import response_result
+ from cache_growth import check_unchanged_retry, log_offset
+ 
+@@ -138,7 +139,8 @@ def agent_tools():
+             "parameters": {"type": "object", "properties": {"path": {"type": "string"}},
+             "required": ["path"]}}}]
+ 
+-def check_untyped_agent_tools(client, model, checks, chat_result, vision, image_content):
++def check_untyped_agent_tools(client, model, checks, chat_result, vision, image_content,
++                              sampling_preset="qwen38"):
+     """An untyped neighbor must neither switch framing nor erase arguments."""
+     def record(name, result):
+         checks[name] = result
+@@ -261,7 +263,9 @@ def check_untyped_agent_tools(client, model, checks, chat_result, vision, image_
+     result = record("untyped_finite_object", chat_result(client, finite, True))
+     # A finite root declares no parameters; as in llama.cpp the call stays
+     # native with none rather than switching to a JSON envelope (#438).
+-    check_call(result, arguments={})
++    # Typed native calls carry the root const itself (templates.py).
++    check_call(result, arguments=(
++        {"value": "alpha"} if sampling_preset in TYPED_NATIVE_CALLS else {}))
+ 
+ 
+ def check_tool_agent_json(client, model, checks, chat_result):
+@@ -292,6 +296,22 @@ def check_tool_agent_json(client, model, checks, chat_result):
+         assert json.loads(result["text"]) == expected, result
+ 
+ 
++# Gemma 4's chat template declares only description, type, enum, items,
++# properties, required and nullable. It never shows patternProperties, if/then
++# or dependencies, so Gemma omits the fields they add although its call grammar
++# admits them; it includes them once a declaration mentions them.
++UNDECLARED_SCHEMA_KEYWORDS = {"gemma4"}
++UNDECLARED_CASES = {"pattern_root": "template omits patternProperties",
++                    "wildcard": "template omits patternProperties",
++                    "conditional": "template omits if/then",
++                    "dependency": "template omits dependencies"}
++
++
++def skip_check(checks, name, reason):
++    checks[name] = {"skipped": reason}
++    print(f"SKIP {name}: {reason}", file=sys.stderr, flush=True)
++
++
+ def check_mixed_tool_schemas(client, model, checks, chat_result, vision, image_content,
+                              sampling_preset="qwen38"):
+     """Mixed native/JSON tool sets retain arguments, types and continuation."""
+@@ -415,6 +435,9 @@ def check_mixed_tool_schemas(client, model, checks, chat_result, vision, image_c
+         ("nullable_string", {"type": "object", "properties": {
+             "value": {"type": ["string", "null"]}}, "required": ["value"]}, {"value": "none"}),
+     ):
++        if name in UNDECLARED_CASES and sampling_preset in UNDECLARED_SCHEMA_KEYWORDS:
++            skip_check(checks, f"mixed_{name}", UNDECLARED_CASES[name])
++            continue
+         prompt = ("Call record exactly once with these exact arguments: " +
+                   json.dumps(arguments) + ". Preserve every JSON type. No explanation.")
+         if name == "pattern_root" and sampling_preset != "deepseek4":
+@@ -502,7 +525,8 @@ def check_union_continuation(client, model, checks, chat_result):
+               "Replaced one block.")
+ 
+ 
+-def check_tool_schema_edges(client, model, checks, chat_result, vision, image_content, server_log=None):
++def check_tool_schema_edges(client, model, checks, chat_result, vision, image_content,
++                            preset=None, server_log=None):
+     """Admitted arguments preserve JSON types; invalid schemas cannot dead-end."""
+     wildcard = {"type": "object", "properties": {"value": {"type": "string"}},
+                 "required": ["value"], "patternProperties": {"^x_": {}}}
+@@ -556,6 +580,10 @@ def check_tool_schema_edges(client, model, checks, chat_result, vision, image_co
+         return result
+ 
+     for index, (name, schema, arguments, choice) in enumerate(cases):
++        if name in UNDECLARED_CASES and preset in UNDECLARED_SCHEMA_KEYWORDS:
++            for endpoint in ("chat", "responses"):
++                skip_check(checks, f"schema_edges_{name}_{endpoint}", UNDECLARED_CASES[name])
++            continue
+         prompt = ("Call record exactly once with these exact JSON arguments: " +
+                   json.dumps(arguments) + ". Preserve every key and JSON type. No explanation.")
+         if name in ("empty_interval", "recursive"):
+diff --git a/tool_choice.py b/tool_choice.py
+index 127d482..25fa91e 100644
+--- a/tool_choice.py
++++ b/tool_choice.py
+@@ -4,10 +4,12 @@ import json
+ import sys
+ 
+ from cache_growth import check_unchanged_retry, log_offset
++from templates import THINKING_OFF_OPENING_TOKENS
+ from tool_native import assert_native, cached
+ 
+ 
+-def check_tool_choice_cache(client, model, checks, chat_result, server_log=None):
++def check_tool_choice_cache(client, model, checks, chat_result, server_log=None,
++                            sampling_preset="qwen38"):
+     from messages_count_tokens import assert_count_response
+     function = {
+         "name": "read", "description": "Read a file.",
+@@ -63,7 +65,11 @@ def check_tool_choice_cache(client, model, checks, chat_result, server_log=None)
+         start = log_offset(server_log)
+         done = record(label + "_continued", continued, index % 2 != 0)
+         end = log_offset(server_log)
+-        expected = first["usage"]["prompt_tokens"] + first["usage"]["completion_tokens"]
++        # A template whose history drops the thinking-off opening reuses the
++        # stable boundary before it instead of the call (templates.py).
++        opening = THINKING_OFF_OPENING_TOKENS.get(sampling_preset)
++        expected = (first["usage"]["prompt_tokens"] + first["usage"]["completion_tokens"]
++                    if opening is None else first["usage"]["prompt_tokens"] - opening)
+         assert cached(done["usage"]) >= expected, (
+             label, "tool choice lost the generated frontier", expected, done)
+         if after == "required":
+diff --git a/tool_native.py b/tool_native.py
+index 47798af..e626b52 100644
+--- a/tool_native.py
++++ b/tool_native.py
+@@ -13,6 +13,8 @@ from copy import deepcopy
+ import json
+ import sys
+ 
++from templates import (SHOWS_STRING_CONST_AS_ENUM, THINKING_OFF_OPENING_TOKENS,
++                       TYPED_NATIVE_CALLS)
+ from tier import rotate
+ from tool_reasoning import response_result
+ 
+@@ -105,6 +107,20 @@ def renamed(value):
+     return value
+ 
+ 
++def const_as_enum(value):
++    """A renamed string `const` shown as the `enum` that Gemma 4's template
++    shows for `const` (templates.py)."""
++    if isinstance(value, dict):
++        shown = {key: const_as_enum(item) for key, item in value.items()}
++        if (isinstance(value.get("x-const"), str) and value.get("type") == "string"
++                and "enum" not in value):
++            shown["enum"] = [value["x-const"]]
++        return shown
++    if isinstance(value, list):
++        return [const_as_enum(item) for item in value]
++    return value
++
++
+ def triggers(value):
+     if isinstance(value, dict):
+         return sum((key in TRIGGERS) + triggers(item) for key, item in value.items())
+@@ -167,6 +183,13 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
+         print(f"CHECK {label}", file=sys.stderr, flush=True)
+         return result
+ 
++    def reuse_floor(first):
++        # A template whose history drops the thinking-off opening reuses the
++        # stable boundary before it instead of the call (templates.py).
++        opening = THINKING_OFF_OPENING_TOKENS.get(sampling_preset)
++        prompt_tokens = first["usage"]["prompt_tokens"]
++        return prompt_tokens + 1 if opening is None else prompt_tokens - opening
++
+     def assert_bash(result, label):
+         assert result["finish"] == "tool_calls" and len(result["tools"]) == 1, (label, result)
+         function = result["tools"][0]["function"]
+@@ -202,7 +225,7 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
+                 {"role": "user", "content": "Reply with the single word DONE."}]}
+             done = record(label + "_continued", chat_result(client, continued, not stream))
+             assert done["finish"] == "stop" and not done["tools"], (label, done)
+-            assert cached(done["usage"]) > first["usage"]["prompt_tokens"], (
++            assert cached(done["usage"]) >= reuse_floor(first), (
+                 label, "the generated call was not reused on the next turn",
+                 first["usage"], done["usage"])
+             assert_native(done, label + "_continued")
+@@ -213,7 +236,10 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
+             # tool choice, so neighbors alternate which choice is controlled.
+             if choice != ("auto", "required")[index % 2]:
+                 continue
+-            control = {**request, "tools": [*opencode_tools(), neighbor(name, True)],
++            renamed_neighbor = neighbor(name, True)
++            if sampling_preset in SHOWS_STRING_CONST_AS_ENUM:
++                renamed_neighbor = const_as_enum(renamed_neighbor)
++            control = {**request, "tools": [*opencode_tools(), renamed_neighbor],
+                        "max_completion_tokens": 1}
+             baseline = record(label + "_control", chat_result(client, control))
+             delta = first["usage"]["prompt_tokens"] - baseline["usage"]["prompt_tokens"]
+@@ -272,12 +298,13 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
+             {"role": "user", "content": "Reply with the single word DONE."}]}
+         done = record(label + "_continued", chat_result(client, continued, choice != "auto"))
+         assert done["finish"] == "stop" and not done["tools"], (label, done)
+-        assert cached(done["usage"]) > first["usage"]["prompt_tokens"], (
++        assert cached(done["usage"]) >= reuse_floor(first), (
+             label, "the generated call was not reused on the next turn",
+             first["usage"], done["usage"])
+ 
+-    check_llama_cpp_parity(client, model, checks, chat_result, common, deepseek)
+-    check_finite_argument_types(client, model, checks, chat_result, image)
++    check_llama_cpp_parity(client, model, checks, chat_result, common, deepseek,
++                           sampling_preset in TYPED_NATIVE_CALLS)
++    check_finite_argument_types(client, model, checks, chat_result, image, sampling_preset)
+ 
+     # A strict union stays native too; llama.cpp has no strict mode. (Strict
+     # validation still rejects keywords such as oneOf before generation.)
+@@ -308,7 +335,8 @@ def check_native_tool_schemas(client, model, checks, chat_result, sampling_prese
+ TRANSPORTS = ((False, False), (False, True), (True, False), (True, True))
+ 
+ 
+-def check_finite_argument_types(client, model, checks, chat_result, image=None):
++def check_finite_argument_types(client, model, checks, chat_result, image=None,
++                                sampling_preset="qwen38"):
+     """const/enum without type still have a type, including through unions."""
+     check_read_arguments(client, model, checks, chat_result)
+     literal = ("line\n</parameter> is literal\n"
+@@ -348,11 +376,11 @@ def check_finite_argument_types(client, model, checks, chat_result, image=None):
+             assert actual == {"v": value} and type(actual["v"]) is type(value), (label, actual)
+             assert_native(result, label)
+             print(f"CHECK {label}", file=sys.stderr, flush=True)
+-    check_literal_history(client, model, checks, chat_result, image)
+-    check_integer_history(client, model, checks, chat_result)
++    check_literal_history(client, model, checks, chat_result, image, sampling_preset)
++    check_integer_history(client, model, checks, chat_result, sampling_preset)
+ 
+ 
+-def check_integer_history(client, model, checks, chat_result):
++def check_integer_history(client, model, checks, chat_result, sampling_preset="qwen38"):
+     """Integers keep their decimal spelling, so replayed calls are reused (#611)."""
+     function = {"name": "read", "description": "Read a local text file.",
+                 "parameters": {"type": "object", "properties": {
+@@ -384,7 +412,12 @@ def check_integer_history(client, model, checks, chat_result):
+             done = chat_result(client, request, True)
+             checks[label + "_continued"] = done
+             details = done["usage"].get("prompt_tokens_details") or {}
+-            assert details.get("cached_tokens", 0) >= first["usage"]["total_tokens"], (
++            # A template whose history drops the thinking-off opening reuses
++            # the stable boundary before it instead of the call (templates.py).
++            opening = THINKING_OFF_OPENING_TOKENS.get(sampling_preset)
++            floor = (first["usage"]["total_tokens"] if opening is None
++                     else first["usage"]["prompt_tokens"] - opening)
++            assert details.get("cached_tokens", 0) >= floor, (
+                 label, "replayed integer arguments invalidated the generated call", first, done)
+             print(f"CHECK {label}", file=sys.stderr, flush=True)
+ 
+@@ -425,7 +458,8 @@ def check_read_arguments(client, model, checks, chat_result):
+             print(f"CHECK {label}", file=sys.stderr, flush=True)
+ 
+ 
+-def check_literal_history(client, model, checks, chat_result, image=None):
++def check_literal_history(client, model, checks, chat_result, image=None,
++                          sampling_preset="qwen38"):
+     """New literal control-token text must not retokenize unchanged history."""
+     function = {"name": "read", "description": "Read a file.",
+                 "parameters": {"type": "object", "properties": {
+@@ -491,13 +525,42 @@ def check_literal_history(client, model, checks, chat_result, image=None):
+                 done = response_result(client, request, True)
+             checks[label + "_continued"] = done
+             assert done["text"].strip() == "DONE" and not done["tools"], done
+-            details = done["usage"].get("input_tokens_details",
+-                                       done["usage"].get("prompt_tokens_details"))
+-            # A repeated suite can retain a deeper checkpoint containing the
+-            # tool result too. Require the entire generated call to survive;
+-            # additional reuse of this identical history is valid.
+-            assert details["cached_tokens"] >= first["usage"]["total_tokens"], (
+-                label, "literal tool data invalidated unchanged history", first, done)
++
++            def reused(result):
++                usage = result["usage"]
++                return usage.get("input_tokens_details",
++                                 usage.get("prompt_tokens_details"))["cached_tokens"]
++
++            if sampling_preset in THINKING_OFF_OPENING_TOKENS:
++                # History drops the call's thinking-off opening (templates.py),
++                # so reuse stops at a stable boundary. The literal must reuse
++                # exactly what the same continuation without it reuses.
++                plain = deepcopy(request)
++                if endpoint == "chat":
++                    plain["messages"][-1]["content"] = "File data: example."
++                    control = chat_result(client, plain, True)
++                else:
++                    plain["input"][-1]["output"] = "File data: example."
++                    control = response_result(client, plain, True)
++                checks[label + "_plain"] = control
++
++                def complete(result):
++                    usage = result["usage"]
++                    return reused(result) == usage.get("prompt_tokens",
++                                                       usage.get("input_tokens"))
++
++                # Both may reuse everything when an earlier endpoint served
++                # the same prompts; a repeated suite may also retain a deeper
++                # checkpoint containing the literal tool result.
++                assert reused(done) >= reused(control) or (
++                    complete(done) and complete(control)), (
++                    label, "literal tool data invalidated unchanged history", done, control)
++            else:
++                # A repeated suite can retain a deeper checkpoint containing the
++                # tool result too. Require the entire generated call to survive;
++                # additional reuse of this identical history is valid.
++                assert reused(done) >= first["usage"]["total_tokens"], (
++                    label, "literal tool data invalidated unchanged history", first, done)
+             print(f"CHECK {label}", file=sys.stderr, flush=True)
+ 
+ 
+@@ -521,7 +584,8 @@ def streamed_call_order(client, request):
+     return before, after, calls, finish
+ 
+ 
+-def check_llama_cpp_parity(client, model, checks, chat_result, common, deepseek):
++def check_llama_cpp_parity(client, model, checks, chat_result, common, deepseek,
++                           typed=False):
+     """Behaviors llama.cpp's Qwen3-Coder/DeepSeek grammars define (#438)."""
+     def record(label, result):
+         checks[label] = result
+@@ -558,8 +622,11 @@ def check_llama_cpp_parity(client, model, checks, chat_result, common, deepseek)
+         assert function["name"] == "mcp_lookup", (label, result)
+         # DeepSeek's typed string flag lets gufo's open-tool route carry named
+         # arguments where llama.cpp declares none (tests/fixtures records it).
++        # A typed call syntax enforces the root const instead (templates.py).
+         assert arguments == {} or (deepseek and name != "root_const"
+-                                   and arguments == {"key": "alpha"}), (label, result)
++                                   and arguments == {"key": "alpha"}) or (
++            typed and name == "root_const" and arguments == {"key": "alpha"}), (
++            label, result)
+         assert_native(result, label)
+ 
+     # Keep the exact schema key. llama.cpp's PEG matches these spaces but its
+diff --git a/tool_reasoning.py b/tool_reasoning.py
+index 50ace7f..417e11d 100644
+--- a/tool_reasoning.py
++++ b/tool_reasoning.py
+@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
+ from gufo.control_tokens import kEndOfText, kImEnd, kImStart  # noqa: E402
+ 
+ from metrics import validate_tool_events
++from templates import DROPS_EARLIER_REASONING
+ from tier import streaming_modes
+ 
+ 
+@@ -59,7 +60,8 @@ def response_result(client, request, streaming):
+                 finish="tool_calls" if calls else "stop", usage=response.usage.to_dict())
+ 
+ 
+-def check_reasoning_separator(client, model, checks, chat_result, server_log=None):
++def check_reasoning_separator(client, model, checks, chat_result, sampling_preset="qwen38",
++                              server_log=None):
+     """Reasoning framing is not visible text, with or without constraints (#439)."""
+     from cache_growth import check_unchanged_retry, log_offset
+     function = {"name": "unused", "description": "Not needed for arithmetic.",
+@@ -133,8 +135,12 @@ def check_reasoning_separator(client, model, checks, chat_result, server_log=Non
+                 next_ = save("reasoning_separator_continuation",
+                             chat_result(client, followup, True))
+                 assert next_["text"] == "10" and not next_["tools"], next_
++                # A template that renders only later reasoning reuses the
++                # previous prompt, not the turn generated after it.
++                reused = result["usage"]["prompt_tokens" if sampling_preset in
++                                         DROPS_EARLIER_REASONING else "total_tokens"]
+                 assert next_["usage"]["prompt_tokens_details"]["cached_tokens"] == (
+-                    result["usage"]["total_tokens"]), (result, next_)
++                    reused), (result, next_)
+                 # Thinking off still preserves paragraph breaks inside content.
+                 plain = {**request, "reasoning_effort": "none", "messages": [
+                     {"role": "user", "content":
+@@ -371,7 +377,14 @@ def check_unfinished_lookalike(client, model, checks, chat_result):
+             "shape with a unit case, do not read this as a product failure", result)
+ 
+ 
+-def check_tail_lookalike_content(client, model, checks, chat_result):
++# Gemma 4's low-effort reasoning on these prompts runs 108-1286 tokens and
++# varies with tiny prompt and rounding changes (llama.cpp b11069: 119-488 for
++# the same requests), so 512 can end it before any answer. The checks are the
++# same with room to finish.
++TAIL_LOOKALIKE_BUDGET = {"gemma4": 2048}
++
++
++def check_tail_lookalike_content(client, model, checks, chat_result, preset=None):
+     """Literal lookalikes survive at the tail of the response.
+ 
+     The parser admits a pipe-wrapped spelling as framing only when the loaded
+@@ -393,7 +406,8 @@ def check_tail_lookalike_content(client, model, checks, chat_result):
+                            messages=[{"role": "system", "content": TAIL_LOOKALIKE_SYSTEM},
+                                      {"role": "user", "content": prompt}],
+                            tools=tools, temperature=0, seed=41,
+-                           reasoning_effort="low", max_completion_tokens=512,
++                           reasoning_effort="low",
++                           max_completion_tokens=TAIL_LOOKALIKE_BUDGET.get(preset, 512),
+                            extra_body={"cache_prompt": False})
+             result = chat_result(client, request, streaming)
+             checks[label] = result
+@@ -439,12 +453,19 @@ def tool_history(request, result, output):
+         {"role": "tool", "tool_call_id": call["id"], "content": output}]
+ 
+ 
+-def check_envelope_closer_framing(client, model, checks, chat_result, deepseek=False):
++# Told by the system prompt to call tools with the client's envelope, Gemma 4
++# writes that envelope as text instead of a native call, so these cases have no
++# call to check; llama.cpp b11069 does the same. Its other shapes still run.
++ENVELOPE_CALLERS = {"gemma4"}
++
++
++def check_envelope_closer_framing(client, model, checks, chat_result, preset=None):
+     """A closing tag of the client's envelope never reaches visible text.
+ 
+     DeepSeek follows llama.cpp instead: only its native block is a call, and
+     client envelope syntax it writes in place of one stays visible content.
+     """
++    deepseek = preset == "deepseek4"
+     commands = {"closer_in_arguments": "printf '%s' '</invoke>'",
+                 "vocab_token_in_arguments": f"printf '%s' 'EOS = \"{kImEnd}\"'",
+                 "lookalike_in_arguments": "printf '%s' '<|not_a_vocab_entry|>'"}
+@@ -452,6 +473,11 @@ def check_envelope_closer_framing(client, model, checks, chat_result, deepseek=F
+         # A shape may override the documented call format: the model can only
+         # name the markup it was handed, so testing a family means handing it.
+         system = SHAPE_SYSTEM.get(name, ENVELOPE_SYSTEM)
++        if name in commands and system == ENVELOPE_SYSTEM and preset in ENVELOPE_CALLERS:
++            reason = "model writes the system prompt's envelope instead of a native call"
++            checks[f"envelope_closer_{name}"] = {"skipped": reason}
++            print(f"SKIP envelope_closer_{name}: {reason}", file=sys.stderr, flush=True)
++            continue
+         for streaming in streaming_modes():
+             mode = "stream" if streaming else "buffered"
+             label = f"envelope_closer_{name}_{mode}"
+@@ -699,7 +725,7 @@ def without_fenced_blocks(text):
+     return "\n".join(kept)
+ 
+ 
+-def check_quoted_then_real_call(client, model, checks, chat_result, deepseek=False):
++def check_quoted_then_real_call(client, model, checks, chat_result, preset=None):
+     """A documented envelope stays prose while the call after it is parsed.
+ 
+     The prompt hands the markup over and asks for both acts; the case reads the
+@@ -707,9 +733,15 @@ def check_quoted_then_real_call(client, model, checks, chat_result, deepseek=Fal
+     the documented copy lands in the call's arguments and content stays empty --
+     a different, correct outcome that tests nothing here.
+     """
++    deepseek = preset == "deepseek4"
+     function = {"name": "terminal", "parameters": {"type": "object", "properties": {
+         "command": {"type": "string"}}, "required": ["command"]}}
+     for name, (system, prompt, opener) in QUOTED_THEN_CALL_CASES.items():
++        if opener.startswith("<invoke") and preset in ENVELOPE_CALLERS:
++            reason = "model calls through the documented envelope, not a native call"
++            checks[f"quoted_then_call_{name}"] = {"skipped": reason}
++            print(f"SKIP quoted_then_call_{name}: {reason}", file=sys.stderr, flush=True)
++            continue
+         documented = 0
+         for streaming in streaming_modes():
+             mode = "stream" if streaming else "buffered"
+@@ -753,17 +785,25 @@ def check_quoted_then_real_call(client, model, checks, chat_result, deepseek=Fal
+             "prompt instead of reading it as a regression", checks)
+ 
+ 
+-def check_unfinished_inline_then_call(client, model, checks, chat_result):
++# The call format each model's template declares; models copy the one they are
++# handed, so the prompt must name the model's own.
++NATIVE_WIRE_FORMAT = {
++    "gemma4": "<|tool_call>call:terminal{command:<|\"|>pwd<|\"|>}<tool_call|>\n",
++}
++QWEN_WIRE_FORMAT = ("<tool_call>\n<function=terminal>\n<parameter=command>\npwd\n"
++                    "</parameter>\n</function>\n</tool_call>\n")
++
++
++def check_unfinished_inline_then_call(client, model, checks, chat_result, preset=None):
+     """A stray backtick followed by one newline must not swallow a real call."""
++    wire_format = NATIVE_WIRE_FORMAT.get(preset, QWEN_WIRE_FORMAT)
+     for name, prefix in (("filename", "I'll update `config.py"),
+                          ("apostrophe", "Let`s write it.")):
+         for streaming in streaming_modes():
+             mode = "stream" if streaming else "buffered"
+             label = f"unfinished_inline_then_call_{name}_{mode}"
+             request = dict(model=model, messages=[{"role": "system", "content":
+-                "To call terminal, emit its native wire format:\n"
+-                "<tool_call>\n<function=terminal>\n<parameter=command>\npwd\n"
+-                "</parameter>\n</function>\n</tool_call>\n"
++                "To call terminal, emit its native wire format:\n" + wire_format +
+                 "The requested prose precedes this call."}, {"role": "user", "content":
+                 "First write exactly this line, including its single stray backtick, "
+                 "without closing it or adding another backtick:\n" + prefix +
+@@ -781,13 +821,20 @@ def check_unfinished_inline_then_call(client, model, checks, chat_result):
+             assert_no_envelope_framing(result)
+ 
+ 
++# Gemma 4 strings are <|"|>-delimited and unescaped. This fixture's oldText
++# holds }}]}}</tool_call> markup, which in Gemma's declaration and call syntax
++# reads as the end of the value; asked to quote it, Gemma's greedy reasoning
++# loops until the 1024-token limit. The disabled marker checks below still run.
++UNDELIMITED_FIXTURE = {"gemma4"}
++
++
+ # A bracket-dense answer has no functional case: asked to repeat a literal line,
+ # the model runs away into a repetition loop (1024 tokens, finish=length, ~47s)
+ # instead of stopping, so the case reports a model runaway rather than a framing
+ # failure. The property it was meant to prove is pinned deterministically instead:
+ # quote_tracker_test scans a 12000 byte bracket-dense line in one pass, and
+ # openai_chat_test streams bracket-dense content through the parser.
+-def check_tool_reasoning(client, model, checks, chat_result, sampling_preset=None):
++def check_tool_reasoning(client, model, checks, chat_result, preset=None):
+     schema = {"type": "object", "properties": {
+         "path": {"type": "string", "const": ARGUMENTS["path"]},
+         "edits": {"type": "array", "minItems": 1, "maxItems": 1,
+@@ -806,7 +853,7 @@ def check_tool_reasoning(client, model, checks, chat_result, sampling_preset=Non
+         if "gufo" in usage:
+             assert usage["gufo"]["prefill_tokens"] == tokens, usage
+ 
+-    for strict in (True, False):
++    for strict in (() if preset in UNDELIMITED_FIXTURE else (True, False)):
+         parameters = deepcopy(schema)
+         if not strict:
+             # Ordinary agent schemas leave nested objects open. Their nested
+@@ -857,12 +904,15 @@ def check_tool_reasoning(client, model, checks, chat_result, sampling_preset=Non
+         record(f"tool_reasoning_stopped_{mode}_{label}", result)
+         assert result["reasoning"].strip() == thought[:cut].strip(), result
+         assert not result["text"] and not result["tools"] and result["finish"] == "stop", result
++    if preset in UNDELIMITED_FIXTURE:
++        checks["tool_reasoning_edit"] = {"skipped": "fixture markup ends Gemma 4 strings"}
++        print("SKIP tool_reasoning_edit: fixture markup ends Gemma 4 strings",
++              file=sys.stderr, flush=True)
+     check_disabled_tool_markers(client, model, checks, chat_result)
+-    deepseek = sampling_preset == "deepseek4"
+-    check_envelope_closer_framing(client, model, checks, chat_result, deepseek)
+-    check_tail_lookalike_content(client, model, checks, chat_result)
++    check_envelope_closer_framing(client, model, checks, chat_result, preset)
++    check_tail_lookalike_content(client, model, checks, chat_result, preset)
+     check_unfinished_lookalike(client, model, checks, chat_result)
+     check_literal_protocol_data(client, model, checks, chat_result)
+     check_html_content(client, model, checks, chat_result)
+-    check_quoted_then_real_call(client, model, checks, chat_result, deepseek)
+-    check_unfinished_inline_then_call(client, model, checks, chat_result)
++    check_quoted_then_real_call(client, model, checks, chat_result, preset)
++    check_unfinished_inline_then_call(client, model, checks, chat_result, preset)
+diff --git a/tool_streaming.py b/tool_streaming.py
+index 0b32c50..af073bb 100644
+--- a/tool_streaming.py
++++ b/tool_streaming.py
+@@ -6,6 +6,7 @@ import time
+ import openai
+ 
+ from metrics import validate_tool_events
++from templates import HIDES_NON_STRING_CONST, MAY_SKIP_THINKING
+ 
+ 
+ TEXT = (
+@@ -31,7 +32,7 @@ FUNCTION = {
+ }
+ 
+ 
+-def request(model, api, thinking=False):
++def request(model, api, thinking=False, preset=None):
+     prompt = (
+         "Call record exactly once, with text, count, and values matching the "
+         "constants in its schema. Keep all literal characters. No visible prose."
+@@ -43,6 +44,10 @@ def request(model, api, thinking=False):
+             "Call record exactly once. Its arguments are fixed by the constants "
+             "in its schema; copy them exactly in the call. No visible prose."
+         )
++    if preset in HIDES_NON_STRING_CONST:
++        # The template cannot show these constants (templates.py). Bare
++        # words: JSON quotes would leak into a key of the call syntax.
++        prompt += " count is 42 and values is [true, null, {key: value}]."
+     common = dict(model=model, temperature=0)
+     if api == "chat":
+         return {**common, "messages": [{"role": "user", "content": prompt}],
+@@ -158,10 +163,10 @@ def analyze(api, events, arrivals):
+                 fragments=fragments, terminal_ms=arrivals[-1])
+ 
+ 
+-def check_tool_streaming(client, model, checks, chat_result):
++def check_tool_streaming(client, model, checks, chat_result, preset=None):
+     for api in ("chat", "responses", "messages"):
+         for thinking in (False, True):
+-            body = request(model, api, thinking)
++            body = request(model, api, thinking, preset)
+             result = collect(client, api, body)
+             checks[f"tool_streaming_{api}_{'thinking' if thinking else 'plain'}"] = result
+             assert result["finish"] == {
+@@ -169,11 +174,12 @@ def check_tool_streaming(client, model, checks, chat_result):
+             assert len(result["arguments"]) == 1, result
+             assert json.loads(result["arguments"][0]) == EXPECTED, result
+             assert not result["content"].strip(), result
+-            assert bool(result["reasoning"].strip()) == thinking, result
++            if not thinking or preset not in MAY_SKIP_THINKING:
++                assert bool(result["reasoning"].strip()) == thinking, result
+             assert len(result["fragments"]) > 3, ("tool arguments were buffered", result)
+             assert result["fragments"][0]["ms"] < result["fragments"][-1]["ms"] < result["terminal_ms"], result
+ 
+-        body = request(model, api)
++        body = request(model, api, preset=preset)
+         phase = "limited" if api == "responses" else "stopped"
+         if api == "responses":
+             # Responses has no stop-sequence request field.
+@@ -199,7 +205,7 @@ def check_tool_streaming(client, model, checks, chat_result):
+         assert set(resumed["identifiers"]).isdisjoint(result["identifiers"]), resumed
+ 
+     # Byte limits interrupt argument generation; the next request starts cleanly.
+-    body = request(model, "chat")
++    body = request(model, "chat", preset=preset)
+     limited = chat_result(client, {**body, "max_completion_tokens": 32}, True)
+     checks["tool_streaming_length"] = limited
+     assert limited["finish"] == "length" and limited.get("partial_tools"), limited
+@@ -209,7 +215,7 @@ def check_tool_streaming(client, model, checks, chat_result):
+     assert json.loads(restored["tools"][0]["function"]["arguments"]) == EXPECTED, restored
+ 
+     for thinking in (False, True):
+-        body = request(model, "chat", thinking)
++        body = request(model, "chat", thinking, preset)
+         received, reasoning = "", ""
+         with client.chat.completions.create(**body, stream=True) as stream:
+             for chunk in stream:
+@@ -225,7 +231,8 @@ def check_tool_streaming(client, model, checks, chat_result):
+                 raise AssertionError("no partial argument reached the cancelling client")
+         checks[f"tool_streaming_cancel_{thinking}"] = {
+             "partial_arguments": received, "reasoning": reasoning}
+-        assert bool(reasoning.strip()) == thinking, reasoning
++        if not thinking or preset not in MAY_SKIP_THINKING:
++            assert bool(reasoning.strip()) == thinking, reasoning
+         resumed = chat_result(client, body, True)
+         checks[f"tool_streaming_after_cancel_{thinking}"] = resumed
+         assert resumed["finish"] == "tool_calls" and len(resumed["tools"]) == 1, resumed
