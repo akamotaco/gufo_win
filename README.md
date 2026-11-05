@@ -16,17 +16,23 @@ so `main` here is an upstream release plus what upstream does not carry:
 | --- | --- | --- |
 | Engine and Windows build | [gufo-org/gufo](https://github.com/gufo-org/gufo) v0.30.0 | Gufo itself, the `windows-release` preset and its Windows platform code |
 | Extension hooks for Gemma 4 | [franzmoca/gufo](https://github.com/franzmoca/gufo) `gemma-main` | Public hooks the Gemma 4 extension needs that upstream has not merged yet |
-| Gemma 4 engine | [franzmoca/gemma4-gufo-extension](https://github.com/franzmoca/gemma4-gufo-extension), built with `-DGUFO_EXTENSION_DIRS` | Gemma 4 26B-A4B / 31B with MTP, vision and tool calls |
+| Gemma 4 engine | [franzmoca/gemma4-gufo-extension](https://github.com/franzmoca/gemma4-gufo-extension) with two Windows fixes: branch [`gemma4-ext`](https://github.com/akamotaco/gufo_win/tree/gemma4-ext) of this repository, built with `-DGUFO_EXTENSION_DIRS` | Gemma 4 26B-A4B / 31B with MTP, vision and tool calls |
 | Fork-only fixes | this repository | See below |
 
 Fork-only changes:
 
 - **Gemma 4 on Windows.** Cache backing segments are 1 GiB on Windows: with
   128 MiB segments, Gemma 4 captures past ~24K tokens failed their device-to-host
-  copies. The extension itself needs two small changes, kept in its checkout rather
-  than in this tree: its manifest must list `windows`, and its cache gather copies
-  must run only where a pointer is also the device address (Windows maps registered
-  host memory at a different device address).
+  copies (`hipErrorInvalidValue`, unchecked, so a later kernel launch reported
+  "invalid argument" and the request failed).
+- **Gemma 4 extension on Windows** (branch `gemma4-ext`: franzmoca's extension `main`
+  plus one commit, MIT like the original):
+  - `extension.json` lists `windows` among its platforms; without it the build skips
+    the extension on Windows.
+  - The cache's gather copies use a pointer only where it is also the device address.
+    Windows maps registered host memory at a different device address, so a gather
+    kernel given the host pointer fails the first cache capture with
+    "unspecified launch failure".
 - The per-request image budget is 256 MiB instead of 20 MiB (agents resend every image).
 - `tools\windows\gufo_monitor.py` (a read-only web monitor) and `tools\windows\tdr_delay.bat`
   (GPU timeout).
@@ -102,12 +108,21 @@ this machine also needed:
   and flac sources, whose tests contain emoji paths (`Invalid empty pathname`).
   Extracting those archives with Python instead works.
 
-To build with Gemma 4, check out the extension and point CMake at it:
+To build with Gemma 4, check out the `gemma4-ext` branch beside this checkout and
+point CMake at it (a forward-slash absolute path):
 
 ```powershell
-cmake --preset windows-release -DGUFO_EXTENSION_DIRS=C:/path/to/gemma4-gufo-extension
+git clone -b main https://github.com/akamotaco/gufo_win gufo
+git clone -b gemma4-ext https://github.com/akamotaco/gufo_win gemma4-ext
+cd gufo
+cmake --preset windows-release -DGUFO_EXTENSION_DIRS=C:/path/to/gemma4-ext
 cmake --build --preset windows-release
+build\windows-release\gufo.exe --version   # lists "gemma4 ... (../gemma4-ext)"
 ```
+
+The extension pins the `gemma-main` revision it was validated against (`flake.nix`);
+`main` here carries that revision. Without `-DGUFO_EXTENSION_DIRS` the build serves
+upstream's models only.
 
 After building, copy TheRock's `.kpack` folder to `build\.kpack`: rocBLAS loads its
 kernels from `..\.kpack` beside its DLL, and the preset does not stage it.
