@@ -61,20 +61,6 @@ bool ClosedProperties(const json::Value& schema, bool best_effort) {
          !unevaluated->as_bool();
 }
 
-// Gemma 4 call arguments: `<|"|>`-delimited raw strings, bare keys.
-constexpr std::string_view kGemmaQuote = "<|\"|>";
-
-// A bare Gemma 4 key ends at its first ':' and may not hold structure bytes;
-// its parser trims surrounding whitespace and reads `<|"|>` as a quoted key.
-// Other names use the quoted form.
-bool BareGemmaKey(std::string_view name) {
-  constexpr std::string_view kSpace = " \t\r\n\f\v";
-  return !name.empty() && name.find_first_of(":{}[],") == std::string::npos &&
-         kSpace.find(name.front()) == std::string_view::npos &&
-         kSpace.find(name.back()) == std::string_view::npos &&
-         !name.starts_with(kGemmaQuote.substr(0, 1));
-}
-
 std::string RegexLiteral(std::string_view text) {
   std::string result;
   for (unsigned char byte : text) {
@@ -139,16 +125,16 @@ class JsonConstraintCompiler {
 public:
   using Sequence = JsonConstraint::Sequence;
   using Rule = JsonConstraint::Rule;
-  // `gemma` compiles values in the Gemma 4 call-argument syntax instead of
-  // JSON: the same schema semantics with the spelling its chat template uses.
+  // `values` spells the compiled values; the default is JSON.
   explicit JsonConstraintCompiler(const json::Value& schema, bool strict,
-                                  bool tool = false, bool gemma = false,
-                                  bool open_response_objects = false)
+                                  bool tool = false,
+                                  bool open_response_objects = false,
+                                  JsonConstraint::ValueSyntax values = {})
       : schema_(schema),
         strict_(strict),
         open_objects_(tool && !strict),
-        gemma_(gemma),
-        open_response_objects_(open_response_objects) {
+        open_response_objects_(open_response_objects),
+        values_(std::move(values)) {
     // Literal bytes occupy the first 256 terminal classes.
     for (unsigned i = 0; i < 256; ++i) {
       std::bitset<256> bits;
@@ -192,12 +178,14 @@ public:
     bool_ = Alt({Literal("true"), Literal("false")});
     null_ = Literal("null");
     key_ = string_;
-    if (gemma_) {
-      // The template renders arguments compactly; keep the model on it.
+    if (values_.string_open.empty() != values_.string_close.empty())
+      Invalid("string delimiters must both be set or both be empty");
+    if (!values_.whitespace)
       ws_ = Seq({});
-      string_ = GemmaString(json::Value::object());
-      key_ = GemmaKey({});
-    }
+    if (!values_.string_open.empty())
+      string_ = StringValue(json::Value::object());
+    if (values_.bare_keys)
+      key_ = BareKey({});
   }
 
   std::shared_ptr<const JsonConstraint> Compile(
@@ -311,14 +299,14 @@ private:
 
 public:
   std::shared_ptr<const JsonConstraint> ToolParameters(
-      JsonConstraint::ToolFormat format, bool best_effort = false) {
+      const JsonConstraint::TaggedArguments& tags, bool best_effort = false) {
     ignore_unknown_keys_ = best_effort && !strict_;
     // Native envelope/typed-parameter approach: llama.cpp common/parsers/
     // qwen3-coder.cpp and deepseek.cpp at
     // 6a2743f028f78bfb88a7189607b49bde30df3769. Unlike an injected JSON
     // envelope, this retains the syntax already taught by each model's chat
     // template.
-    using Format = JsonConstraint::ToolFormat;
+    const bool untyped_tags = tags.raw_value_open == tags.typed_value_open;
     const auto* root = NativeSchema(schema_);
     if (!root)
       return {};
@@ -335,7 +323,7 @@ public:
     // Qwen has no type flag for wildcard parameters. Unknown names are text
     // in its parser: emitting native tags would turn 1/true/null/[]/{} into
     // strings. Preserve JSON types instead of guessing from their spelling.
-    if (open && format == Format::kQwen)
+    if (open && untyped_tags)
       return {};
     if (const auto* extra = root->find("additionalProperties");
         extra && !extra->is_bool() &&
@@ -356,14 +344,12 @@ public:
       if (name.empty() || name.find_first_of("<>\"=\r\n") != std::string::npos)
         return {};
       // The loose route handles literal names outside this simple subset.
-      if (format == Format::kQwen &&
-          (std::string_view(" \t\f\v").find(name.front()) !=
-               std::string_view::npos ||
-           std::string_view(" \t\f\v").find(name.back()) !=
-               std::string_view::npos))
+      if (untyped_tags && (std::string_view(" \t\f\v").find(name.front()) !=
+                               std::string_view::npos ||
+                           std::string_view(" \t\f\v").find(name.back()) !=
+                               std::string_view::npos))
         return {};
-      const std::string close =
-          format == Format::kQwen ? "\n</parameter>\n" : "</｜DSML｜parameter>";
+      const std::string& close = tags.value_close;
       const auto* schema = NativeSchema(original);
       const auto* type = schema ? schema->find("type") : nullptr;
       if (!type || !type->is_string() || schema->contains("anyOf")) {
@@ -381,7 +367,7 @@ public:
           return {};
         const bool text = types[kStringType];
         std::uint32_t typed = 0;
-        if (!text || format != Format::kQwen) {
+        if (!text || !untyped_tags) {
           bool supported = true;
           try {
             auto probe = JsonConstraintCompiler(schema_, strict_, true);
@@ -395,23 +381,22 @@ public:
         const auto raw = Optional(
             Lexeme(JsonSchemaLexeme::RawString(json::Value::object(), close)));
         std::uint32_t value;
-        if (format == Format::kQwen) {
+        if (untyped_tags) {
           value =
-              Seq({Literal("<parameter=" + name + ">\n"), text ? raw : typed});
+              Seq({Literal(tags.parameter_open + name + tags.raw_value_open),
+                   text ? raw : typed});
         } else {
-          const auto open =
-              "<｜DSML｜parameter name=\"" + name + "\" string=\"";
+          const auto open = tags.parameter_open + name;
           Sequence choices;
           if (text)
-            choices.push_back(Seq({Literal(open + "true\">"), raw}));
+            choices.push_back(Seq({Literal(open + tags.raw_value_open), raw}));
           if (types.count() > (text ? 1U : 0U))
-            choices.push_back(Seq({Literal(open + "false\">"), typed}));
+            choices.push_back(
+                Seq({Literal(open + tags.typed_value_open), typed}));
           value = Alt(choices);
         }
         members.emplace_back(
-            name,
-            Seq({value,
-                 Literal(format == Format::kQwen ? close : close + "\n")}));
+            name, Seq({value, Literal(close + tags.parameter_separator)}));
         continue;
       }
       const bool string = type->str() == "string";
@@ -460,19 +445,15 @@ public:
       } else {
         value = Visit(original, 1);
       }
-      const auto open = format == Format::kQwen
-                            ? "<parameter=" + name + ">\n"
-                            : "<｜DSML｜parameter name=\"" + name +
-                                  "\" string=\"" + (string ? "true" : "false") +
-                                  "\">";
-      members.emplace_back(
-          name, Seq({Literal(open), value,
-                     Literal(format == Format::kQwen ? close : close + "\n")}));
+      const auto open = tags.parameter_open + name +
+                        (string ? tags.raw_value_open : tags.typed_value_open);
+      members.emplace_back(name,
+                           Seq({Literal(open), value,
+                                Literal(close + tags.parameter_separator)}));
     }
     const auto body = Arguments(members, required);
     grammar_->root_ =
-        open ? Seq({body, Repeat(OpenToolParameter(format, *properties))})
-             : body;
+        open ? Seq({body, Repeat(OpenToolParameter(tags, *properties))}) : body;
     return Finish();
   }
 
@@ -483,12 +464,12 @@ public:
   // of their schema. The request keeps the template's native syntax instead of
   // a JSON envelope.
   std::shared_ptr<const JsonConstraint> LooseToolParameters(
-      JsonConstraint::ToolFormat format) {
-    using Format = JsonConstraint::ToolFormat;
+      const JsonConstraint::TaggedArguments& tags) {
     ignore_unknown_keys_ = true;
-    const bool qwen = format == Format::kQwen;
-    const std::string close =
-        qwen ? "\n</parameter>\n" : "</｜DSML｜parameter>";
+    const bool qwen = tags.raw_value_open == tags.typed_value_open;
+    const std::string& close = tags.value_close;
+    const std::string key_end =
+        tags.raw_value_open.substr(0, 1) + std::string("\r\n");
     // A root reference is followed as ToolParameters does; other roots that
     // are not objects declare no parameters, as in llama.cpp.
     const auto* root = &schema_;
@@ -520,8 +501,7 @@ public:
       // A name holding the tag's own delimiter cannot be read back. Other
       // names, including surrounding spaces, are written literally as llama.cpp
       // does; the parser matches declared names exactly.
-      if (name.empty() ||
-          name.find_first_of(qwen ? ">\r\n" : "\"\r\n") != std::string::npos) {
+      if (name.empty() || name.find_first_of(key_end) != std::string::npos) {
         required.erase(name);
         continue;
       }
@@ -582,27 +562,28 @@ public:
       }
       std::uint32_t value;
       if (qwen) {
-        value =
-            Seq({Literal("<parameter=" + name + ">\n"), text ? raw : typed});
+        value = Seq({Literal(tags.parameter_open + name + tags.raw_value_open),
+                     text ? raw : typed});
       } else {
-        const auto open = "<｜DSML｜parameter name=\"" + name + "\" string=\"";
+        const auto open = tags.parameter_open + name;
         Sequence choices;
         if (text)
-          choices.push_back(Seq({Literal(open + "true\">"), raw}));
+          choices.push_back(Seq({Literal(open + tags.raw_value_open), raw}));
         if (types.count() > (text ? 1U : 0U))
-          choices.push_back(Seq({Literal(open + "false\">"), typed}));
+          choices.push_back(
+              Seq({Literal(open + tags.typed_value_open), typed}));
         value = Alt(choices);
       }
-      members.emplace_back(name,
-                           Seq({value, Literal(qwen ? close : close + "\n")}));
+      members.emplace_back(
+          name, Seq({value, Literal(close + tags.parameter_separator)}));
     }
     grammar_->root_ = Arguments(members, required);
     return Finish();
   }
 
   std::shared_ptr<const JsonConstraint> OpenToolParameters(
-      JsonConstraint::ToolFormat format) {
-    grammar_->root_ = Repeat(OpenToolParameter(format, json::Value::object()));
+      const JsonConstraint::TaggedArguments& tags) {
+    grammar_->root_ = Repeat(OpenToolParameter(tags, json::Value::object()));
     return Finish();
   }
 
@@ -646,10 +627,9 @@ private:
     return suffix(suffix, 0);
   }
 
-  std::uint32_t OpenToolParameter(JsonConstraint::ToolFormat format,
+  std::uint32_t OpenToolParameter(const JsonConstraint::TaggedArguments& tags,
                                   const json::Value& properties) {
-    using Format = JsonConstraint::ToolFormat;
-    const bool qwen = format == Format::kQwen;
+    const bool qwen = tags.raw_value_open == tags.typed_value_open;
     // Dynamic names must survive the native parser's trimming and cannot
     // contain tag/attribute delimiters. Values retain literal UTF-8 text.
     auto name_schema = json::parse(
@@ -668,18 +648,17 @@ private:
       name_schema["pattern"] =
           excluded + name_schema.find("pattern")->str().substr(1);
     }
-    const auto name =
-        Lexeme(JsonSchemaLexeme::RawString(name_schema, qwen ? ">" : "\""));
-    const std::string close =
-        qwen ? "\n</parameter>\n" : "</｜DSML｜parameter>";
+    const auto name = Lexeme(JsonSchemaLexeme::RawString(
+        name_schema, tags.raw_value_open.substr(0, 1)));
+    const std::string& close = tags.value_close;
     const auto raw = Optional(
         Lexeme(JsonSchemaLexeme::RawString(json::Value::object(), close)));
-    const auto value = qwen ? Seq({Literal(">\n"), raw})
-                            : Alt({Seq({Literal("\" string=\"true\">"), raw}),
-                                   Seq({Literal("\" string=\"false\">"),
+    const auto value = qwen ? Seq({Literal(tags.raw_value_open), raw})
+                            : Alt({Seq({Literal(tags.raw_value_open), raw}),
+                                   Seq({Literal(tags.typed_value_open),
                                         GenericValue(kMaxDepth)})});
-    return Seq({Literal(qwen ? "<parameter=" : "<｜DSML｜parameter name=\""),
-                name, value, Literal(qwen ? close : close + "\n")});
+    return Seq({Literal(tags.parameter_open), name, value,
+                Literal(close + tags.parameter_separator)});
   }
 
   // JSON value kinds a parameter admits, as llama.cpp common/json-schema.cpp
@@ -1200,11 +1179,10 @@ private:
     return result;
   }
   std::uint32_t ValueLiteral(const json::Value& value) {
-    if (gemma_ && value.is_string()) {
-      if (value.str().find(kGemmaQuote) != std::string::npos)
-        Invalid("string value cannot be a Gemma 4 string");
-      return Literal(std::string(kGemmaQuote) + value.str() +
-                     std::string(kGemmaQuote));
+    if (value.is_string() && !values_.string_open.empty()) {
+      if (value.str().find(values_.string_close) != std::string::npos)
+        Invalid("string value cannot be written in this value syntax");
+      return Literal(values_.string_open + value.str() + values_.string_close);
     }
     if (!value.is_object() && !value.is_array())
       return Literal(value.dump());
@@ -1248,18 +1226,40 @@ private:
     grammar_->lexemes_.push_back(std::move(lexeme));
     return static_cast<std::uint32_t>(symbol);
   }
-  // A Gemma 4 string satisfying the JSON string predicate. Its raw text cannot
-  // contain the closing quote, which the parser takes at its first occurrence.
-  std::uint32_t GemmaString(const json::Value& predicate) {
+  // A string satisfying a JSON string predicate, in the value syntax.
+  std::uint32_t StringValue(const json::Value& predicate) {
+    if (values_.string_open.empty())
+      return Lexeme(JsonSchemaLexeme::String(predicate));
     const auto raw =
-        JsonSchemaLexeme::RawString(predicate, std::string(kGemmaQuote));
+        JsonSchemaLexeme::RawString(predicate, values_.string_close);
     auto text = Lexeme(raw);
     if (raw->Check("").complete)
       text = Optional(text);
-    return Seq({Literal(kGemmaQuote), text, Literal(kGemmaQuote)});
+    return Seq(
+        {Literal(values_.string_open), text, Literal(values_.string_close)});
+  }
+  // The first UTF-8 character of a quoted string, which no bare key begins
+  // with.
+  std::string_view StringStart() const {
+    if (values_.string_open.empty())
+      return "\"";
+    const auto lead = static_cast<unsigned char>(values_.string_open.front());
+    const std::size_t length = lead < 0x80   ? 1
+                               : lead < 0xe0 ? 2
+                               : lead < 0xf0 ? 3
+                                             : 4;
+    return std::string_view(values_.string_open)
+        .substr(0, std::min(length, values_.string_open.size()));
+  }
+  bool BareKeyName(std::string_view name) const {
+    constexpr std::string_view kSpace = " \t\r\n\f\v";
+    return !name.empty() && name.find_first_of(":{}[],") == std::string::npos &&
+           kSpace.find(name.front()) == std::string_view::npos &&
+           kSpace.find(name.back()) == std::string_view::npos &&
+           !name.starts_with(StringStart());
   }
   // A dynamic bare key other than the declared names.
-  std::uint32_t GemmaKey(const std::set<std::string>& excluded) {
+  std::uint32_t BareKey(const std::set<std::string>& excluded) {
     std::string pattern = "^";
     if (!excluded.empty()) {
       pattern += "(?!(?:";
@@ -1272,28 +1272,34 @@ private:
       }
       pattern += ")$)";
     }
-    pattern += "[^:{}\\[\\],<\\s](?:[^:{}\\[\\],]*[^:{}\\[\\],\\s])?$";
+    std::string start;
+    for (const unsigned char byte : StringStart()) {
+      if (std::string_view("\\]^-[").find(static_cast<char>(byte)) !=
+          std::string_view::npos)
+        start += '\\';
+      start += static_cast<char>(byte);
+    }
+    pattern +=
+        "[^:{}\\[\\],\\s" + start + "](?:[^:{}\\[\\],]*[^:{}\\[\\],\\s])?$";
     auto predicate = json::Value::object();
     predicate["pattern"] = std::move(pattern);
     return Lexeme(JsonSchemaLexeme::RawString(predicate, ":"));
   }
   std::uint32_t KeyLiteral(const std::string& name) {
-    if (!gemma_)
-      return Literal(json::Value(name).dump());
-    if (BareGemmaKey(name))
+    if (values_.bare_keys && BareKeyName(name))
       return Literal(name);
-    // The parser also reads `<|"|>`-quoted keys, as declarations render them.
-    if (name.find(kGemmaQuote) != std::string::npos)
-      Invalid("property name cannot be a Gemma 4 key");
-    return Literal(std::string(kGemmaQuote) + name + std::string(kGemmaQuote));
+    if (values_.string_open.empty())
+      return Literal(json::Value(name).dump());
+    if (name.find(values_.string_close) != std::string::npos)
+      Invalid("property name cannot be written in this value syntax");
+    return Literal(values_.string_open + name + values_.string_close);
   }
-  // Gemma 4 renders object keys in sorted order at every depth.
   std::vector<std::pair<std::string, const json::Value*>> Members(
       const json::Value& object) const {
     std::vector<std::pair<std::string, const json::Value*>> members;
     for (const auto& [name, value] : object.members())
       members.emplace_back(name, &value);
-    if (gemma_)
+    if (values_.sorted_keys)
       std::ranges::sort(members, {}, &decltype(members)::value_type::first);
     return members;
   }
@@ -1659,9 +1665,7 @@ private:
       else if (name == "string" &&
                (schema.contains("pattern") || schema.contains("format") ||
                 schema.contains("minLength") || schema.contains("maxLength")))
-        alternatives.push_back(
-            gemma_ ? GemmaString(StringPredicate(schema))
-                   : Lexeme(JsonSchemaLexeme::String(StringPredicate(schema))));
+        alternatives.push_back(StringValue(StringPredicate(schema)));
       else if (name == "integer")
         alternatives.push_back(Integer(schema));
       else
@@ -1715,14 +1719,14 @@ private:
       // the wildcard rule: otherwise an extra, incorrectly typed duplicate
       // could overwrite the validated field. Match decoded Unicode so JSON
       // escapes cannot bypass the exclusion.
-      std::uint32_t key = string_;
-      if (gemma_) {
+      std::uint32_t key = key_;
+      if (values_.bare_keys) {
         std::set<std::string> declared;
         for (const auto& [name, value] : properties->members()) {
           (void)value;
           declared.insert(name);
         }
-        key = GemmaKey(declared);
+        key = BareKey(declared);
       } else if (!properties->empty()) {
         std::string pattern = "^(?!(?:";
         bool separator = false;
@@ -1736,7 +1740,7 @@ private:
         pattern += ")$)";
         auto predicate = json::Value::object();
         predicate["pattern"] = std::move(pattern);
-        key = Lexeme(JsonSchemaLexeme::String(predicate));
+        key = StringValue(predicate);
       }
       const auto value =
           additional && additional->is_object() &&
@@ -1808,12 +1812,12 @@ private:
   const json::Value& schema_;
   bool strict_;
   bool open_objects_;
-  bool gemma_;
   // Unlike open_objects_, this admits undeclared keys only when
   // additionalProperties is true or a schema, or the object declares no
   // properties. Untyped leaves and unsupported keywords remain errors.
   bool open_response_objects_;
   bool ignore_unknown_keys_{false};
+  JsonConstraint::ValueSyntax values_;
   std::shared_ptr<JsonConstraint> grammar_{new JsonConstraint};
   std::uint32_t ws_, string_, key_, integer_, number_, bool_, null_;
   std::map<std::size_t, std::uint32_t> generic_values_;
@@ -1839,9 +1843,8 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::Compile(
     if (const auto found = cache.find(key); found != cache.end())
       return found->second;
   }
-  auto grammar =
-      JsonConstraintCompiler(schema, strict, false, false, open_objects)
-          .Compile(false);
+  auto grammar = JsonConstraintCompiler(schema, strict, false, open_objects)
+                     .Compile(false);
   const std::lock_guard lock(mutex);
   if (cache.size() >= 16)
     cache.erase(cache.begin());
@@ -1856,27 +1859,26 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::Object() {
   return grammar;
 }
 
-std::shared_ptr<const JsonConstraint> JsonConstraint::ToolParameters(
-    const json::Value& schema, bool strict, ToolFormat format) {
-  // Ordinary agent tools leave nested objects open. Preserve their declared
-  // requirements/types and native framing without relaxing strict output
-  // schemas or injecting a second protocol into the model's chat template.
-  using Key = std::tuple<std::string, bool, ToolFormat>;
-  static std::mutex mutex;
-  static std::map<Key, std::shared_ptr<const JsonConstraint>> cache;
-  const Key key{schema.dump(), strict, format};
-  if (std::get<0>(key).size() > kMaxSchemaBytes)
-    Invalid("maximum schema size is 2 MiB");
-  {
-    const std::lock_guard lock(mutex);
-    if (const auto found = cache.find(key); found != cache.end())
-      return found->second;
-  }
+namespace {
+
+// The JSON argument grammar every tool route validates a schema with first.
+struct ToolSchemaValidation {
+  json::Value normalized;
+  std::shared_ptr<const JsonConstraint> grammar;
+  bool best_effort{false};
+  // An untyped, open schema: any argument object, before route exceptions.
+  bool open_untyped{false};
+};
+
+ToolSchemaValidation ValidateToolSchema(const json::Value& schema,
+                                        bool strict) {
+  ToolSchemaValidation result;
   const auto* properties = schema.find("properties");
   const auto* additional = schema.find("additionalProperties");
   const bool untyped = !strict && (!properties || properties->empty()) &&
                        (!additional || additional->is_bool());
-  auto normalized = schema;
+  auto& normalized = result.normalized;
+  normalized = schema;
   // A root reference already supplies the object schema. Injecting an empty,
   // closed sibling object would intersect away its declared arguments.
   if (!strict && !normalized.contains("$ref")) {
@@ -1890,8 +1892,8 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::ToolParameters(
         normalized["additionalProperties"] = false;
     }
   }
-  std::shared_ptr<const JsonConstraint> grammar;
-  bool best_effort = false;
+  auto& grammar = result.grammar;
+  auto& best_effort = result.best_effort;
   // As in llama.cpp, a required call uses the same argument grammar as an
   // optional one; tool_choice only decides whether a call must happen.
   try {
@@ -1917,53 +1919,78 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::ToolParameters(
       additional && additional->is_bool() && additional->as_bool();
   // Use the same untyped decision on both routes: a JSON-only neighbor must
   // not turn a best-effort tool into an empty-arguments grammar (#324).
-  const bool open_untyped =
-      grammar && untyped && !preserve_root &&
-      !ClosedProperties(schema, best_effort) && (best_effort || open) &&
-      !(format == ToolFormat::kQwen && HasPropertySchemas(schema));
-  if (open_untyped) {
-    grammar = OpenToolParameters(format);
-  } else if (grammar && format == ToolFormat::kGemma4) {
-    try {
-      grammar = JsonConstraintCompiler(normalized, strict, true, true)
-                    .Compile(false, best_effort);
-    } catch (const std::invalid_argument&) {
-      if (strict)
-        throw;
-      grammar.reset();
-      best_effort = true;
-    }
-  } else if (grammar && format != ToolFormat::kJson) {
-    try {
-      grammar = JsonConstraintCompiler(normalized, strict, true)
-                    .ToolParameters(format, best_effort);
-    } catch (const std::invalid_argument&) {
-      if (strict)
-        throw;
-      grammar.reset();
-      best_effort = true;
-    }
+  result.open_untyped = grammar && untyped && !preserve_root &&
+                        !ClosedProperties(schema, best_effort) &&
+                        (best_effort || open);
+  return result;
+}
+
+}  // namespace
+
+const JsonConstraint::ToolSyntax& JsonConstraint::Syntax(ToolFormat format) {
+  // Native envelope/typed-parameter approach: llama.cpp common/parsers/
+  // qwen3-coder.cpp and deepseek.cpp at
+  // 6a2743f028f78bfb88a7189607b49bde30df3769.
+  static const ToolSyntax qwen{
+      .open = "<tool_call>",
+      .name_prefix = "\n<function=",
+      .name_suffix = ">\n",
+      .close = "</function>\n</tool_call>",
+      .tagged =
+          TaggedArguments{
+              .parameter_open = "<parameter=",
+              .raw_value_open = ">\n",
+              .typed_value_open = ">\n",
+              .value_close = "\n</parameter>\n",
+          },
+      .reasoning_header = true,
+  };
+  static const ToolSyntax deepseek{
+      .open = "<｜DSML｜tool_calls>",
+      .name_prefix = "\n<｜DSML｜invoke name=\"",
+      .name_suffix = "\">\n",
+      .close = "</｜DSML｜invoke>",
+      .block_close = "\n</｜DSML｜tool_calls>",
+      .tagged =
+          TaggedArguments{
+              .parameter_open = "<｜DSML｜parameter name=\"",
+              .raw_value_open = "\" string=\"true\">",
+              .typed_value_open = "\" string=\"false\">",
+              .value_close = "</｜DSML｜parameter>",
+              .parameter_separator = "\n",
+          },
+      .reasoning_header = true,
+  };
+  if (format == ToolFormat::kQwen)
+    return qwen;
+  if (format == ToolFormat::kDeepSeek)
+    return deepseek;
+  throw std::invalid_argument("the JSON tool format has no native syntax");
+}
+
+std::shared_ptr<const JsonConstraint> JsonConstraint::ToolParameters(
+    const json::Value& schema, bool strict, ToolFormat format) {
+  if (format != ToolFormat::kJson)
+    return ToolParameters(schema, strict, Syntax(format));
+  // Ordinary agent tools leave nested objects open. Preserve their declared
+  // requirements/types without relaxing strict output schemas.
+  using Key = std::tuple<std::string, bool>;
+  static std::mutex mutex;
+  static std::map<Key, std::shared_ptr<const JsonConstraint>> cache;
+  const Key key{schema.dump(), strict};
+  if (std::get<0>(key).size() > kMaxSchemaBytes)
+    Invalid("maximum schema size is 2 MiB");
+  {
+    const std::lock_guard lock(mutex);
+    if (const auto found = cache.find(key); found != cache.end())
+      return found->second;
   }
-  if (!grammar && format == ToolFormat::kJson && !strict)
+  auto validation = ValidateToolSchema(schema, strict);
+  auto& grammar = validation.grammar;
+  if (validation.open_untyped)
     grammar = Object();
-  if (!grammar && best_effort && open_untyped)
-    grammar = OpenToolParameters(format);
-  // Gemma 4 has no second call syntax to fall back to: a best-effort tool keeps
-  // its native envelope with arbitrary arguments.
-  if (!grammar && format == ToolFormat::kGemma4 && !strict)
-    grammar = OpenToolParameters(format);
-  // Never switch a native model to a JSON envelope: one tool's schema would
-  // change every call's syntax and contradict the chat template and history
-  // (#383). Keep native tags and enforce what they can carry, as llama.cpp.
-  if (!grammar &&
-      (format == ToolFormat::kQwen || format == ToolFormat::kDeepSeek)) {
-    try {
-      grammar = JsonConstraintCompiler(normalized, strict, true)
-                    .LooseToolParameters(format);
-    } catch (const std::invalid_argument&) {
-      grammar = OpenToolParameters(format);
-    }
-  }
+  if (!grammar && !strict)
+    grammar = Object();
   const std::lock_guard lock(mutex);
   if (cache.size() >= 16)
     cache.erase(cache.begin());
@@ -1974,31 +2001,134 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::OpenToolParameters(
     ToolFormat format) {
   if (format == ToolFormat::kJson)
     return Object();
-  if (format == ToolFormat::kGemma4) {
-    static const auto gemma = [] {
-      const auto schema = json::Value::object();
-      return JsonConstraintCompiler(schema, false, true, true).Compile(true);
-    }();
-    return gemma;
+  return OpenToolParameters(Syntax(format));
+}
+
+namespace {
+
+void CheckTaggedArguments(const JsonConstraint::TaggedArguments& tags) {
+  if (tags.parameter_open.empty() || tags.raw_value_open.empty() ||
+      tags.typed_value_open.empty() || tags.value_close.empty() ||
+      tags.raw_value_open.front() != tags.typed_value_open.front())
+    Invalid(
+        "tagged arguments need nonempty tags whose value openers share their "
+        "first byte");
+}
+
+}  // namespace
+
+std::shared_ptr<const JsonConstraint> JsonConstraint::ToolParameters(
+    const json::Value& schema, bool strict, const ToolSyntax& syntax) {
+  if (syntax.tagged)
+    CheckTaggedArguments(*syntax.tagged);
+  // Only the argument spelling decides this grammar.
+  using Key = std::tuple<std::string, bool, std::optional<TaggedArguments>,
+                         ValueSyntax>;
+  static std::mutex mutex;
+  static std::map<Key, std::shared_ptr<const JsonConstraint>> cache;
+  const Key key{schema.dump(), strict, syntax.tagged,
+                syntax.tagged ? ValueSyntax{} : syntax.values};
+  if (std::get<0>(key).size() > kMaxSchemaBytes)
+    Invalid("maximum schema size is 2 MiB");
+  {
+    const std::lock_guard lock(mutex);
+    if (const auto found = cache.find(key); found != cache.end())
+      return found->second;
   }
-  static const auto qwen = [] {
-    const auto schema = json::Value::object();
-    return JsonConstraintCompiler(schema, false)
-        .OpenToolParameters(ToolFormat::kQwen);
-  }();
-  static const auto deepseek = [] {
-    const auto schema = json::Value::object();
-    return JsonConstraintCompiler(schema, false)
-        .OpenToolParameters(ToolFormat::kDeepSeek);
-  }();
-  return format == ToolFormat::kQwen ? qwen : deepseek;
+  auto validation = ValidateToolSchema(schema, strict);
+  const auto& normalized = validation.normalized;
+  auto& grammar = validation.grammar;
+  auto& best_effort = validation.best_effort;
+  if (syntax.tagged) {
+    // Native tags retain the syntax already taught by each model's chat
+    // template, unlike an injected JSON envelope.
+    const auto& tags = *syntax.tagged;
+    const bool untyped_tags = tags.raw_value_open == tags.typed_value_open;
+    const bool open_untyped = validation.open_untyped &&
+                              !(untyped_tags && HasPropertySchemas(schema));
+    if (open_untyped) {
+      grammar = OpenToolParameters(syntax);
+    } else if (grammar) {
+      try {
+        grammar = JsonConstraintCompiler(normalized, strict, true)
+                      .ToolParameters(tags, best_effort);
+      } catch (const std::invalid_argument&) {
+        if (strict)
+          throw;
+        grammar.reset();
+        best_effort = true;
+      }
+    }
+    if (!grammar && best_effort && open_untyped)
+      grammar = OpenToolParameters(syntax);
+    // Never switch a native model to a JSON envelope: one tool's schema would
+    // change every call's syntax and contradict the chat template and history
+    // (#383). Keep native tags and enforce what they can carry, as llama.cpp.
+    if (!grammar) {
+      try {
+        grammar = JsonConstraintCompiler(normalized, strict, true)
+                      .LooseToolParameters(tags);
+      } catch (const std::invalid_argument&) {
+        grammar = OpenToolParameters(syntax);
+      }
+    }
+  } else {
+    if (validation.open_untyped) {
+      grammar = OpenToolParameters(syntax);
+    } else if (grammar) {
+      // The JSON grammar validated the schema; spell the same contract
+      // natively.
+      try {
+        grammar = JsonConstraintCompiler(normalized, strict, true, false,
+                                         syntax.values)
+                      .Compile(false, best_effort);
+      } catch (const std::invalid_argument&) {
+        if (strict)
+          throw;
+        grammar.reset();
+      }
+    }
+    // A native syntax has no second call form to fall back to: a best-effort
+    // tool keeps its envelope with any argument object.
+    if (!grammar && !strict)
+      grammar = OpenToolParameters(syntax);
+  }
+  const std::lock_guard lock(mutex);
+  if (cache.size() >= 16)
+    cache.erase(cache.begin());
+  return cache.emplace(key, std::move(grammar)).first->second;
+}
+
+std::shared_ptr<const JsonConstraint> JsonConstraint::OpenToolParameters(
+    const ToolSyntax& syntax) {
+  if (syntax.tagged)
+    CheckTaggedArguments(*syntax.tagged);
+  using Key = std::pair<std::optional<TaggedArguments>, ValueSyntax>;
+  static std::mutex mutex;
+  static std::map<Key, std::shared_ptr<const JsonConstraint>> cache;
+  const Key key{syntax.tagged, syntax.tagged ? ValueSyntax{} : syntax.values};
+  {
+    const std::lock_guard lock(mutex);
+    if (const auto found = cache.find(key); found != cache.end())
+      return found->second;
+  }
+  const auto schema = json::Value::object();
+  auto grammar = syntax.tagged ? JsonConstraintCompiler(schema, false)
+                                     .OpenToolParameters(*syntax.tagged)
+                               : JsonConstraintCompiler(schema, false, true,
+                                                        false, syntax.values)
+                                     .Compile(true);
+  const std::lock_guard lock(mutex);
+  if (const auto found = cache.find(key); found != cache.end())
+    return found->second;
+  return cache.emplace(key, std::move(grammar)).first->second;
 }
 
 std::shared_ptr<const JsonConstraint> JsonConstraint::WithReasoning(
-    std::shared_ptr<const JsonConstraint> answer, std::string_view end,
-    std::string_view start) {
-  if (end.empty())
-    throw std::invalid_argument("reasoning end marker is empty");
+    std::shared_ptr<const JsonConstraint> answer, std::string_view close,
+    std::string_view open) {
+  if (close.empty())
+    throw std::invalid_argument("reasoning close delimiter must not be empty");
   // Cache separately from schema compilation. No mutable phase belongs to the
   // model or cache: the normal grammar stack carries it through sampler copies,
   // draft rejection and request restart.
@@ -2006,24 +2136,20 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithReasoning(
                          std::string>;
   static std::mutex mutex;
   static std::map<Key, std::shared_ptr<const JsonConstraint>> cache;
-  Key key{answer, std::string(end), std::string(start)};
+  Key key{answer, std::string(close), std::string(open)};
   {
     const std::lock_guard lock(mutex);
     if (const auto found = cache.find(key); found != cache.end())
       return found->second;
   }
   auto grammar = std::shared_ptr<JsonConstraint>(new JsonConstraint(*answer));
-  std::uint32_t reasoning = 0;
   if (!answer->reasoning_tool_prefix_.empty()) {
-    // The tool-header boundary exists only for `</think>` dialects.
-    if (end != "</think>")
-      throw std::invalid_argument("native tool header needs </think>");
     using End = JsonSchemaLexeme::ReasoningEnd;
-    const auto lexeme = [&](End kind) {
+    const auto lexeme = [&](End end) {
       const auto id =
           static_cast<std::uint32_t>(kLexeme | grammar->lexemes_.size());
-      grammar->lexemes_.push_back(
-          JsonSchemaLexeme::Reasoning(answer->reasoning_tool_prefix_, kind));
+      grammar->lexemes_.push_back(JsonSchemaLexeme::Reasoning(
+          answer->reasoning_tool_prefix_, end, std::string(close)));
       return id;
     };
     Rule roots{{lexeme(End::kExplicit), answer->root_},
@@ -2032,47 +2158,48 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithReasoning(
       roots.push_back({});
       roots.push_back({lexeme(End::kUnfinished)});
     }
-    reasoning = static_cast<std::uint32_t>(grammar->rules_.size());
+    grammar->root_ = grammar->rules_.size();
     grammar->rules_.push_back(std::move(roots));
   } else {
     const auto base = static_cast<std::uint32_t>(grammar->rules_.size());
-    grammar->rules_.resize(base + end.size());
-    for (std::size_t prefix = 0; prefix < end.size(); ++prefix) {
+    grammar->rules_.resize(base + close.size());
+    for (std::size_t prefix = 0; prefix < close.size(); ++prefix) {
       // Automatic calls must not turn a natural reasoning-only stop into a
       // mandatory call. The request's output cap also remains independent.
       if (grammar->automatic_tools_)
         grammar->rules_[base + prefix].push_back({});
-      std::vector<std::bitset<256>> transitions(end.size() + 1);
+      std::vector<std::bitset<256>> transitions(close.size() + 1);
       for (unsigned byte = 0; byte < 256; ++byte) {
-        std::string candidate(end.substr(0, prefix));
+        std::string candidate(close.substr(0, prefix));
         candidate += static_cast<char>(byte);
-        std::size_t matched = std::min(candidate.size(), end.size());
-        while (matched && !candidate.ends_with(end.substr(0, matched)))
+        std::size_t matched = std::min(candidate.size(), close.size());
+        while (matched && !candidate.ends_with(close.substr(0, matched)))
           --matched;
         transitions[matched].set(byte);
       }
-      for (std::size_t matched = 0; matched <= end.size(); ++matched) {
+      for (std::size_t matched = 0; matched <= close.size(); ++matched) {
         if (transitions[matched].none())
           continue;
         const auto terminal = kTerminal | grammar->classes_.size();
         grammar->classes_.push_back(transitions[matched]);
         grammar->rules_[base + prefix].push_back(
             {static_cast<std::uint32_t>(terminal),
-             matched == end.size()
+             matched == close.size()
                  ? answer->root_
                  : base + static_cast<std::uint32_t>(matched)});
       }
     }
-    reasoning = base;
+    grammar->root_ = base;
   }
-  grammar->root_ = reasoning;
-  if (!start.empty()) {
-    JsonConstraint::Sequence opened;
-    for (const unsigned char byte : start)
+  if (!open.empty()) {
+    // Reasoning is not open yet: the output either starts with the provider's
+    // opener, then reasons, or answers directly.
+    Sequence opened;
+    for (const unsigned char byte : open)
       opened.push_back(kTerminal | byte);
-    opened.push_back(reasoning);
-    grammar->root_ = static_cast<std::uint32_t>(grammar->rules_.size());
+    opened.push_back(grammar->root_);
     grammar->rules_.push_back({{answer->root_}, std::move(opened)});
+    grammar->root_ = grammar->rules_.size() - 1;
   }
   const std::lock_guard lock(mutex);
   if (const auto found = cache.find(key); found != cache.end())
@@ -2085,13 +2212,35 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithReasoning(
 std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
     std::shared_ptr<const JsonConstraint> answer, std::vector<Tool> tools,
     bool required, bool parallel, ToolFormat format) {
+  return BuildTools(std::move(answer), std::move(tools), required, parallel,
+                    format == ToolFormat::kJson ? nullptr : &Syntax(format));
+}
+
+std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
+    std::shared_ptr<const JsonConstraint> answer, std::vector<Tool> tools,
+    bool required, bool parallel, const ToolSyntax& syntax) {
+  if (syntax.open.empty() || syntax.close.empty())
+    Invalid("a tool syntax needs open and close literals");
+  if (!syntax.tagged && !syntax.block_close.empty())
+    Invalid("only tagged arguments share a call block");
+  return BuildTools(std::move(answer), std::move(tools), required, parallel,
+                    &syntax);
+}
+
+// Without a syntax, calls use the JSON envelope a non-native model is
+// instructed to write.
+std::shared_ptr<const JsonConstraint> JsonConstraint::BuildTools(
+    std::shared_ptr<const JsonConstraint> answer, std::vector<Tool> tools,
+    bool required, bool parallel, const ToolSyntax* syntax) {
   if (tools.empty())
     return answer;
-  using Key = std::tuple<std::shared_ptr<const JsonConstraint>,
-                         std::vector<Tool>, bool, bool, ToolFormat>;
+  using Key =
+      std::tuple<std::shared_ptr<const JsonConstraint>, std::vector<Tool>, bool,
+                 bool, std::optional<ToolSyntax>>;
   static std::mutex mutex;
   static std::map<Key, std::shared_ptr<const JsonConstraint>> cache;
-  const Key key{answer, tools, required, parallel, format};
+  const Key key{answer, tools, required, parallel,
+                syntax ? std::optional<ToolSyntax>(*syntax) : std::nullopt};
   {
     const std::lock_guard lock(mutex);
     if (const auto found = cache.find(key); found != cache.end())
@@ -2126,15 +2275,13 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
     grammar->rules_.push_back({std::move(bytes)});
     return id;
   };
-  const bool deepseek = format == ToolFormat::kDeepSeek;
-  const bool gemma = format == ToolFormat::kGemma4;
-  const std::string_view marker = deepseek ? "<｜DSML｜tool_calls>"
-                                  : gemma  ? "<|tool_call>"
-                                           : "<tool_call>";
-  const auto end = literal(format == ToolFormat::kJson ? "}</tool_call>"
-                           : deepseek                  ? "</｜DSML｜invoke>"
-                           : gemma                     ? "<tool_call|>"
-                                   : "</function>\n</tool_call>");
+  const bool tagged = syntax && syntax->tagged;
+  // Tagged calls in one shared block (DeepSeek's) or one block each (Qwen's).
+  const bool block = tagged && !syntax->block_close.empty();
+  const std::string_view marker =
+      syntax ? std::string_view(syntax->open) : "<tool_call>";
+  const auto end =
+      literal(syntax ? std::string_view(syntax->close) : "}</tool_call>");
   // llama.cpp SPACE_RULE: empty, one space, or 1–2 newlines followed by up to
   // 20 spaces/tabs (common/json-schema-to-grammar.cpp).
   auto space_rule = [&] {
@@ -2201,8 +2348,8 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
   // output: parallel calls share one DeepSeek block, Qwen calls may follow
   // each other, and no text may follow them. Text after a call is where
   // echoed framing used to leak into content (#383, #438).
-  const bool qwen = format == ToolFormat::kQwen;
-  const bool ends_output = deepseek || qwen || !plain_answer;
+  const bool qwen = tagged && !block;
+  const bool ends_output = tagged || !plain_answer;
   auto after = ends_output ? static_cast<std::uint32_t>(grammar->rules_.size())
                : parallel  ? prose
                            : text(UINT32_MAX);
@@ -2213,13 +2360,13 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
       grammar->rules_[after] = {{space}};
       if (parallel)
         grammar->rules_[after].push_back({space, literal(marker), calls});
-    } else if (parallel && !deepseek) {
+    } else if (parallel && !block) {
       const auto begin = literal(marker);
       grammar->rules_[after].push_back({begin, calls});
     }
   }
-  if (deepseek) {
-    const auto finish = literal("\n</｜DSML｜tool_calls>");
+  if (block) {
+    const auto finish = literal(syntax->block_close);
     const auto tail = static_cast<std::uint32_t>(grammar->rules_.size());
     grammar->rules_.push_back({{finish, after}});
     if (parallel)
@@ -2229,28 +2376,26 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
   std::map<const JsonConstraint*, std::uint32_t> imported;
   if (answer)
     imported.emplace(answer.get(), answer->root_);
-  if (format == ToolFormat::kQwen || deepseek) {
-    grammar->reasoning_tool_prefix_ =
-        deepseek ? "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\""
-                 : "<tool_call>\n<function=";
+  // Native headers may end the reasoning phase.
+  const bool reasoning_header = syntax && syntax->reasoning_header;
+  if (reasoning_header) {
+    grammar->reasoning_tool_prefix_ = syntax->open + syntax->name_prefix;
     grammar->reasoning_tool_root_ = grammar->rules_.size();
     grammar->rules_.push_back({});
   }
   for (const auto& [name, arguments] : tools) {
-    // Gemma 4 ends a function name at its first brace.
-    if (gemma && name.find('{') != std::string::npos)
-      Invalid("function name cannot be a Gemma 4 call name: " + name);
+    if (syntax &&
+        name.find_first_of(syntax->name_delimiters) != std::string::npos)
+      Invalid("function name cannot be written in this tool syntax: " + name);
     const auto begin = literal(
-        format == ToolFormat::kJson
-            ? "{\"name\":" + json::Value(name).dump() + ",\"arguments\":"
-        : deepseek ? "\n<｜DSML｜invoke name=\"" + name + "\">\n"
-        : gemma    ? "call:" + name
-                   : "\n<function=" + name + ">\n");
+        syntax ? syntax->name_prefix + name + syntax->name_suffix
+               : "{\"name\":" + json::Value(name).dump() + ",\"arguments\":");
+    const auto header_tail = syntax ? name + syntax->name_suffix : name;
     if (const auto found = imported.find(arguments.get());
         found != imported.end()) {
       grammar->rules_[calls].push_back({begin, found->second, end, after});
-      if (format != ToolFormat::kJson) {
-        const auto named = literal(name + (deepseek ? "\">\n" : ">\n"));
+      if (reasoning_header) {
+        const auto named = literal(header_tail);
         grammar->rules_[grammar->reasoning_tool_root_].push_back(
             {named, found->second, end, after});
       }
@@ -2289,20 +2434,20 @@ std::shared_ptr<const JsonConstraint> JsonConstraint::WithTools(
     const auto root = static_cast<std::uint32_t>(arguments->root_ + rules);
     imported.emplace(arguments.get(), root);
     grammar->rules_[calls].push_back({begin, root, end, after});
-    if (format != ToolFormat::kJson) {
-      const auto named = literal(name + (deepseek ? "\">\n" : ">\n"));
+    if (reasoning_header) {
+      const auto named = literal(header_tail);
       grammar->rules_[grammar->reasoning_tool_root_].push_back(
           {named, root, end, after});
     }
   }
   if (plain_answer && !required)
     alternatives.push_back({prose});
-  else if (format == ToolFormat::kJson)
-    alternatives.push_back({literal(marker), calls});
-  else if (gemma)
-    // Gemma 4 writes its call marker directly. Unbounded whitespace let a
+  else if (syntax && !tagged)
+    // A provider call starts at its marker. Unbounded whitespace would let a
     // model refuse a required call with spaces until its token limit.
     alternatives.push_back({space_rule(), literal(marker), calls});
+  else if (!syntax)
+    alternatives.push_back({literal(marker), calls});
   else {
     std::bitset<256> whitespace;
     for (const unsigned char byte : std::string_view(" \t\r\n"))

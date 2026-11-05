@@ -118,6 +118,12 @@ private:
     std::span<const TokenId> prompt_tokens = {},
     std::span<const TokenId> generated_tokens = {});
 
+/// Buffers the full-row sampler reuses across tokens; not part of the API.
+struct LogitRowScratch {
+  std::vector<std::uint32_t> histogram;
+  std::vector<double> block_maxima;
+};
+
 /// Request-owned controls, repetition window, full generated counts and RNG.
 ///
 /// Call Accept only for committed tokens. The type is copyable so speculative
@@ -136,9 +142,6 @@ public:
   /// Draft q may remain unconstrained; target p always uses this request's
   /// grammar.
   [[nodiscard]] SamplerState WithoutConstraint() const;
-  /// The same sampler with top-p disabled (speculative proposals: any
-  /// proposal distribution keeps rejection sampling exact).
-  [[nodiscard]] SamplerState WithoutTopP() const;
   /// A finite argmax can bypass downloading logits if it satisfies the grammar.
   /// Set penalties_applied only for a winner computed with this state's exact
   /// penalty arithmetic and history; raw model argmaxes leave it false.
@@ -212,8 +215,7 @@ private:
   [[nodiscard]] SamplingDistribution LinearDistribution(
       std::span<const float> logits) const;
   void PrepareSelected(std::span<const float> logits);
-  void FilterSelected(double full_softmax_sum = 0,
-                      bool has_full_softmax_sum = false);
+  void FilterSelected(std::optional<std::size_t> top_p_keep = std::nullopt);
   [[nodiscard]] SamplingDistribution SelectedDistribution();
   void StartReasoning();
   void AdvanceReasoning(TokenId token);
@@ -225,6 +227,7 @@ private:
   std::vector<TokenId> history_;
   std::vector<TokenPenalty> penalty_counts_;
   std::vector<Probability> candidate_scratch_;
+  LogitRowScratch row_scratch_;
   std::uint64_t rng_state_{0};
   std::optional<TokenId> pending_sample_;
   enum class ReasoningPhase : std::uint8_t {

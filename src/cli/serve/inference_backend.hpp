@@ -6,72 +6,45 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "gufo/ext/text.hpp"
 #include "src/cli/serve/text_generation_backend.hpp"
 #include "src/cli/serve/text_generation_scheduler.hpp"
-#include "src/models/qwen/dflash_policy.hpp"
-
-namespace gufo::hip {
-class QwenGpuModel;
-}
-
-namespace gufo::models::deepseek_v4_flash {
-class Model;
-}
-
-namespace gufo::models::gemma4 {
-class Model;
-namespace vision {
-class Encoder;
-}  // namespace vision
-}  // namespace gufo::models::gemma4
-
-namespace gufo::models::qwen38_flash_next {
-class Model;
-}
-
-namespace gufo::tokenization {
-class QwenTokenizer;
-}
 
 namespace gufo::server {
 
-enum class TextSpeculativeBackend : std::uint8_t {
-  kDisabled,
-  kDFlash,
-  kDSpark,
-  kMtp,  ///< Qwen MTP draft block
-};
+using TextSpeculativeBackend = ext::TextSpeculativeBackend;
+using TextDFlashDraftPolicy = ext::TextDFlashDraftPolicy;
+using TextSpeculativeConfig = ext::TextSpeculativeConfig;
+using TextDiskCacheConfig = ext::TextDiskCacheConfig;
 
-struct TextSpeculativeConfig {
-  TextSpeculativeBackend backend{TextSpeculativeBackend::kDisabled};
-  std::string draft_model_path;
-  std::uint32_t max_draft_tokens{7};
-  /// Whether --draft-tokens was given; otherwise models with their own
-  /// default (Gemma 4) use it instead of max_draft_tokens.
-  bool max_draft_tokens_given{true};
-  std::uint32_t min_draft_tokens{1};
-  speculative::DFlashDraftPolicy dflash_policy{
-      speculative::DFlashDraftPolicy::kAdaptive};
-  /// MTP draft-length policy and calibration scope names (Gemma 4); empty
-  /// selects the model's defaults.
-  std::string mtp_draft_policy;
-  std::string mtp_draft_calibration;
-  /// Gemma 4 MTP per-cycle trace file; empty writes none.
-  std::string mtp_draft_trace_path;
-};
+namespace speculative {
+using ext::ParseTextDFlashDraftPolicy;
+using ext::TextDFlashDraftPolicyName;
+[[nodiscard]] inline ext::TextDFlashDraftPolicy ParseDFlashDraftPolicy(
+    std::string_view value) {
+  return ext::ParseTextDFlashDraftPolicy(value);
+}
+[[nodiscard]] inline std::string_view DFlashDraftPolicyName(
+    ext::TextDFlashDraftPolicy policy) {
+  return ext::TextDFlashDraftPolicyName(policy);
+}
+}  // namespace speculative
 
-struct TextDiskCacheConfig {
-  std::filesystem::path directory;
-  std::size_t capacity_bytes{TextRunnerDiskCacheOptions::kDefaultCapacityBytes};
-  /// Zero selects the automatic host RAM budget after session allocation.
-  std::size_t staging_capacity_bytes{0};
-  std::string model_artifact_fingerprint;
-  std::string draft_model_artifact_fingerprint;
-};
+/// Generated reasoning tokens, excluding the delimiters. With an empty `open`
+/// the output starts inside reasoning, which ends at `close`; otherwise only a
+/// block the output itself opens with `open` counts, after a prefix that
+/// `blank` accepts (none when unset). An unclosed block counts to the end.
+[[nodiscard]] std::size_t CountReasoningTokens(
+    std::span<const tokenization::TokenId> tokens,
+    std::span<const tokenization::TokenId> open,
+    std::span<const tokenization::TokenId> close,
+    const std::function<bool(std::span<const tokenization::TokenId>)>& blank =
+        {});
 
 /// Thread-safe HTTP inference facade over shared immutable GPU model resources
 /// and a bounded pool of request-owned executor sessions.
@@ -89,14 +62,10 @@ public:
   InferenceBackend(InferenceBackend&&) = delete;
   InferenceBackend& operator=(InferenceBackend&&) = delete;
 
-  /// Gemma 4 --prefill-weights mode for the next load (empty is off).
-  void set_gemma_prefill_weights(std::string mode) {
-    gemma_prefill_weights_ = std::move(mode);
-  }
-
   /// Loads weights from a GGUF file. Returns false and sets *error on failure.
-  /// `enable_yarn` opts Flash-Next into static YaRN, required for (and only
-  /// accepted with) a `max_context` above its native context.
+  /// `enable_yarn` opts Flash-Next into YaRN, required for (and only accepted
+  /// with) a `max_context` above its native context; each session scales only
+  /// past the native context.
   bool load(const std::string& model_path, std::string* error,
             std::uint32_t max_context = 0, std::size_t session_count = 1,
             TextPrefillPolicy prefill_policy = {},
@@ -104,56 +73,16 @@ public:
             const TextSpeculativeConfig& speculative_config = {},
             const TextDiskCacheConfig& disk_cache_config = {},
             const std::string& vision_model_path = {},
-            std::uint32_t image_tokens = 0,
             TextRunnerRamCacheOptions ram_cache_config = {},
             bool enable_yarn = false);
 
-#if defined(ENGINE_ENABLE_HIP)
-  /// Installs a previously loaded model without duplicating mapped weights.
-  bool load(std::shared_ptr<const hip::QwenGpuModel> model, std::string* error,
-            std::uint32_t max_context = 0, std::size_t session_count = 1,
-            TextPrefillPolicy prefill_policy = {},
-            TextSchedulerPolicy scheduler_policy = {},
-            TextSpeculativeConfig speculative_config = {},
-            TextDiskCacheConfig disk_cache_config = {},
-            TextRunnerRamCacheOptions ram_cache_config = {});
-
-  /// Installs a previously loaded DeepSeek model with request-owned sessions.
-  bool load(std::shared_ptr<models::deepseek_v4_flash::Model> model,
-            std::string* error, std::uint32_t max_context = 0,
+  /// Installs a previously prepared runner with request-owned sessions.
+  bool load(std::shared_ptr<ext::TextModelRunner> runner, std::string* error,
             std::size_t session_count = 1,
             TextPrefillPolicy prefill_policy = {},
             TextSchedulerPolicy scheduler_policy = {},
-            TextSpeculativeConfig speculative_config = {},
-            TextDiskCacheConfig disk_cache_config = {},
+            const TextDiskCacheConfig& disk_cache_config = {},
             TextRunnerRamCacheOptions ram_cache_config = {});
-
-  /// Installs a previously loaded Qwen3.8-Flash-Next model with
-  /// request-owned sessions, the model's tokenizer, and host-memory
-  /// continuation snapshots.
-  bool load(std::shared_ptr<models::qwen38_flash_next::Model> model,
-            std::string* error, std::uint32_t max_context = 0,
-            std::size_t session_count = 1,
-            TextPrefillPolicy prefill_policy = {},
-            TextSchedulerPolicy scheduler_policy = {},
-            TextSpeculativeConfig speculative_config = {},
-            TextDiskCacheConfig disk_cache_config = {},
-            TextRunnerRamCacheOptions ram_cache_config = {});
-
-  /// Installs a previously loaded Gemma 4 model with request-owned sessions
-  /// and host/disk continuation snapshots.
-  /// `vision`, when set, accepts image input of `image_tokens` soft tokens
-  /// per image (0: the processor default).
-  bool load(std::shared_ptr<models::gemma4::Model> model, std::string* error,
-            std::uint32_t max_context = 0, std::size_t session_count = 1,
-            TextPrefillPolicy prefill_policy = {},
-            TextSchedulerPolicy scheduler_policy = {},
-            TextSpeculativeConfig speculative_config = {},
-            TextDiskCacheConfig disk_cache_config = {},
-            std::shared_ptr<models::gemma4::vision::Encoder> vision = {},
-            std::uint32_t image_tokens = 0,
-            TextRunnerRamCacheOptions ram_cache_config = {});
-#endif
 
   /// Stable model identifier used in API responses.
   [[nodiscard]] std::string model_id() const override;
@@ -169,7 +98,6 @@ public:
   [[nodiscard]] ReasoningOptions reasoning_defaults() const override;
   [[nodiscard]] InitialOutputState initial_output_state(
       const ChatRequest& request) const override;
-  [[nodiscard]] OutputMarkup output_markup() const override;
   /// The first name is primary; the rest are additional served names.
   void set_model_ids(std::vector<std::string> model_ids);
   void set_served_artifact(const std::string& model_path,
@@ -228,7 +156,6 @@ public:
 private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
-  std::string gemma_prefill_weights_;
 };
 
 }  // namespace gufo::server

@@ -73,25 +73,20 @@ class CheckResults(dict):
         super().__init__()
         self.report, self.output = report, output
         self.recorder = recorder
-        # Concurrent cases record checks from several threads: each save
-        # serializes this report and renames the same temporary file.
-        self.lock = threading.RLock()
 
     def save(self):
         if self.output:
-            with self.lock:
-                self.output.parent.mkdir(parents=True, exist_ok=True)
-                temporary = self.output.with_suffix(".tmp")
-                temporary.write_text(json.dumps(self.report, indent=2) + "\n")
-                temporary.replace(self.output)
+            self.output.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.output.with_suffix(".tmp")
+            temporary.write_text(json.dumps(self.report, indent=2) + "\n")
+            temporary.replace(self.output)
 
     def __setitem__(self, name, value):
-        with self.lock:
-            if name in self:
-                raise AssertionError(f"duplicate functional check: {name}")
-            super().__setitem__(name, value)
-            self.recorder.mark(name)
-            self.save()
+        if name in self:
+            raise AssertionError(f"duplicate functional check: {name}")
+        super().__setitem__(name, value)
+        self.recorder.mark(name)
+        self.save()
 
 
 def chat_result(client, request, streaming=False, on_chunk=None, on_open=None):
@@ -326,13 +321,10 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
         print(f"CHECK {name}", file=sys.stderr, flush=True)
         return result
 
-    # Gemma 4 defaults to thinking off; the other presets default to on.
-    server_thinks = (server_thinking == "on" if preset == "gemma4"
-                     else server_thinking != "off")
     if not overrides:
         # A default server must use the model's recommended thinking mode,
         # including the same effort instructions as an explicit request.
-        thinking = server_thinks
+        thinking = server_thinking != "off"
         effort = ("high" if preset == "deepseek4" else "xhigh") if thinking else "none"
         request = {
             "model": model, "seed": 73, "max_completion_tokens": 8,
@@ -340,13 +332,7 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
             "extra_body": {"cache_prompt": False},
         }
         default = chat_result(client, request)
-        if preset == "gemma4":
-            # Gemma 4 has no effort instructions; request the mode itself.
-            explicit = chat_result(client, {**request, "extra_body": {
-                "cache_prompt": False,
-                "chat_template_kwargs": {"enable_thinking": thinking}}}, True)
-        else:
-            explicit = chat_result(client, {**request, "reasoning_effort": effort}, True)
+        explicit = chat_result(client, {**request, "reasoning_effort": effort}, True)
         assert bool(default["reasoning"]) == thinking, default
         assert signature(default) == signature(explicit), (default, explicit)
         record("default_thinking_effort", default)
@@ -364,7 +350,7 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
             "frequency_penalty": 0.,
             "seed": 73,
         }
-        native = {"top_k": {"qwen38": 20, "gemma4": 64}.get(preset, 0),
+        native = {"top_k": 20 if preset == "qwen38" else 0,
                   "min_p": 0., "min_keep": 0, "repeat_penalty": 1.,
                   "repeat_last_n": 64}
         assert overrides.keys() <= (expected.keys() | native.keys()), overrides
@@ -534,7 +520,7 @@ def check_sampling_defaults(client, model, checks, preset, overrides, vision=Fal
 
         # Raw Completions has no chat template control; its preset follows the
         # server's configured thinking mode rather than this Chat request.
-        if thinking == server_thinks:
+        if thinking == (server_thinking != "off"):
             raw = dict(model=model, prompt="One, two, three,",
                        max_tokens=8, seed=73, extra_body={})
             if inherited_seed:
@@ -1539,7 +1525,7 @@ def check_strict_tools(client, model, checks):
     record("strict_tool_invalid_schema", {"status": 400})
 
 
-def check_native_tools(client, model, checks, vision=False, preset=None):
+def check_native_tools(client, model, checks, vision=False):
     """Shared function semantics over both SDK transports and concurrent users."""
     from concurrent.futures import ThreadPoolExecutor
 
@@ -1605,15 +1591,8 @@ def check_native_tools(client, model, checks, vision=False, preset=None):
         final = events[-1].response
         assert final.status == "incomplete", final
         assert final.incomplete_details.reason == "max_output_tokens", final
-        # An interrupted call may be reported, but never as executable.
-        for item in final.output:
-            if item.type == "function_call":
-                assert item.status == "incomplete", final
-                try:
-                    json.loads(item.arguments)
-                except json.JSONDecodeError:
-                    continue
-                raise AssertionError(("interrupted tool was made executable", final))
+        assert all(item.status == "incomplete" for item in final.output
+                   if item.type == "function_call"), final
         record(f"responses_tool_limit_{limit}", final.to_dict())
 
     def isolated(index):
@@ -1673,8 +1652,6 @@ def check_native_tools(client, model, checks, vision=False, preset=None):
     signature(result, value=nested)
     record("responses_literal_call_argument", result.to_dict())
 
-    # Gemma 4 has no reasoning effort levels: "low" enables full-length
-    # thinking, which does not reach the call within this 256-token budget.
     thinking_function = json.loads(json.dumps(function))
     thinking_function["parameters"]["properties"]["value"] = {
         "type": "string", "const": "alpha"}
@@ -1987,7 +1964,7 @@ def check_state_edges(client, model, checks, speculative, vision=False, server_l
     checks["schema_error_did_not_poison_cache"] = replay
 
 
-def check_auto_tools(client, model, checks, vision=False, preset=None):
+def check_auto_tools(client, model, checks, vision=False):
     """Automatic calls retain prose, loose schemas, replay and both transports."""
     from concurrent.futures import ThreadPoolExecutor
 
@@ -2028,8 +2005,6 @@ def check_auto_tools(client, model, checks, vision=False, preset=None):
         assert signature(first) == signature(replay), (first, replay)
         assert replay["usage"]["cached_tokens"] > 0, replay
         record(f"auto_chat_sampled{sampled}_cache_replay", replay)
-        if not sampled:
-            call_tokens = replay["usage"]["completion_tokens"]
     prose = {**common, "messages": [{"role": "user", "content":
              "Do not call any tools. Reply with the single word Hello."}]}
     for thinking in (False, True):
@@ -2046,9 +2021,7 @@ def check_auto_tools(client, model, checks, vision=False, preset=None):
         "extra_body": {"presence_penalty": 0}}, True)
     signature(thought)
     record("auto_chat_thinking_high", thought)
-    # Stop inside the call. Compact call syntaxes (Gemma 4: 12 tokens here)
-    # can finish within 12 tokens, so cut one token before the complete call.
-    for limit in (2, min(12, call_tokens - 1)):
+    for limit in (2, 12):
         result = chat_result(client, {**common, "max_completion_tokens": limit}, True)
         assert result["finish"] == "length" and not result["tools"], result
         record(f"auto_chat_limit{limit}", result)
@@ -2068,9 +2041,8 @@ def check_auto_tools(client, model, checks, vision=False, preset=None):
         # Parallel auto permits more than one call; cardinality is enforced
         # separately by the nonparallel suite, not by prompt obedience.
         assert result.status == "completed" and calls, result
-        values = value if isinstance(value, tuple) else (value,)
-        assert all(call.name == "record" and json.loads(call.arguments)["value"] in values
-                   and len(json.loads(call.arguments)) == 1 for call in calls), result
+        assert all(call.name == "record" and json.loads(call.arguments) == {"value": value}
+                   for call in calls), result
         return [(call.name, call.arguments) for call in calls]
 
     result = client.responses.create(**response_request)
@@ -2131,22 +2103,16 @@ def check_auto_tools(client, model, checks, vision=False, preset=None):
                 {"type": "input_text", "text": image_prompt},
                 {"type": "input_image", "image_url":
                  image_content("blue")["image_url"]["url"]}]}]})
-        # Either spelling shows the image reached the call (Gemma 4: hex).
-        response_signature(result, value=("blue", "#0000FF"))
+        response_signature(result, value="blue")
         record("auto_image_tool", result.to_dict())
         image_request = {**common, "messages": [{"role": "user", "content": [
             image_content("blue"), {"type": "text", "text": image_prompt}]}]}
-        # Stop inside the arguments this prompt produces; Gemma 4 may still
-        # spell the color as hex.
-        chosen = chat_result(client, image_request)
-        color = json.loads(chosen["tools"][0]["function"]["arguments"])["value"]
-        assert color in ("blue", "#0000FF"), chosen
-        stopped = chat_result(client, {**image_request, "stop": color}, True)
+        stopped = chat_result(client, {**image_request, "stop": "blue"}, True)
         assert stopped["finish"] == "stop" and not stopped["tools"], stopped
         retry = chat_result(client, image_request, True)
         assert retry["usage"]["cached_tokens"] > 0 and retry["tools"], retry
         assert all(call["function"]["name"] == "record"
-                   and json.loads(call["function"]["arguments"]) == {"value": color}
+                   and json.loads(call["function"]["arguments"]) == {"value": "blue"}
                    for call in retry["tools"]), retry
         record("auto_image_argument_stop_retry", {"stopped": stopped, "retry": retry})
 
@@ -2810,8 +2776,7 @@ def main():
     parser.add_argument("--suite", choices=("all", *SDK_SUITES), default="all")
     parser.add_argument("--vision", action="store_true",
                         help="Add image checks; the server needs its matching --mmproj")
-    parser.add_argument("--sampling-preset",
-                        choices=("qwen38", "deepseek4", "gemma4"),
+    parser.add_argument("--sampling-preset", choices=("qwen38", "deepseek4"),
                         help="Expected text defaults; required for all/sampling-defaults")
     parser.add_argument("--sampling-overrides", type=json.loads, default={},
                         help="JSON object of explicit server sampling CLI values")
@@ -2897,25 +2862,22 @@ def main():
                 client, args.model, checks, image_content, chat_result, response_result),
             "image-count": lambda: check_image_count(
                 client, args.model, checks, image_content, chat_result, response_result,
-                args.context, args.concurrency, args.sampling_preset),
+                args.context, args.concurrency),
             "tool-images": lambda: check_tool_images(
                 client, args.model, checks, image_content, chat_result, response_result,
                 args.server_log),
             "image-detail": lambda: check_image_detail(client, args.model, checks, chat_result),
             "structured": lambda: check_structured_outputs(client, args.model, checks, args.vision),
             "structured-limits": lambda: check_structured_limits(client, args.model, checks, args.vision),
-            "native-tools": lambda: check_native_tools(
-                client, args.model, checks, args.vision, args.sampling_preset),
-            "auto-tools": lambda: check_auto_tools(
-                client, args.model, checks, args.vision, args.sampling_preset),
+            "native-tools": lambda: check_native_tools(client, args.model, checks, args.vision),
+            "auto-tools": lambda: check_auto_tools(client, args.model, checks, args.vision),
             "tool-edges": lambda: check_tool_edges(
                 client, args.model, checks, args.sampling_preset),
             "tool-reasoning": lambda: check_tool_reasoning(
                 client, args.model, checks, chat_result, args.sampling_preset),
             "reasoning-separator": lambda: check_reasoning_separator(
-                client, args.model, checks, chat_result, args.sampling_preset, args.server_log),
-            "tool-streaming": lambda: check_tool_streaming(
-                client, args.model, checks, chat_result, args.sampling_preset),
+                client, args.model, checks, chat_result, args.server_log),
+            "tool-streaming": lambda: check_tool_streaming(client, args.model, checks, chat_result),
             "reasoning-budget": lambda: check_reasoning_budget(
                 client, args.model, checks, chat_result),
             "tool-agent": lambda: check_tool_agent(
@@ -2926,8 +2888,7 @@ def main():
             "messages-tools": lambda: check_messages_tools(
                 client, args.model, checks, chat_result),
             "tool-untyped": lambda: check_untyped_agent_tools(
-                client, args.model, checks, chat_result, args.vision, image_content,
-                args.sampling_preset),
+                client, args.model, checks, chat_result, args.vision, image_content),
             "tool-mixed": lambda: check_mixed_tool_schemas(
                 client, args.model, checks, chat_result, args.vision, image_content,
                 args.sampling_preset),
@@ -2936,15 +2897,13 @@ def main():
                 image_content("red") if args.vision else None),
             "tool-native-types": lambda: check_finite_argument_types(
                 client, args.model, checks, chat_result,
-                image_content("red") if args.vision else None, args.sampling_preset),
+                image_content("red") if args.vision else None),
             "tool-choice-cache": lambda: check_tool_choice_cache(
-                client, args.model, checks, chat_result, server_log=args.server_log,
-                sampling_preset=args.sampling_preset),
+                client, args.model, checks, chat_result, args.server_log),
             "tool-parameter-order": lambda: check_tool_parameter_order(
                 client, args.model, checks, chat_result),
             "tool-schema-edges": lambda: check_tool_schema_edges(
-                client, args.model, checks, chat_result, args.vision, image_content,
-                args.sampling_preset, args.server_log),
+                client, args.model, checks, chat_result, args.vision, image_content, args.server_log),
             "state-edges": lambda: check_state_edges(
                 client, args.model, checks, args.speculative, args.vision, args.server_log),
             "sampling-defaults": lambda: check_sampling_defaults(
@@ -2969,8 +2928,7 @@ def main():
             "cache-edits": lambda: check_cache_edits(
                 client, args.model, checks, chat_result, args.server_log),
             "cache-growth": lambda: check_cache_growth(
-                client, args.model, checks, chat_result, args.sampling_preset,
-                args.server_log),
+                client, args.model, checks, chat_result, args.server_log),
             "cache-depth": lambda: check_cache_depth(
                 client, args.model, checks, chat_result, args.concurrency, args.server_log),
             "cache-stalls": lambda: check_cache_stalls(
@@ -2978,10 +2936,9 @@ def main():
                 args.server_log),
             "cache-rotation": lambda: check_cache_rotation(client, args.model, checks, chat_result),
             "cache-concurrency": lambda: check_cache_concurrency(
-                client, args.model, checks, chat_result, args.concurrency,
-                preset=args.sampling_preset),
+                client, args.model, checks, chat_result, args.concurrency),
             "cache-shared-prefix": lambda: check_cache_shared_prefix(
-                client, args.model, checks, chat_result, args.sampling_preset),
+                client, args.model, checks, chat_result),
             "cache-bridge": lambda: check_cache_bridge(
                 client, args.model, checks, chat_result, args.snapshot_capacity_bytes),
             "cache-compaction": lambda: check_cache_compaction(
@@ -2994,7 +2951,7 @@ def main():
             "cache-messages-loop": lambda: check_cache_messages_loop(
                 client, args.model, checks, chat_result, args.context),
             "system-injection": lambda: check_system_injection(
-                client, args.model, checks, chat_result, args.sampling_preset),
+                client, args.model, checks, chat_result),
         }
         selected = ([name for name in suites if name not in ("tool-native-types", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "prefill-scheduling")
                      and (name not in ("image-inputs", "image-count", "tool-images", "image-detail") or args.vision)]

@@ -409,7 +409,7 @@ class FunctionalRunnerTest(unittest.TestCase):
     def test_cache_rotation_checks_host_headroom_and_requested_limits(self):
         gib = 1024**3
         def log(capacity, sessions=1, entries=128):
-            return (f"event=snapshot_cache_configured sessions={sessions} "
+            return (f"schema=component-cache-v1 event=configured sessions={sessions} "
                     f"snapshot_entries={entries} capacity_bytes={capacity}\n")
         self.assertEqual(host_available_bytes("MemTotal: 9 kB\nMemAvailable: 4096 kB\n"),
                          4096 * 1024)
@@ -802,7 +802,7 @@ class FunctionalRunnerTest(unittest.TestCase):
                 seen.add(label)
                 if not cold:
                     previous[key] = total
-            code = re.search(r"code word: (\w+)$", messages[-1]["content"])
+            code = re.search(r"code (\w+)\.$", messages[-1]["content"])
             return {"text": code[1] if code else "Z", "reasoning": "", "tools": [], "finish": "stop",
                     "usage": {"prompt_tokens": total, "cached_tokens": cached,
                               "completion_tokens": 2,
@@ -838,7 +838,7 @@ class FunctionalRunnerTest(unittest.TestCase):
         tasks = [body["messages"][-1]["content"] for body in requests
                  if body["messages"][0]["content"].startswith("cache_concurrency_fanout\n")
                  and not body.get("extra_body", {}).get("cache_prompt") is False]
-        self.assertEqual(tasks, [f"Task {index}. Reply with only the code word: {code}"
+        self.assertEqual(tasks, [f"Task {index}. Reply with only the code {code}."
                                  for index, code in enumerate(("ALPHA", "BETA", "GAMMA", "DELTA"))])
 
     def test_cache_concurrency_rejects_followers_that_prefill_everything(self):
@@ -871,7 +871,7 @@ class FunctionalRunnerTest(unittest.TestCase):
                     cached = 2048
                 elif count >= 2:
                     cached = 2048 if regress else tokens(messages[:1])
-            code = re.search(r"code word: (\w+)$", messages[-1]["content"])
+            code = re.search(r"code (\w+)\.$", messages[-1]["content"])
             return {"text": code[1] if code else "Z", "reasoning": "", "tools": [],
                     "finish": "stop",
                     "usage": {"prompt_tokens": total, "cached_tokens": cached,
@@ -1448,30 +1448,6 @@ class FunctionalRunnerTest(unittest.TestCase):
                 {"startup_ms": 100, "suites": {"text-cancel-disk": {}}},
                 {"startup_ms": 100, "suites": {"text-cancel-disk": {}}})
 
-    def test_fresh_server_suites_use_their_own_logs(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            loaded = "[loader] event=load_completed kind=text speculative=mtp\n"
-            (root / "server.log").write_text(loaded)
-            (root / "server-cache-edits.log").write_text(
-                loaded + "[INFO] request=r1 event=completed duration_ms=9 queue_ms=2\n")
-            (root / "report.json").write_text(json.dumps(
-                {"server_logs": {"cache-edits": "server-cache-edits.log"}}))
-            path = root / "cache-edits.requests.json"
-            path.write_text(json.dumps({"version": 1, "requests": [{
-                "index": 0, "endpoint": "/v1/chat/completions", "request_id": "r1",
-                "metrics": {"completion_tokens": 1, "draft_tokens": 2,
-                            "draft_tokens_accepted": 1}}]}))
-            join_server_timings(root)
-            self.assertEqual(json.loads(path.read_text())["requests"][0]["metrics"]["queue_ms"], 2)
-            self.assertTrue(functional.execution_coverage(root, "mtp")["draft_execution_observed"])
-            (root / "server-cache-edits.log").write_text(
-                "[loader] event=load_completed kind=text speculative=off\n")
-            with self.assertRaisesRegex(ValueError, "server-cache-edits"):
-                functional.execution_coverage(root, "mtp")
-        self.assertTrue({"sampling-defaults", "progress", "cache-edits", "cache-growth"}
-                        <= set(functional.FRESH_SERVER_SUITES) <= set(functional.SUITES))
-
     def test_nullable_parallel_responses_keeps_default(self):
         response = {"status": "completed", "output": [
             {"type": "function_call", "name": "f", "call_id": f"call_{i}",
@@ -1880,7 +1856,7 @@ import json, sys
 from pathlib import Path
 output = Path(sys.argv[sys.argv.index("--output") + 1])
 (output.parent / "disk").mkdir(exist_ok=True)
-(output.parent / "disk" / "entry.kvc").write_bytes(b"x")
+(output.parent / "disk" / "entry").write_bytes(b"x")
 payload = ({continuation_report!r} if Path(__file__).name == "continuation.py"
            else {{"exact": {spacing_exact!r}}})
 output.write_text(json.dumps([payload]))

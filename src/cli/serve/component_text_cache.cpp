@@ -6,7 +6,6 @@
 #include <cstring>
 #include <mutex>
 #include <numeric>
-#include <optional>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -102,10 +101,8 @@ bool SameOwner(const std::shared_ptr<const void>& a,
 }
 class TransferBatch {
 public:
-  explicit TransferBatch(const ComponentCacheResources& resources)
-      : capacity_(resources.transfer_batch_size),
-        share_stream_(resources.transfers_share_stream) {
-    if (!capacity_ || capacity_ > jobs_.size())
+  explicit TransferBatch(std::size_t capacity) : capacity_(capacity) {
+    if (!capacity || capacity > jobs_.size())
       throw std::invalid_argument("invalid cache transfer batch size");
   }
   // Acquire returns null when the shared pool is momentarily exhausted. Settle
@@ -115,15 +112,6 @@ public:
   void Add(Acquire acquire, Submit submit) {
     if (size_ == capacity_)
       Finish();
-    if (share_stream_) {
-      if (!shared_)
-        shared_ = acquire();
-      if (!shared_)
-        throw std::runtime_error("component cache transfer pool exhausted");
-      auto completion = submit(*shared_);
-      jobs_[size_++].emplace(Job{nullptr, std::move(completion)});
-      return;
-    }
     auto stream = acquire();
     if (!stream && size_) {
       Finish();
@@ -149,12 +137,8 @@ private:
     std::unique_ptr<cache::Stream> stream;
     cache::Completion completion;
   };
-  // Every transfer of a shared-stream batch names this lease; the jobs
-  // settle before it is released.
-  std::unique_ptr<cache::Stream> shared_;
-  std::array<std::optional<Job>, 256> jobs_;
+  std::array<std::optional<Job>, 16> jobs_;
   std::size_t capacity_, size_{};
-  bool share_stream_;
 };
 class Events final : public cache::RetentionEventSink {
 public:
@@ -166,22 +150,10 @@ public:
               std::to_string(static_cast<unsigned>(e.action)) +
               " reason=" + std::to_string(static_cast<unsigned>(e.reason)) +
               " tokens=" + std::to_string(e.boundary) +
+              " purpose=" + std::to_string(static_cast<unsigned>(e.purpose)) +
               " rank=" + std::to_string(e.rank) +
               " unique_bytes_freed=" + std::to_string(e.unique_bytes_freed) +
-              " records=" + std::to_string(e.retained_records) +
               " ledger_bytes=" + std::to_string(e.ledger_bytes));
-      // A capacity refusal at admission refuses the captured copy, as one
-      // during capture does.
-      if (e.action == cache::RetentionAction::kRefused &&
-          (e.reason == cache::RetentionReason::kByteCapacity ||
-           e.reason == cache::RetentionReason::kRecordCapacity))
-        Logger::Info("cache",
-                     std::string("schema=component-cache-v1 "
-                                 "event=capture_refused reason=") +
-                         (e.reason == cache::RetentionReason::kByteCapacity
-                              ? "byte_capacity"
-                              : "entry_capacity") +
-                         " tokens=" + std::to_string(e.boundary));
     } catch (...) {
     }
   }
@@ -958,7 +930,7 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
         throw;
     }
   }
-  TransferBatch transfers(*cache->resources);
+  TransferBatch transfers(cache->resources->transfer_batch_size);
   for (auto& copy : copies) {
     const auto& r = copy.request;
     transfers.Add([&] { return cache->resources->stream(); },
@@ -1016,7 +988,7 @@ std::size_t ComponentTextCache::capacity() const noexcept {
 
 std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     std::span<const ContinuationToken> prompt,
-    const ContinuationCache::CancellationCheck& cancelled,
+    const std::function<bool()>& cancelled,
     std::shared_ptr<const TextPromptContext> context, bool reuse,
     std::size_t stable, bool stop_at_eos, bool persist) {
   if (cancelled && cancelled())
@@ -1025,8 +997,6 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
   cache::PrefixLookup found;
   Impl::Entry* entry = nullptr;
   std::optional<cache::BorrowedLocation> live;
-  // The checkpoint to restore in place into `entry`, if any.
-  std::shared_ptr<const cache::Checkpoint> in_place;
   std::size_t common = 0;
   {
     const std::lock_guard lock(impl_->mutex);
@@ -1045,25 +1015,6 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
       if (!selected_entry.busy) {
         entry = &selected_entry;
         live = location;
-      }
-    }
-    // A retry of the same conversation (swipe, regenerate) restores in place
-    // into the slot whose branch holds the checkpoint: it keeps the rows the
-    // slot still has and discards the reply after them.
-    if (!entry && found.selected && found.selected->checkpoint &&
-        impl_->resources->adapter->GetCapabilities().in_place_restore) {
-      const auto tokens = found.selected->checkpoint->Tokens();
-      for (auto& candidate : impl_->entries) {
-        auto& e = *candidate;
-        if (e.busy || !e.history ||
-            !e.history->Contains(found.selected->checkpoint->Id()) ||
-            (e.live && (e.live_tokens.size() < tokens.size() ||
-                        !std::equal(tokens.begin(), tokens.end(),
-                                    e.live_tokens.begin()))))
-          continue;
-        entry = &e;
-        in_place = found.selected->checkpoint;
-        break;
       }
     }
     if (!entry) {
@@ -1160,21 +1111,8 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     entry->busy = true;
     entry->used = ++impl_->clock;
     if (!live) {
-      // A new branch keeps captures still in flight on the old one from
-      // attaching. An in-place restore keeps the rows up to its checkpoint,
-      // so the durable ancestor that ends within them stays this slot's.
       entry->branch = std::make_shared<const std::uint8_t>(0);
-      if (entry->durable && in_place) {
-        const auto& kept = entry->durable->Manifest();
-        const auto tokens = in_place->Tokens();
-        if (kept.tokens.size() > tokens.size() ||
-            !std::equal(kept.tokens.begin(), kept.tokens.end(),
-                        tokens.begin()) ||
-            kept.input != At(input, kept.tokens.size()))
-          entry->durable.reset();
-      } else {
-        entry->durable.reset();
-      }
+      entry->durable.reset();
     }
     if (entry->live) {
       impl_->index.Erase(*entry->live);
@@ -1184,8 +1122,7 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
   }
   std::unique_ptr<Lease> lease;
   try {
-    auto slot =
-        in_place ? entry->slot->AcquireInPlace() : entry->slot->Acquire(live);
+    auto slot = entry->slot->Acquire(live);
     lease = std::make_unique<Lease>(std::make_unique<Lease::Impl>(
         impl_.get(), entry, std::move(slot), prompt, input, stable));
     auto& request = *lease->impl_;
@@ -1194,10 +1131,9 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     request.state->SetStopAtEos(stop_at_eos);
     impl_->runner->SetPromptContext(*request.state, context);
     const auto started = Clock::now();
-    // Cold Acquire has already reset the slot. In-place acquisition and live
-    // frontiers retain rows; attempted restores (or an unusable live
-    // frontier) can also dirty a cold slot.
-    bool clean = !live && !in_place;
+    // Cold Acquire has already reset the slot. Only an attempted restore (or
+    // an unusable live frontier) can require another reset before cold use.
+    bool clean = !live;
     // A frontier captured between prefill passes cannot select the next token
     // of a prompt that ends there; serve that prompt from a shallower boundary.
     const auto decodable = [&](std::size_t boundary) {
@@ -1213,10 +1149,17 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     bool restored = bool(live);
     if (live)
       request.cached = found.selected->boundary;
+    // Prefill continues a checkpoint exactly only from an aligned position.
+    // The complete prompt stays off the alignment for an unchanged retry,
+    // which continues it without prefill; a longer prompt takes an aligned
+    // boundary instead (TextRunnerCapabilities::prefill_alignment).
+    const std::size_t alignment = std::max<std::size_t>(
+        1, impl_->runner->Descriptor().capabilities.prefill_alignment);
     for (const auto& candidate : found.candidates) {
       if (restored || (cancelled && cancelled()))
         break;
-      if (candidate.live)
+      if (candidate.live || (candidate.boundary % alignment != 0 &&
+                             candidate.boundary < prompt.size()))
         continue;
       try {
         if (candidate.checkpoint) {
@@ -1224,33 +1167,9 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
           std::vector<cache::ComponentPosition> positions;
           for (const auto& c : checkpoint.Components())
             positions.push_back(c.position);
-          // Rows the slot still holds stay; only the rest are loaded.
-          std::vector<cache::ResidentRange> kept;
-          if (in_place && candidate.checkpoint == in_place)
-            for (auto range : impl_->resources->adapter->ResidentRows(
-                     request.slot.Execution(), positions)) {
-              const auto c = std::ranges::find_if(
-                  checkpoint.Components(),
-                  [&](const auto& x) { return x.descriptor.id == range.id; });
-              if (c == checkpoint.Components().end() ||
-                  !cache::HasRows(c->descriptor.kind))
-                continue;
-              range.first = std::max(
-                  range.first,
-                  cache::FirstChunkRow(c->descriptor, c->position.valid_rows));
-              range.end = std::min(range.end, c->position.valid_rows);
-              if (range.first < range.end)
-                kept.push_back(range);
-            }
-          const auto kept_for = [&](cache::ComponentId id) {
-            const auto k =
-                std::ranges::find(kept, id, &cache::ResidentRange::id);
-            return k == kept.end() ? std::optional<cache::ResidentRange>{}
-                                   : std::optional{*k};
-          };
           clean = false;
           impl_->resources->adapter->BeginRestore(request.slot.Execution(),
-                                                  positions, kept);
+                                                  positions);
           // Every pin outlives all submitted loads, including failure drain.
           // Borrowed views name immutable native rows; materialized views name
           // assigned host backing. No source slot execution lease is needed.
@@ -1270,7 +1189,7 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
             if (c.tail)
               pins.push_back(c.tail->PinRows());
           }
-          TransferBatch transfers(*impl_->resources);
+          TransferBatch transfers(impl_->resources->transfer_batch_size);
           std::size_t base = 0;
           for (const auto& c : checkpoint.Components()) {
             auto load = [&](const cache::RowPin& pin, cache::Rows first,
@@ -1299,36 +1218,6 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
             };
             if (c.private_state)
               load(pins[base++], 0, 0);
-            if (const auto k = kept_for(c.descriptor.id)) {
-              // Load each chunk and the tail around the kept rows.
-              const auto row = c.descriptor.row_bytes;
-              const auto around = [&](const cache::RowPin& pin,
-                                      cache::Rows first, cache::Rows end) {
-                for (const auto& [a, b] :
-                     {std::pair{first, std::min(end, k->first)},
-                      std::pair{std::max(first, k->end), end}}) {
-                  if (a >= b)
-                    continue;
-                  const std::span<const std::byte> buffer(
-                      pin.Bytes().data() + (a - first) * row, (b - a) * row);
-                  transfers.Add([&] { return impl_->resources->stream(); },
-                                [&, a, b, buffer](cache::Stream& stream) {
-                                  return impl_->resources->adapter->CopyRowsIn(
-                                      request.slot.Execution(), c.descriptor.id,
-                                      a, b, buffer, stream);
-                                });
-                  request.restored += buffer.size();
-                }
-              };
-              for (const auto& chunk : c.chunks)
-                around(pins[base++], chunk.First(), chunk.End());
-              if (c.tail)
-                around(pins[base++],
-                       c.position.valid_rows / c.descriptor.rows_per_chunk *
-                           c.descriptor.rows_per_chunk,
-                       c.position.valid_rows);
-              continue;
-            }
             auto same_source = [](const cache::RowPin& a,
                                   const cache::RowPin& b) {
               if (a.Location() || b.Location())
@@ -1434,26 +1323,16 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
         if (restored) {
           request.cached = candidate.boundary;
           const std::lock_guard lock(impl_->mutex);
-          // The in-place checkpoint without a file of its own leaves the
-          // slot's earlier ancestor, which ends within the kept rows.
-          if (candidate.durable ||
-              !(in_place && candidate.checkpoint == in_place))
-            entry->durable = candidate.durable;
+          entry->durable = candidate.durable;
         }
       } catch (...) {
         if (!impl_->resources->adapter->Invalidate(request.slot.Execution()))
           throw;
         clean = true;
         request.restored = 0;
-        const std::lock_guard lock(impl_->mutex);
-        entry->durable.reset();
       }
     }
     if (!restored) {
-      {
-        const std::lock_guard lock(impl_->mutex);
-        entry->durable.reset();
-      }
       if (!clean &&
           !impl_->resources->adapter->Invalidate(request.slot.Execution()))
         throw std::runtime_error("component cold initialization failed");
@@ -1518,6 +1397,8 @@ std::optional<TextPendingPublication> ComponentTextCache::PendingPublication(
   if (!impl_->queue)
     return std::nullopt;
   const auto input = Inputs(prompt.size(), context);
+  const std::size_t alignment = std::max<std::size_t>(
+      1, impl_->runner->Descriptor().capabilities.prefill_alignment);
   const std::lock_guard lock(impl_->mutex);
   const auto found =
       impl_->index.Lookup({impl_->identity, prompt, input, 0, true});
@@ -1530,7 +1411,9 @@ std::optional<TextPendingPublication> ComponentTextCache::PendingPublication(
     if (checkpoint_id && id != checkpoint_id)
       continue;
     const auto& tokens = capture->manifest.tokens;
+    // Acquire skips an unaligned checkpoint below the prompt end.
     if (tokens.size() > prompt.size() ||
+        (tokens.size() % alignment != 0 && tokens.size() < prompt.size()) ||
         capture->manifest.input != At(input, tokens.size()) ||
         !std::equal(tokens.begin(), tokens.end(), prompt.begin()))
       continue;
@@ -1754,7 +1637,7 @@ std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
                   throw;
               }
             }
-            TransferBatch transfers(*cache.resources);
+            TransferBatch transfers(cache.resources->transfer_batch_size);
             for (std::size_t i = 0; i < payloads.size();) {
               if (!borrowed[i].empty()) {
                 ++i;
@@ -1953,11 +1836,6 @@ std::vector<std::size_t> ComponentTextCache::Lease::PlannedCaptures(
       boundaries.push_back(capture.boundary);
   return boundaries;
 }
-std::vector<std::size_t> ServingCacheLease::PlannedCaptures(
-    std::size_t stable) const {
-  return component_->PlannedCaptures(stable);
-}
-
 ComponentCacheMetrics ComponentTextCache::Lease::Metrics() const {
   auto report = impl_->metrics;
   report.ledger = impl_->cache->ledger.Snapshot();
@@ -1976,62 +1854,5 @@ ComponentCacheMetrics ComponentTextCache::Lease::Metrics() const {
   }
   return report;
 }
-std::optional<ComponentCacheMetrics> ServingCacheLease::Metrics() const {
-  return component_ ? std::optional(component_->Metrics()) : std::nullopt;
-}
 
-#define FORWARD_RESULT(type, name, qualifiers, args, call)         \
-  type ServingCacheLease::name args qualifiers {                   \
-    return component_ ? component_->name call : legacy_.name call; \
-  }
-FORWARD_RESULT(ContinuationState&, state, const, (), ())
-FORWARD_RESULT(bool, cache_hit, const noexcept, (), ())
-FORWARD_RESULT(std::size_t, cached_tokens, const noexcept, (), ())
-FORWARD_RESULT(std::size_t, restored_snapshot_bytes, const noexcept, (), ())
-FORWARD_RESULT(double, restore_ms, const noexcept, (), ())
-FORWARD_RESULT(bool, restored_from_disk, const noexcept, (), ())
-FORWARD_RESULT(ContinuationLookup, lookup, const noexcept, (), ())
-FORWARD_RESULT(bool, HasSnapshotFor, const,
-               (std::span<const ContinuationToken> tokens), (tokens))
-FORWARD_RESULT(bool, TryReserveSnapshot, ,
-               (std::size_t bytes, std::size_t boundary, bool preserve,
-                SnapshotPurpose purpose,
-                std::span<const ContinuationToken> tokens),
-               (bytes, boundary, preserve, purpose, tokens))
-FORWARD_RESULT(void, SkipSnapshot, noexcept,
-               (SnapshotEventReason reason, std::size_t bytes,
-                std::size_t boundary),
-               (reason, bytes, boundary))
-FORWARD_RESULT(std::size_t, PublishSnapshot, ,
-               (std::vector<ContinuationToken> tokens,
-                std::shared_ptr<const ContinuationSnapshot> snapshot,
-                bool preserve),
-               (std::move(tokens), std::move(snapshot), preserve))
-FORWARD_RESULT(std::size_t, Commit, ,
-               (std::vector<ContinuationToken> tokens,
-                std::shared_ptr<const ContinuationSnapshot> snapshot,
-                std::vector<ContinuationToken> live),
-               (std::move(tokens), std::move(snapshot), std::move(live)))
-FORWARD_RESULT(void, Invalidate, noexcept, (), ())
-#undef FORWARD_RESULT
-void ServingCacheLease::AdoptRestoredPrefix(std::size_t tokens,
-                                            std::size_t bytes, double ms) {
-  if (component_)
-    throw std::logic_error("component restore is owned by the component cache");
-  legacy_.AdoptRestoredPrefix(tokens, bytes, ms);
-}
-void ServingCacheLease::PreparePrefill(std::size_t tokens) {
-  if (component_)
-    component_->PreparePrefill(tokens);
-}
-
-std::size_t ServingCacheLease::CaptureBytes() const {
-  return component_->CaptureBytes();
-}
-std::size_t ServingCacheLease::CaptureBytes(std::size_t boundary) const {
-  return component_->CaptureBytes(boundary);
-}
-std::unique_ptr<TextRunnerSnapshot> ServingCacheLease::Capture() {
-  return component_->Capture();
-}
 }  // namespace gufo::server

@@ -6,7 +6,6 @@ import time
 import openai
 
 from metrics import validate_tool_events
-from templates import HIDES_NON_STRING_CONST, MAY_SKIP_THINKING
 
 
 TEXT = (
@@ -32,7 +31,7 @@ FUNCTION = {
 }
 
 
-def request(model, api, thinking=False, preset=None):
+def request(model, api, thinking=False):
     prompt = (
         "Call record exactly once, with text, count, and values matching the "
         "constants in its schema. Keep all literal characters. No visible prose."
@@ -44,10 +43,6 @@ def request(model, api, thinking=False, preset=None):
             "Call record exactly once. Its arguments are fixed by the constants "
             "in its schema; copy them exactly in the call. No visible prose."
         )
-    if preset in HIDES_NON_STRING_CONST:
-        # The template cannot show these constants (templates.py). Bare
-        # words: JSON quotes would leak into a key of the call syntax.
-        prompt += " count is 42 and values is [true, null, {key: value}]."
     common = dict(model=model, temperature=0)
     if api == "chat":
         return {**common, "messages": [{"role": "user", "content": prompt}],
@@ -163,10 +158,10 @@ def analyze(api, events, arrivals):
                 fragments=fragments, terminal_ms=arrivals[-1])
 
 
-def check_tool_streaming(client, model, checks, chat_result, preset=None):
+def check_tool_streaming(client, model, checks, chat_result):
     for api in ("chat", "responses", "messages"):
         for thinking in (False, True):
-            body = request(model, api, thinking, preset)
+            body = request(model, api, thinking)
             result = collect(client, api, body)
             checks[f"tool_streaming_{api}_{'thinking' if thinking else 'plain'}"] = result
             assert result["finish"] == {
@@ -174,12 +169,11 @@ def check_tool_streaming(client, model, checks, chat_result, preset=None):
             assert len(result["arguments"]) == 1, result
             assert json.loads(result["arguments"][0]) == EXPECTED, result
             assert not result["content"].strip(), result
-            if not thinking or preset not in MAY_SKIP_THINKING:
-                assert bool(result["reasoning"].strip()) == thinking, result
+            assert bool(result["reasoning"].strip()) == thinking, result
             assert len(result["fragments"]) > 3, ("tool arguments were buffered", result)
             assert result["fragments"][0]["ms"] < result["fragments"][-1]["ms"] < result["terminal_ms"], result
 
-        body = request(model, api, preset=preset)
+        body = request(model, api)
         phase = "limited" if api == "responses" else "stopped"
         if api == "responses":
             # Responses has no stop-sequence request field.
@@ -205,7 +199,7 @@ def check_tool_streaming(client, model, checks, chat_result, preset=None):
         assert set(resumed["identifiers"]).isdisjoint(result["identifiers"]), resumed
 
     # Byte limits interrupt argument generation; the next request starts cleanly.
-    body = request(model, "chat", preset=preset)
+    body = request(model, "chat")
     limited = chat_result(client, {**body, "max_completion_tokens": 32}, True)
     checks["tool_streaming_length"] = limited
     assert limited["finish"] == "length" and limited.get("partial_tools"), limited
@@ -215,7 +209,7 @@ def check_tool_streaming(client, model, checks, chat_result, preset=None):
     assert json.loads(restored["tools"][0]["function"]["arguments"]) == EXPECTED, restored
 
     for thinking in (False, True):
-        body = request(model, "chat", thinking, preset)
+        body = request(model, "chat", thinking)
         received, reasoning = "", ""
         with client.chat.completions.create(**body, stream=True) as stream:
             for chunk in stream:
@@ -231,8 +225,7 @@ def check_tool_streaming(client, model, checks, chat_result, preset=None):
                 raise AssertionError("no partial argument reached the cancelling client")
         checks[f"tool_streaming_cancel_{thinking}"] = {
             "partial_arguments": received, "reasoning": reasoning}
-        if not thinking or preset not in MAY_SKIP_THINKING:
-            assert bool(reasoning.strip()) == thinking, reasoning
+        assert bool(reasoning.strip()) == thinking, reasoning
         resumed = chat_result(client, body, True)
         checks[f"tool_streaming_after_cancel_{thinking}"] = resumed
         assert resumed["finish"] == "tool_calls" and len(resumed["tools"]) == 1, resumed

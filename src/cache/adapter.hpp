@@ -51,12 +51,11 @@ public:
   [[nodiscard]] virtual bool ExecutionComplete() const noexcept { return true; }
 };
 
-// Rows [first, end) of a component that a slot still holds exactly as its
-// current execution branch computed or restored them.
-struct ResidentRange {
-  ComponentId id;
-  Rows first{}, end{};
-  bool operator==(const ResidentRange&) const = default;
+// One pinned-host backing class: block size, block count and per-block host
+// metadata. Models own the arithmetic that fills it; the backing provider
+// commits what the plan asks for.
+struct BackingClass {
+  std::size_t block_bytes{}, blocks{}, metadata_bytes{};
 };
 
 class Adapter {
@@ -67,6 +66,13 @@ public:
   Adapter& operator=(const Adapter&) = delete;
   Adapter(Adapter&&) = delete;
   Adapter& operator=(Adapter&&) = delete;
+  // Host backing classes this adapter needs for `ram_bytes`. Adapters with
+  // pinned backing override it; the default reports none, so a resource
+  // provider rejects the adapter instead of downcasting it to a model type.
+  [[nodiscard]] virtual std::vector<BackingClass> BackingPlan(
+      std::size_t) const {
+    return {};
+  }
   [[nodiscard]] virtual Capabilities GetCapabilities() const = 0;
   // Descriptors are stable for the adapter lifetime; each ID is unique.
   [[nodiscard]] virtual std::span<const ComponentDescriptor> Components()
@@ -93,24 +99,6 @@ public:
   // allow loads. Refuse if any slot transfer is pending or failure is latched.
   // After success, CopyRowsIn/LoadPrivate need no further preservation waits.
   virtual void BeginRestore(Slot&, std::span<const ComponentPosition>) = 0;
-  // In-place restore of a checkpoint the slot's current branch captured or
-  // was restored from. Of the row ranges below `positions`, those the slot
-  // still holds unchanged: rows past them may have been rewritten or evicted
-  // since. Pure host query on an idle slot; empty refuses in-place restore.
-  [[nodiscard]] virtual std::vector<ResidentRange> ResidentRows(
-      const Slot&, std::span<const ComponentPosition>) const {
-    return {};
-  }
-  // BeginRestore that keeps `kept` (a subset of ResidentRows) in place: it
-  // guards and expects loads only for the other rows and the private state,
-  // and Validate counts kept rows as covered.
-  virtual void BeginRestore(Slot& slot,
-                            std::span<const ComponentPosition> positions,
-                            std::span<const ResidentRange> kept) {
-    if (!kept.empty())
-      throw std::logic_error("adapter cannot restore in place");
-    BeginRestore(slot, positions);
-  }
 
   // Transfers touch exactly the supplied range/buffer. Private state is copied
   // whole; append rows use component-specific positions, never prompt length.

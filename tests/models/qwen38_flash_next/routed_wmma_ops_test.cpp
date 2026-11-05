@@ -261,66 +261,6 @@ Experts MakeQ8_0(std::size_t e, std::size_t m, std::size_t k,
   return w;
 }
 
-constexpr std::int8_t kIq4Values[16] = {-127, -104, -83, -65, -49, -35, -22, -10,
-                                        1,    13,   25,  38,  53,  69,  89,  113};
-
-/// Random IQ4_NL blocks: d, then 16 nibble bytes (low = elements 0..15).
-Experts MakeIQ4NL(std::size_t e, std::size_t m, std::size_t k,
-                  std::uint32_t seed) {
-  Experts w;
-  const std::size_t blocks = e * m * (k / 32);
-  w.packed.resize(blocks * 18);
-  w.values.resize(e * m * k);
-  for (std::size_t b = 0; b < blocks; ++b) {
-    std::uint8_t* blk = w.packed.data() + b * 18;
-    const __half d = __float2half(Uniform(&seed, 0.02F) + 0.03F);
-    std::memcpy(blk, &d, 2);
-    const float df = __half2float(d);
-    for (int j = 0; j < 16; ++j) {
-      const auto q = static_cast<std::uint8_t>(NextRandom(&seed) & 0xFF);
-      blk[2 + j] = q;
-      w.values[b * 32 + j] = df * kIq4Values[q & 15];
-      w.values[b * 32 + j + 16] = df * kIq4Values[q >> 4];
-    }
-  }
-  return w;
-}
-
-/// Random IQ4_XS superblocks with the real 6-bit sub-block scale packing.
-Experts MakeIQ4XS(std::size_t e, std::size_t m, std::size_t k,
-                  std::uint32_t seed) {
-  Experts w;
-  const std::size_t blocks = e * m * (k / 256);
-  w.packed.resize(blocks * 136);
-  w.values.resize(e * m * k);
-  for (std::size_t b = 0; b < blocks; ++b) {
-    std::uint8_t* blk = w.packed.data() + b * 136;
-    const __half d = __float2half(Uniform(&seed, 0.0005F) + 0.001F);
-    std::memcpy(blk, &d, 2);
-    const float df = __half2float(d);
-    std::uint16_t scales_h = 0;
-    std::uint8_t scales_l[4] = {};
-    int ls[8];
-    for (int ib = 0; ib < 8; ++ib) {
-      ls[ib] = static_cast<int>(NextRandom(&seed) % 64);
-      scales_l[ib / 2] |= static_cast<std::uint8_t>((ls[ib] & 15) << (4 * (ib % 2)));
-      scales_h |= static_cast<std::uint16_t>((ls[ib] >> 4) << (2 * ib));
-    }
-    std::memcpy(blk + 2, &scales_h, 2);
-    std::memcpy(blk + 4, scales_l, 4);
-    for (int ib = 0; ib < 8; ++ib) {
-      const float dl = df * static_cast<float>(ls[ib] - 32);
-      for (int j = 0; j < 16; ++j) {
-        const auto q = static_cast<std::uint8_t>(NextRandom(&seed) & 0xFF);
-        blk[8 + 16 * ib + j] = q;
-        w.values[b * 256 + 32 * ib + j] = dl * kIq4Values[q & 15];
-        w.values[b * 256 + 32 * ib + j + 16] = dl * kIq4Values[q >> 4];
-      }
-    }
-  }
-  return w;
-}
-
 struct Result {
   double vs_mmq;
   double vs_ref;
@@ -334,8 +274,6 @@ const char* TypeName(q::WeightType type) {
   return type == q::WeightType::kQ4_K   ? "Q4_K"
          : type == q::WeightType::kQ5_K ? "Q5_K"
          : type == q::WeightType::kQ5_1 ? "Q5_1"
-         : type == q::WeightType::kIQ4_NL ? "IQ4_NL"
-         : type == q::WeightType::kIQ4_XS ? "IQ4_XS"
                                         : "Q8_0";
 }
 
@@ -351,8 +289,6 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
       type == q::WeightType::kQ4_K   ? MakeQ4K(experts, m, k, seed)
       : type == q::WeightType::kQ5_K ? MakeQ5K(experts, m, k, seed)
       : type == q::WeightType::kQ5_1 ? MakeQ5_1(experts, m, k, seed)
-      : type == q::WeightType::kIQ4_NL ? MakeIQ4NL(experts, m, k, seed)
-      : type == q::WeightType::kIQ4_XS ? MakeIQ4XS(experts, m, k, seed)
                                      : MakeQ8_0(experts, m, k, seed);
   const std::size_t slots = n_tokens * used;
   // Skewed top-k without replacement: the low experts see most rows.
@@ -399,8 +335,6 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
   const auto mmq_raw = type == q::WeightType::kQ4_K   ? qfn_mmq_q4_K_moe_raw
                        : type == q::WeightType::kQ5_K ? qfn_mmq_q5_K_moe_raw
                        : type == q::WeightType::kQ5_1 ? qfn_mmq_q5_1_moe_raw
-                       : type == q::WeightType::kIQ4_NL ? qfn_mmq_iq4_nl_moe_raw
-                       : type == q::WeightType::kIQ4_XS ? qfn_mmq_iq4_xs_moe_raw
                                                       : qfn_mmq_q8_0_moe_raw;
   const int rc =
       mmq_raw(d_w, d_x, d_ids, d_mmq, static_cast<int>(m), static_cast<int>(k),
@@ -442,13 +376,21 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
   for (std::size_t i = 0; i < x.size(); ++i) {
     x_half[i] = __float2half(x[i]);
   }
-  std::vector<std::int32_t> tiles;
-  for (std::size_t e = 0; e < experts; ++e) {
-    const std::uint32_t padded = (counts[e] + 15u) / 16u * 16u;
-    for (std::uint32_t j = 0; j < (padded + tile_rows - 1) / tile_rows; ++j) {
-      tiles.push_back(static_cast<std::int32_t>(e | (j << 16)));
+  // The 128-row tile is the wide down projection (F16 output only): the F32
+  // output comes from 48-row tiles, so the F16 check below compares the two
+  // tile heights bit for bit.
+  const std::uint32_t f32_rows = tile_rows == 128 ? 48 : tile_rows;
+  const auto tile_map = [&](std::uint32_t rows) {
+    std::vector<std::int32_t> map;
+    for (std::size_t e = 0; e < experts; ++e) {
+      const std::uint32_t padded = (counts[e] + 15u) / 16u * 16u;
+      for (std::uint32_t j = 0; j < (padded + rows - 1) / rows; ++j)
+        map.push_back(static_cast<std::int32_t>(e | (j << 16)));
     }
-  }
+    return map;
+  };
+  const std::vector<std::int32_t> tiles = tile_map(f32_rows);
+  const std::vector<std::int32_t> half_tiles = tile_map(tile_rows);
   __half* d_x_half = nullptr;
   CheckHip(hipMalloc(&d_x_half, x_half.size() * sizeof(__half)),
            "exact F16 input allocation");
@@ -456,9 +398,10 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
                      hipMemcpyHostToDevice),
            "F16 input upload");
   std::int32_t* d_tiles = Upload(tiles);
+  std::int32_t* d_half_tiles = Upload(half_tiles);
   float* d_f16 = Upload(zero_out);
   if (!q::RoutedF16Gemm(d_w, type, d_x_half, d_tiles,
-                        static_cast<std::uint32_t>(tiles.size()), tile_rows,
+                        static_cast<std::uint32_t>(tiles.size()), f32_rows,
                         d_bounds, d_rows_token, d_rows_slot, nullptr, d_f16,
                         nullptr, m, k, nullptr)) {
     throw std::runtime_error("routed F16 GEMM rejected the shape");
@@ -469,39 +412,16 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
   const __half half_guard = __float2half(123.0F);
   __half* d_f16_half =
       Upload(std::vector<__half>(slots * m + kHalfGuard, half_guard));
-  if (!q::RoutedF16Gemm(d_w, type, d_x_half, d_tiles,
-                        static_cast<std::uint32_t>(tiles.size()), tile_rows,
-                        d_bounds, d_rows_token, d_rows_slot, nullptr, nullptr,
-                        d_f16_half, m, k, nullptr)) {
+  if (!q::RoutedF16Gemm(d_w, type, d_x_half, d_half_tiles,
+                        static_cast<std::uint32_t>(half_tiles.size()),
+                        tile_rows, d_bounds, d_rows_token, d_rows_slot, nullptr,
+                        nullptr, d_f16_half, m, k, nullptr)) {
     throw std::runtime_error("routed F16 GEMM (F16 out) rejected the shape");
   }
   CheckHip(hipDeviceSynchronize(), "routed GEMMs");
   const auto mmq = Download(d_mmq, slots * m);
   const auto f16 = Download(d_f16, slots * m);
   const auto f16_half = Download(d_f16_half, slots * m);
-  if (tile_rows == 64) {
-    std::vector<std::int32_t> narrow_tiles;
-    for (std::size_t e = 0; e < experts; ++e) {
-      const std::uint32_t padded = (counts[e] + 15u) / 16u * 16u;
-      for (std::uint32_t j = 0; j < (padded + 47u) / 48u; ++j) {
-        narrow_tiles.push_back(static_cast<std::int32_t>(e | (j << 16)));
-      }
-    }
-    auto* d_narrow_tiles = Upload(narrow_tiles);
-    if (!q::RoutedF16Gemm(d_w, type, d_x_half, d_narrow_tiles,
-                          static_cast<std::uint32_t>(narrow_tiles.size()), 48,
-                          d_bounds, d_rows_token, d_rows_slot, nullptr, d_f16,
-                          nullptr, m, k, nullptr)) {
-      throw std::runtime_error("routed reference tile rejected");
-    }
-    CheckHip(hipDeviceSynchronize(), "routed tile comparison");
-    const auto narrow = Download(d_f16, slots * m);
-    if (std::memcmp(narrow.data(), f16.data(), f16.size() * sizeof(float)) !=
-        0) {
-      throw std::runtime_error("routed tile widths change output bits");
-    }
-    CheckHip(hipFree(d_narrow_tiles), "free reference tiles");
-  }
   for (std::size_t i = 0; i < slots * m; ++i) {
     const __half expected = __float2half(f16[i]);
     if (std::memcmp(&expected, &f16_half[i], sizeof(__half)) != 0) {
@@ -516,20 +436,13 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
 
   // Prefill pairs gate/up for buckets the separate 16- and 48-row tiles take.
   if ((tile_rows == 16 || tile_rows == 48) &&
-      (type == q::WeightType::kQ4_K || type == q::WeightType::kQ5_K ||
-       type == q::WeightType::kIQ4_XS)) {
+      (type == q::WeightType::kQ4_K || type == q::WeightType::kQ5_K)) {
     // Different gate/up weights, with the up scale small enough that these
     // deliberately large synthetic weights do not overflow the F16 output.
     auto up = w.packed;
-    // IQ4_XS carries one superblock scale (d); the K-quants carry d and dmin.
-    const bool iq4 = type == q::WeightType::kIQ4_XS;
-    const std::size_t block_bytes = type == q::WeightType::kQ4_K ? 144
-                                    : iq4                        ? 136
-                                                                 : 176;
+    const std::size_t block_bytes = type == q::WeightType::kQ4_K ? 144 : 176;
     for (std::size_t b = 0; b < up.size(); b += block_bytes) {
       for (std::size_t offset : {0U, 2U}) {
-        if (iq4 && offset != 0)
-          continue;
         __half scale;
         std::memcpy(&scale, up.data() + b + offset, sizeof(scale));
         scale = __float2half(__half2float(scale) / 1024.0F);
@@ -635,13 +548,14 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
             << r.vs_ref << ", worst |MMQ - F64| " << r.mmq_vs_ref
             << ", MMQ NMSE " << r.mmq_sq_error / r.ref_sq << " (scale "
             << r.scale << ", widest bucket " << max_bucket << ")\n";
-  for (void* p : {static_cast<void*>(d_w), static_cast<void*>(d_x),
-                  static_cast<void*>(d_ids), static_cast<void*>(d_counts),
-                  static_cast<void*>(d_bounds), static_cast<void*>(d_cursors),
-                  static_cast<void*>(d_rows_token),
-                  static_cast<void*>(d_rows_slot), static_cast<void*>(d_mmq),
-                  static_cast<void*>(d_x_half), static_cast<void*>(d_tiles),
-                  static_cast<void*>(d_f16), static_cast<void*>(d_f16_half)}) {
+  for (void* p :
+       {static_cast<void*>(d_w), static_cast<void*>(d_x),
+        static_cast<void*>(d_ids), static_cast<void*>(d_counts),
+        static_cast<void*>(d_bounds), static_cast<void*>(d_cursors),
+        static_cast<void*>(d_rows_token), static_cast<void*>(d_rows_slot),
+        static_cast<void*>(d_mmq), static_cast<void*>(d_x_half),
+        static_cast<void*>(d_tiles), static_cast<void*>(d_half_tiles),
+        static_cast<void*>(d_f16), static_cast<void*>(d_f16_half)}) {
     (void)hipFree(p);
   }
   return r;
@@ -769,8 +683,7 @@ void CheckVectorGrouping(bool down = false) {
   const std::vector<q::WeightType> formats =
       down ? std::vector{q::WeightType::kQ5_1, q::WeightType::kQ8_0}
            : std::vector{q::WeightType::kQ4_K, q::WeightType::kQ5_K,
-                         q::WeightType::kQ5_1, q::WeightType::kQ8_0,
-                         q::WeightType::kIQ4_XS};
+                         q::WeightType::kQ5_1, q::WeightType::kQ8_0};
   std::vector<float> x(tokens * cols);
   std::uint32_t seed = 37;
   // Mix ordinary and small activations: saturated SwiGLU alone misses
@@ -800,12 +713,10 @@ void CheckVectorGrouping(bool down = false) {
     } else {
       weights = {
           MakeQ4K(experts, rows, cols, 11), MakeQ5K(experts, rows, cols, 13),
-          MakeQ5_1(experts, rows, cols, 17), MakeQ8_0(experts, rows, cols, 23),
-          MakeIQ4XS(experts, rows, cols, 29)};
+          MakeQ5_1(experts, rows, cols, 17), MakeQ8_0(experts, rows, cols, 23)};
       paired_weights = {
           MakeQ4K(experts, rows, cols, 71), MakeQ5K(experts, rows, cols, 73),
-          MakeQ5_1(experts, rows, cols, 79), MakeQ8_0(experts, rows, cols, 83),
-          MakeIQ4XS(experts, rows, cols, 89)};
+          MakeQ5_1(experts, rows, cols, 79), MakeQ8_0(experts, rows, cols, 83)};
     }
     const std::size_t count = tokens * used * rows;
     const std::vector<float> dirty(count + 2 * guard, poison);
@@ -897,8 +808,7 @@ void CheckVectorGrouping(bool down = false) {
       }
       if (formats[f] == q::WeightType::kQ4_K ||
           formats[f] == q::WeightType::kQ5_K ||
-          formats[f] == q::WeightType::kQ8_0 ||
-          formats[f] == q::WeightType::kIQ4_XS) {
+          formats[f] == q::WeightType::kQ8_0) {
         // Compare the fused vector path with the original GPU SwiGLU too:
         // inactive experts, nonfinite scales and a ragged last row must
         // retain their exact values and output guards.
@@ -1222,16 +1132,21 @@ std::vector<__half> RoutedDown(const Routing& r, const void* w,
 }
 
 /// A prompt row's expert outputs must not depend on the pass that computes
-/// it: the wide prefill pass (paired 128-row gate/up tiles, 64-row down
-/// tiles over every token) against short passes over the last tokens alone
-/// (separate 16- or 48-row tiles), and every separate tile height against
-/// the paired route, bit for bit. Model shapes (640 x 2560 gate/up, top-10,
-/// ragged buckets over many experts; 2560 x 640 down).
-bool CheckPassRoutes(q::WeightType gate_type, q::WeightType down_type) {
+/// it: the wide prefill pass (paired gate/up and down, 128-row tiles over
+/// every token) against short passes over some tokens alone (up to eight
+/// rows: separate 16-row tiles; more: the wide routes again, and the 48-row
+/// separate tiles), and every separate tile height against the paired route,
+/// bit for bit. Model shapes (640 x 2560 gate/up, top-10, ragged buckets
+/// over many experts; 2560 x 640 down).
+bool CheckPassRoutes(q::WeightType gate_type, q::WeightType down_type,
+                     const std::vector<std::uint8_t>* gate_bytes = nullptr,
+                     const std::vector<std::uint8_t>* up_bytes = nullptr,
+                     std::size_t experts = 128) {
   constexpr std::size_t m = 640, k = 2560, used = 10, n_tokens = 1619;
-  constexpr std::size_t experts = 128;
-  const auto gate = MakePacked(gate_type, experts, m, k, 0xA11CE);
-  const auto up = MakePacked(gate_type, experts, m, k, 0xB0B0);
+  const auto gate =
+      gate_bytes ? *gate_bytes : MakePacked(gate_type, experts, m, k, 0xA11CE);
+  const auto up =
+      up_bytes ? *up_bytes : MakePacked(gate_type, experts, m, k, 0xB0B0);
   const auto down = MakePacked(down_type, experts, k, m, 0xD0D0);
   auto* d_gate = Upload(gate);
   auto* d_up = Upload(up);
@@ -1267,32 +1182,46 @@ bool CheckPassRoutes(q::WeightType gate_type, q::WeightType down_type) {
          ok;
   }
   auto* d_act = Upload(paired);
-  const auto wide_down = RoutedDown(all, d_down, down_type, d_act, k, m, 64);
+  const auto wide_down = RoutedDown(all, d_down, down_type, d_act, k, m, 128);
   for (std::uint32_t tile : {16U, 48U}) {
     ok = CountDiffs(wide_down, 0,
                     RoutedDown(all, d_down, down_type, d_act, k, m, tile), k,
-                    name + " down 64 vs " + std::to_string(tile)) == 0 &&
+                    name + " down 128 vs " + std::to_string(tile)) == 0 &&
          ok;
   }
-  // Short passes: a restored prompt's tail, and a ragged middle chunk.
-  for (const auto [first, count, tile] :
-       {std::array<std::size_t, 3>{n_tokens - 7, 7, 16},
-        std::array<std::size_t, 3>{n_tokens - 1, 1, 16},
-        std::array<std::size_t, 3>{300, 33, 48}}) {
+  // Short passes: a restored prompt's tail, ragged middle chunks, and the
+  // smallest wide passes.
+  for (const auto [first, count] : {std::array<std::size_t, 2>{n_tokens - 7, 7},
+                                    std::array<std::size_t, 2>{n_tokens - 1, 1},
+                                    std::array<std::size_t, 2>{n_tokens - 9, 9},
+                                    std::array<std::size_t, 2>{300, 33},
+                                    std::array<std::size_t, 2>{701, 95},
+                                    std::array<std::size_t, 2>{1000, 96}}) {
     const Routing part(ids, first, count, used, experts);
-    const auto gated =
-        SeparateSwiglu(part, d_gate, d_up, gate_type, d_x + first * k, m, k,
-                       static_cast<std::uint32_t>(tile));
     const std::string what = name + " " + std::to_string(count) +
                              "-token pass at " + std::to_string(first);
+    const std::uint32_t tile = count <= 8 ? 16 : 48;
+    const auto gated = SeparateSwiglu(part, d_gate, d_up, gate_type,
+                                      d_x + first * k, m, k, tile);
     ok = CountDiffs(paired, first * used, gated, m, what + " gate/up") == 0 &&
          ok;
-    const auto short_down =
-        RoutedDown(part, d_down, down_type, d_act + first * used * m, k, m,
-                   static_cast<std::uint32_t>(tile));
+    const auto short_down = RoutedDown(part, d_down, down_type,
+                                       d_act + first * used * m, k, m, tile);
     ok = CountDiffs(wide_down, first * used, short_down, k, what + " down") ==
              0 &&
          ok;
+    if (count > 8) {
+      ok = CountDiffs(paired, first * used,
+                      PairedSwiglu(part, d_gate, d_up, gate_type,
+                                   d_x + first * k, m, k),
+                      m, what + " paired gate/up") == 0 &&
+           ok;
+      ok = CountDiffs(wide_down, first * used,
+                      RoutedDown(part, d_down, down_type,
+                                 d_act + first * used * m, k, m, 128),
+                      k, what + " wide down") == 0 &&
+           ok;
+    }
   }
   for (void* p : {static_cast<void*>(d_gate), static_cast<void*>(d_up),
                   static_cast<void*>(d_down), static_cast<void*>(d_x),
@@ -1322,16 +1251,18 @@ int main() {
          ok;
     // Down view: single-expert slot rows, 2560 x 640 Q5_1.
     ok = Ok(Run(q::WeightType::kQ5_1, 3000, 1, 64, 2560, 640, 0x0BADF00DU,
-                64)) &&
+                128)) &&
          ok;
-    ok = Ok(Run(q::WeightType::kQ5_1, 97, 1, 8, 129, 640, 0x51516464U, 64)) &&
+    ok = Ok(Run(q::WeightType::kQ5_1, 97, 1, 8, 129, 640, 0x51516464U, 128)) &&
          ok;
     // Q5_K gate/up view (one layer).
     ok = Ok(Run(q::WeightType::kQ5_K, 300, 10, 64, 640, 2560, 0x5A5A0001U)) &&
          ok;
     // Q8_0 down view (five layers keep Q8_0 down projections).
     ok = Ok(Run(q::WeightType::kQ8_0, 3000, 1, 64, 2560, 640, 0x0C0FFEE0U,
-                64)) &&
+                128)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kQ8_0, 97, 1, 8, 129, 640, 0x0C0FFEE1U, 128)) &&
          ok;
     // Ragged rows against the 128-row tile and a tiny batch.
     ok = Ok(Run(q::WeightType::kQ4_K, 40, 4, 8, 201, 512, 0xDEADBEEFU)) && ok;
@@ -1354,22 +1285,6 @@ int main() {
          ok;
     ok = Ok(Run(q::WeightType::kQ8_0, 3000, 1, 64, 2560, 640, 0x16160004U,
                 16)) &&
-         ok;
-    // IQ4 formats (AtomicChat): IQ4_XS gate/up view, IQ4_NL down view, on
-    // the 48/64-row and the 16-row tiles.
-    ok = Ok(Run(q::WeightType::kIQ4_XS, 300, 10, 64, 640, 2560, 0x1A4A0001U)) &&
-         ok;
-    ok = Ok(Run(q::WeightType::kIQ4_XS, 300, 10, 64, 640, 2560, 0x1A4A0002U,
-                16)) &&
-         ok;
-    ok = Ok(Run(q::WeightType::kIQ4_XS, 40, 4, 8, 201, 512, 0x1A4A0003U)) && ok;
-    ok = Ok(Run(q::WeightType::kIQ4_NL, 3000, 1, 64, 2560, 640, 0x1A4E0001U,
-                64)) &&
-         ok;
-    ok = Ok(Run(q::WeightType::kIQ4_NL, 3000, 1, 64, 2560, 640, 0x1A4E0002U,
-                16)) &&
-         ok;
-    ok = Ok(Run(q::WeightType::kIQ4_NL, 97, 1, 8, 129, 640, 0x1A4E0003U, 64)) &&
          ok;
     return ok ? 0 : 1;
   } catch (const std::exception& error) {

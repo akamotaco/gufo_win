@@ -22,11 +22,6 @@ CODES = ("ALPHA", "BETA", "GAMMA", "DELTA")
 TAIL_ALLOWANCE = 96
 
 
-def skip_check(checks, name, reason):
-    checks[name] = {"skipped": reason}
-    print(f"SKIP {name}: {reason}", file=sys.stderr, flush=True)
-
-
 def system_prompt(label, lines):
     return (f"{label}\nReply with only the requested code word.\n" +
             "".join(f"Reference note {index}: the build uses CMake presets and every "
@@ -53,7 +48,7 @@ def abandon_request(client, body, delay):
 
 
 def check_cache_concurrency(client, model, checks, chat_result, concurrency,
-                            abandon=abandon_request, preset=None):
+                            abandon=abandon_request):
     failures = []
     width = max(2, min(concurrency, len(CODES)))
     request = dict(model=model, temperature=0, seed=31, max_completion_tokens=16,
@@ -105,16 +100,15 @@ def check_cache_concurrency(client, model, checks, chat_result, concurrency,
 
     # Sharing needs concurrent sessions and a runner that reuses prefixes.
     probe = [{"role": "system", "content": system_prompt("cache_concurrency_probe", 8)},
-             {"role": "user", "content": "Reply with only the code word: ALPHA"}]
+             {"role": "user", "content": "Reply with only the code ALPHA."}]
     chat("probe_cold", body_for(probe))
     reuse = chat("probe_warm", body_for(probe))["usage"]["cached_tokens"] > 0
     sharing = reuse and concurrency > 1
 
-    def group(label, conversations, codes, share, streaming=(), answers=True):
+    def group(label, conversations, codes, share, streaming=()):
         results = together(label, [body_for(m) for m in conversations], streaming)
         for result, code in zip(results, codes):
-            if answers:
-                answer(result, code)
+            answer(result, code)
         waited = [index for index, result in enumerate(results) if wait_ms(result) > 0]
         if not (share and sharing):
             if waited:
@@ -145,13 +139,13 @@ def check_cache_concurrency(client, model, checks, chat_result, concurrency,
     # Identical prompts: one prefill, the rest restore it.
     system = system_prompt("cache_concurrency_identical", 220)
     identical = [{"role": "system", "content": system},
-                 {"role": "user", "content": "Reply with only the code word: ALPHA"}]
+                 {"role": "user", "content": "Reply with only the code ALPHA."}]
     group("identical", [identical] * width, ["ALPHA"] * width, share=True)
 
     # Subagent fan-out: one system prompt, a different short task each.
     system = system_prompt("cache_concurrency_fanout", 220)
     fanout = [[{"role": "system", "content": system},
-               {"role": "user", "content": f"Task {index}. Reply with only the code word: {code}"}]
+               {"role": "user", "content": f"Task {index}. Reply with only the code {code}."}]
               for index, code in enumerate(CODES[:width])]
     group("fanout", fanout, CODES[:width], share=True, streaming={1, 3})
 
@@ -159,7 +153,7 @@ def check_cache_concurrency(client, model, checks, chat_result, concurrency,
     system = system_prompt("cache_concurrency_long_tasks", 220)
     long_tasks = [[{"role": "system", "content": system},
                    {"role": "user", "content": background(code, 60) +
-                    f"Reply with only the code word: {code}"}]
+                    f"Reply with only the code {code}."}]
                   for code in CODES[:width]]
     group("long_tasks", long_tasks, CODES[:width], share=True)
 
@@ -167,20 +161,13 @@ def check_cache_concurrency(client, model, checks, chat_result, concurrency,
     system = system_prompt("cache_concurrency_short_shared", 1)
     short_shared = [[{"role": "system", "content": system},
                      {"role": "user", "content": background(code, 60) +
-                      f"Reply with only the code word: {code}"}]
+                      f"Reply with only the code {code}."}]
                     for code in CODES[:width]]
-    # Gemma 4 summarizes this repetitive background instead of answering, even
-    # uncached and alone; llama.cpp b11069 does for DELTA (ALPHA 0.77, GAMMA 0.65).
-    paraphrases = preset == "gemma4"
-    if paraphrases:
-        skip_check(checks, "short_shared_answers",
-                   "model paraphrases the background; uncached answers are compared")
-    group("short_shared", short_shared, CODES[:width], share=False,
-          answers=not paraphrases)
+    group("short_shared", short_shared, CODES[:width], share=False)
 
     # Unrelated prompts share nothing beyond template framing.
     unrelated = [[{"role": "system", "content": system_prompt(f"cache_concurrency_{code}", 120)},
-                  {"role": "user", "content": f"Reply with only the code word: {code}"}]
+                  {"role": "user", "content": f"Reply with only the code {code}."}]
                  for code in CODES[:width]]
     group("unrelated", unrelated, CODES[:width], share=False)
 
@@ -188,13 +175,13 @@ def check_cache_concurrency(client, model, checks, chat_result, concurrency,
     # for a new request that shares only its system prompt.
     system = system_prompt("cache_concurrency_history", 220)
     history = [{"role": "system", "content": system},
-               {"role": "user", "content": "Reply with only the code word: ALPHA"}]
+               {"role": "user", "content": "Reply with only the code ALPHA."}]
     first = chat("history_turn_0", body_for(history))
     answer(first, "ALPHA")
     history += [{"role": "assistant", "content": first["text"]},
-                {"role": "user", "content": "Reply with only the code word: BETA"}]
+                {"role": "user", "content": "Reply with only the code BETA."}]
     newcomer = [{"role": "system", "content": system},
-                {"role": "user", "content": "Task 9. Reply with only the code word: GAMMA"}]
+                {"role": "user", "content": "Task 9. Reply with only the code GAMMA."}]
     turn, fresh = together("history_turn_1", [body_for(history), body_for(newcomer)])
     answer(turn, "BETA")
     answer(fresh, "GAMMA")
@@ -207,7 +194,7 @@ def check_cache_concurrency(client, model, checks, chat_result, concurrency,
     # A cancelled leader must release the requests waiting for it.
     system = system_prompt("cache_concurrency_cancelled", 220)
     cancelled = [{"role": "system", "content": system},
-                 {"role": "user", "content": "Reply with only the code word: DELTA"}]
+                 {"role": "user", "content": "Reply with only the code DELTA."}]
     leader = threading.Thread(target=abandon, args=(client, body_for(cancelled), 1.0))
     leader.start()
     time.sleep(0.3)

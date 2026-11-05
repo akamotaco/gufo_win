@@ -4,13 +4,12 @@
 #include <bit>
 #include <cerrno>
 #include <cstring>
+#include <gufo/ext/experimental/ggml_dequant.hpp>
+#include <gufo/ext/platform/fs.hpp>
+#include <gufo/ext/platform/mapped_file.hpp>
 #include <limits>
 #include <stdexcept>
 #include <system_error>
-
-#include "src/core/platform/fs.hpp"
-#include "src/core/platform/mapped_file.hpp"
-#include "src/core/quant/ggml_dequant.hpp"
 
 namespace gufo::models::qwen38_flash_next {
 namespace {
@@ -80,12 +79,14 @@ std::unique_ptr<NgramTable> NgramTable::Open(
     platform::PlatformFile file, std::uint64_t file_offset, std::uint64_t rows,
     std::uint32_t row_dim, core::GgmlType type, std::string* error_msg) {
   std::unique_ptr<NgramTable> t(new NgramTable());
-  const bool iq4 = type == core::GgmlType::kIQ4_NL;
-  const bool q41 = type == core::GgmlType::kQ4_1;
-  const std::size_t block = (iq4 || q41) ? 32 : 1;
-  const std::size_t block_bytes = iq4 ? 18 : (q41 ? 20 : 2);
-  if ((!iq4 && !q41 && type != core::GgmlType::kBF16) ||
-      row_dim == 0 || row_dim % block != 0) {
+  const bool blocked =
+      type == core::GgmlType::kIQ4_NL || type == core::GgmlType::kQ8_0;
+  const std::size_t block = blocked ? 32 : 1;
+  const std::size_t block_bytes = type == core::GgmlType::kIQ4_NL ? 18
+                                  : type == core::GgmlType::kQ8_0 ? 34
+                                                                  : 2;
+  if ((!blocked && type != core::GgmlType::kBF16) || row_dim == 0 ||
+      row_dim % block != 0) {
     if (error_msg != nullptr) {
       *error_msg = "unsupported n-gram table format";
     }
@@ -122,20 +123,8 @@ std::unique_ptr<NgramTable> NgramTable::Open(
 void NgramTable::DecodeRow(const std::uint8_t* src, float* dst) const {
   if (type_ == core::GgmlType::kIQ4_NL) {
     gufo::quant::DequantizeIQ4_NL(src, dst, row_dim_);
-  } else if (type_ == core::GgmlType::kQ4_1) {
-    // GGML Q4_1: fp16 scale, fp16 minimum, then low/high half nibbles.
-    for (std::uint32_t b = 0; b < row_dim_ / 32; ++b) {
-      const auto* block = src + b * 20;
-      std::uint16_t scale = 0, minimum = 0;
-      std::memcpy(&scale, block, 2);
-      std::memcpy(&minimum, block + 2, 2);
-      const float d = gufo::quant::Fp16ToFloat(scale);
-      const float m = gufo::quant::Fp16ToFloat(minimum);
-      for (std::uint32_t j = 0; j < 16; ++j) {
-        dst[b * 32 + j] = d * (block[4 + j] & 15) + m;
-        dst[b * 32 + j + 16] = d * (block[4 + j] >> 4) + m;
-      }
-    }
+  } else if (type_ == core::GgmlType::kQ8_0) {
+    gufo::quant::DequantizeQ8_0(src, dst, row_dim_);
   } else {
     for (std::uint32_t i = 0; i < row_dim_; ++i) {
       std::uint16_t bits = 0;

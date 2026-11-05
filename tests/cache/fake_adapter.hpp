@@ -42,7 +42,7 @@ private:
   bool fail_submission_{false};
 };
 
-class FakeAdapter final : public Adapter {
+class FakeAdapter : public Adapter {
 public:
   // Wider chunks need less capture metadata for the same row bytes.
   explicit FakeAdapter(Rows rows_per_chunk = 4);
@@ -66,13 +66,6 @@ public:
   [[nodiscard]] std::vector<ComponentPosition> PrefillCheckpointPositions(
       const Slot&, Rows boundary) const override;
   void BeginRestore(Slot&, std::span<const ComponentPosition>) override;
-  // Opt-in in-place restore: append rows stay while the slot holds them and
-  // window rows while their ring slots still hold them.
-  void SetInPlaceRestore(bool enabled) noexcept { in_place_ = enabled; }
-  [[nodiscard]] std::vector<ResidentRange> ResidentRows(
-      const Slot&, std::span<const ComponentPosition>) const override;
-  void BeginRestore(Slot&, std::span<const ComponentPosition>,
-                    std::span<const ResidentRange> kept) override;
   [[nodiscard]] Completion CapturePrivate(const Slot&, ComponentId,
                                           std::span<std::byte>,
                                           Stream&) override;
@@ -122,7 +115,6 @@ private:
                                       std::function<TransferResult()>);
   std::vector<ComponentDescriptor> components_;
   Rows ring_rows_{0};
-  bool in_place_{false};
   bool fail_allocation_{false};
   bool fail_transfer_{false};
   std::atomic<std::size_t> invalidations_{};

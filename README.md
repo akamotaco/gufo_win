@@ -4,38 +4,39 @@
   <img src="assets/gufo-logo.jpg" alt="Gufo logo" width="180">
 </p>
 
-## gufo_win: upstream's Windows build with Gemma 4 and AtomicChat Flash-Next
+
+## gufo_win: upstream's Windows build with the Gemma 4 extension
 
 This repository runs Gufo **natively on Windows 11** (no WSL) on AMD Strix Halo
-(`gfx1151`). Since v0.24 upstream Gufo builds and serves on Windows itself
+(`gfx1151`). Upstream Gufo builds and serves on Windows itself since v0.24
 ([#775](https://github.com/gufo-org/gufo/pull/775), see [BUILD-WINDOWS.md](BUILD-WINDOWS.md)),
-so `main` here is upstream plus what upstream does not carry:
+so `main` here is an upstream release plus what upstream does not carry:
 
 | Layer | Source | What it brings |
 | --- | --- | --- |
-| Engine and Windows build | [gufo-org/gufo](https://github.com/gufo-org/gufo) `main` | Gufo itself, the `windows-release` preset and its Windows platform code |
-| Gemma 4 | [franzmoca/gufo](https://github.com/franzmoca/gufo) `feat/gemma` | Native Gemma 4 26B-A4B / 31B engine with MTP, vision and tool calls (described in the next section) |
+| Engine and Windows build | [gufo-org/gufo](https://github.com/gufo-org/gufo) v0.30.0 | Gufo itself, the `windows-release` preset and its Windows platform code |
+| Extension hooks for Gemma 4 | [franzmoca/gufo](https://github.com/franzmoca/gufo) `gemma-main` | Public hooks the Gemma 4 extension needs that upstream has not merged yet |
+| Gemma 4 engine | [franzmoca/gemma4-gufo-extension](https://github.com/franzmoca/gemma4-gufo-extension), built with `-DGUFO_EXTENSION_DIRS` | Gemma 4 26B-A4B / 31B with MTP, vision and tool calls |
 | Fork-only fixes | this repository | See below |
 
-The fork-only commits, cherry-picked on top of upstream:
+Fork-only changes:
 
-- **Gemma 4 on Windows.** Windows maps registered host memory at a different
-  device address, so the component cache's gather copies run only where the
-  pointer is the device address; without that the first cache capture fails with
-  "unspecified launch failure". Gemma's cache backing keeps 1 GiB segments
-  (128 MiB segments failed 24K-token captures).
-- **[AtomicChat abliterated](https://huggingface.co/AtomicChat/Qwen3.8-Flash-Next-Abliterated-Uncensored-GGUF)
-  Flash-Next (`AD-4.85bpw-Q5_K_M`).** Upstream cannot load this mix: IQ4_XS/IQ4_NL/Q5_0
-  experts, a Q4_1 n-gram table and Q8_0 HC inject weights. They are supported here,
-  with the IQ4 experts on the routed F16 WMMA prefill and a fused IQ4_XS decode path.
+- **Gemma 4 on Windows.** Cache backing segments are 1 GiB on Windows: with
+  128 MiB segments, Gemma 4 captures past ~24K tokens failed their device-to-host
+  copies. The extension itself needs two small changes, kept in its checkout rather
+  than in this tree: its manifest must list `windows`, and its cache gather copies
+  must run only where a pointer is also the device address (Windows maps registered
+  host memory at a different device address).
 - The per-request image budget is 256 MiB instead of 20 MiB (agents resend every image).
 - `tools\windows\gufo_monitor.py` (a read-only web monitor) and `tools\windows\tdr_delay.bat`
   (GPU timeout).
+- Upstream's GitHub workflows are renamed to `.yml.bak`.
 
-Until October 27, 2026 this repository carried its own Windows port (a POSIX
-compatibility layer from [pixmaate/gufo](https://github.com/pixmaate/gufo)); it was
-retired once upstream built on Windows and is kept in history (tag `win-old-port-20261027`).
-If Gemma 4 and the AtomicChat formats reach upstream, this repository can go too.
+Until v0.30 this repository merged the Gemma engine from franzmoca's `feat/gemma`
+branch and also served the AtomicChat Flash-Next mix (IQ4_XS/IQ4_NL/Q5_0 experts).
+Both are kept in history; the AtomicChat formats were not carried to v0.30's
+extension layout. The original Windows port (until October 27, 2026) is tag
+`win-old-port-20261027`.
 
 > [!WARNING]
 > **Windows: raise the GPU timeout (TDR) before long runs.** Windows resets the GPU
@@ -49,39 +50,28 @@ If Gemma 4 and the AtomicChat formats reach upstream, this repository can go too
 ### Measured on Windows
 
 One Strix Halo machine (Windows 11, 96 GB GPU carve-out), this build with TheRock
-10.0.0, October 28, 2026 (Unsloth row: October 27). Server-reported rates, MTP with
-each model's drafter, prompt cache defeated, one server at a time. A 40-identifier
-verbatim copy test passed with no misses at temperature 0 and 0.7, at 400 and
-103K–138K prompt tokens, on all three models.
+10.0.0, November 5, 2026. Server-reported rates, MTP with each model's drafter,
+prompt cache defeated, one server at a time. A 40-identifier verbatim copy test
+passed with no misses at temperature 0 and 0.7, at about 400 and 75K prompt tokens.
+Gemma 4 26B greedy outputs on 8 fixed prompts match the earlier `feat/gemma` build
+token for token.
 
 | Model | Sessions x context | Prompt | Prefill (tok/s) | Decode, MTP (tok/s) |
 | --- | --- | --- | ---: | ---: |
-| Gemma 4 26B-A4B Q8_0 (MeroMero) | 1 x 262,144 | short, 512 generated | | 56.3 |
-| | | 2.1K | 3,292 | 59.3 |
-| | | 8.5K | 3,354 | 55.6 |
-| | | 31.8K | 2,811 | 54.2 |
-| Qwen3.8-Flash-Next AtomicChat `AD-4.85bpw-Q5_K_M` + vision | 2 x 262,144 | short, 512 generated | | 34.8 |
-| | | 2.1K | 1,503 | 37.9 |
-| | | 8.5K | 1,490 | 52.7 |
-| | | 31.8K | 1,549 | 49.3 |
-| Qwen3.8-Flash-Next Unsloth UD-Q4_K_XL + vision | 1 x 262,144 | short, 512 generated | | 34.6 |
-| | | 2.1K | 1,466 | 39.4 |
-| | | 8.5K | 1,417 | 40.5 |
-| | | 31.8K | 1,494 | 37.6 |
+| Gemma 4 26B-A4B Q8_0 (MeroMero) | 1 x 262,144 | short, 512 generated | | 53.5 |
+| | | 2.1K | 3,189 | 56.9 |
+| | | 8.5K | 3,287 | 52.9 |
+| | | 31.8K | 2,755 | 51.9 |
+| | | 160K | 1,356 | 35.3 |
+| Qwen3.8-Flash-Next Orca Q4Mix + vision | 2 x 262,144 | short, 512 generated | | 34.4 |
+| | | 2.1K | 1,300 | 38.7 |
+| | | 8.5K | 1,601 | 36.6 |
+| | | 31.8K | 1,630 | 37.7 |
+| | | 160K | 1,546 | 46.6 |
 
-- On the same machine a ROCm llama.cpp `llama-server` (b10967, flash attention, no
-  speculative decoding) prefilled Gemma 4 26B Q8_0 at 1,624–1,735 / 602–608 / 959–965
-  tok/s (2.1K / 8.5K / 31.8K, October 18) and the AtomicChat file at 1,041–1,218 tok/s.
-- Decode with MTP varies with the draft acceptance (53–72% here).
-- Against the October 27 build of this repository, upstream's October 27–28 changes
-  (Flash-Next prefill stream overlap, #758) raised AtomicChat prefill ~5%, and Gemma 4
-  measured 8–12% faster prefill on the same day. The previous Windows port (full host
-  inlining; upstream's preset uses RelWithDebInfo `/O2 /Ob1`) measured 1,434–1,481 tok/s
-  AtomicChat prefill, now exceeded.
+- Decode with MTP varies with the draft acceptance (48–70% here).
 - Flash-Next MTP uses Unsloth's `MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf`; Gufo
   rejects the `shared-Q4_K_M` drafter and the F16 vision projector (use `mmproj-BF16.gguf`).
-- Gemma 4 12B loads but fails its first request (`split attention head grouping
-  unsupported`); the Gemma 4 engine does not cover its head layout yet, on any OS.
 
 ### Memory setup on a 128 GB machine
 
@@ -90,8 +80,8 @@ verbatim copy test passed with no misses at temperature 0 and 0.7, at 400 and
   32 GB of RAM, and its shared-GPU-memory limit is half of that, ~16 GB.
 - **Stay inside the carve-out.** Past it the display driver moves buffers into system
   memory and Windows writes to the page file. Flash-Next UD-Q4_K_XL fits 1 session x
-  262K + MTP + vision (~91 GB); the AtomicChat file is 3.75 GiB smaller and fits
-  2 sessions x 262K (~92–95 GB). Check what other programs hold before loading.
+  262K + MTP + vision (~91 GB); the Orca Q4Mix file fits 2 sessions x 262K
+  (95.5 GB at idle). Check what other programs hold before loading.
 - **Keep a large page file** (96 GB initial, 160 GB maximum here): Windows charges GPU
   allocations to the commit limit. It is reserved, not written.
 - **Pass `--cache-ram-bytes`** (4 GiB for Flash-Next, 2 GiB per Gemma server); the
@@ -112,6 +102,13 @@ this machine also needed:
   and flac sources, whose tests contain emoji paths (`Invalid empty pathname`).
   Extracting those archives with Python instead works.
 
+To build with Gemma 4, check out the extension and point CMake at it:
+
+```powershell
+cmake --preset windows-release -DGUFO_EXTENSION_DIRS=C:/path/to/gemma4-gufo-extension
+cmake --build --preset windows-release
+```
+
 After building, copy TheRock's `.kpack` folder to `build\.kpack`: rocBLAS loads its
 kernels from `..\.kpack` beside its DLL, and the preset does not stage it.
 
@@ -131,6 +128,7 @@ Windows GPU timeout is still 2 s.
 
 ![gufo monitor with Qwen3.8-Flash-Next on port 8080](assets/windows-monitor.png)
 
+
 ### Troubleshooting
 
 - **`413 payload_too_large` after reading a few images.** Request bodies are capped
@@ -145,64 +143,6 @@ Windows GPU timeout is still 2 s.
   GPU. Upstream [#599](https://github.com/gufo-org/gufo/issues/599) reports the same
   pair on the same board and BIOS, fixed by the GTRPRPI1001C (AGESA 1.0.0.1c) update.
   Restarting the server clears it.
-- **`Cannot find Symbol with name: ...Kernel...` at model load, on a Windows build that
-  passed `gufo diagnose`.** With CMake's `/Fo` rule, `clang-cl` writes each HIP fat
-  binary to the build directory under the source's name, so same-named sources compiled
-  in parallel can embed each other's device code. `kernels.hip.cpp` of Flash-Next picked
-  up Gemma 4's this way. `mmid.hip.cpp` of Flash-Next picked up DeepSeek's with no error,
-  because both define the same kernel names. This build compiles HIP with `-clang:-o`,
-  which sends those files to unique temporary paths. On a build without that change,
-  delete the affected `.obj` files and rebuild them one at a time.
-
-## About this fork: Gemma 4 on Gufo
-
-This fork of [gufo-org/gufo](https://github.com/gufo-org/gufo) adds a native
-**Gemma 4** engine to Gufo, with its own HIP kernels for prefill, decode and MTP
-verification on Strix Halo. Gemma 4 isn't on upstream's roadmap, so it is
-maintained here on the default branch, `feat/gemma`. Upstream
-[PR #426](https://github.com/gufo-org/gufo/pull/426) stays open for feedback.
-
-> [!NOTE]
-> **What's new:** the [Gemma changelog](CHANGELOG_GEMMA.md) lists the fork's
-> changes, newest first, with a link to each pull request.
-
-### What it runs
-
-- **Gemma 4 26B-A4B** (mixture of experts): Unsloth UD-Q4_K_XL, UD-Q6_K_XL,
-  UD-Q8_K_XL and the QAT checkpoint.
-- **Gemma 4 31B**: Unsloth UD-Q4_K_XL and UD-Q8_K_XL, and the 31B QAT (Q4_0).
-- **Fine-tunes and uncensored versions** of both models: most quant shapes run,
-  including llama.cpp's standard K-quant mixes (Q4_K_M, Q5_K_M, Q6_K), with the
-  base model's MTP drafter. A GGUF that ships an older revision of the Gemma 4
-  chat template loads with a warning and uses the built-in template. Fine-tunes
-  are not qualified to the cards' limits; the 26B card records one fine-tune's
-  results.
-
-### Features
-
-- MTP speculative decoding with the `gemma4-assistant` drafters, with a draft
-  length learned from how many drafts are accepted.
-- Image input through the Gemma 4 vision tower (`--mmproj`), with selectable
-  image token budgets (`--image-tokens`).
-- Gemma's reasoning channel and native tool-call syntax, with tool-call
-  arguments streamed as they are generated.
-- Gufo's serving features work with Gemma 4 too: every text endpoint, RAM and
-  disk prompt caching, and batched concurrent sessions.
-
-Benchmarks against llama.cpp and quality reports are in each model card:
-[26B-A4B](docs/models/gemma-4-26b-a4b/README.md),
-[31B](docs/models/gemma-4-31b/README.md) and
-[31B QAT](docs/models/gemma-4-31b-qat/README.md).
-
-### Status
-
-The fork merges upstream `main` periodically and is currently synced with
-v0.17.0. Like upstream, it is Strix Halo only (`gfx1151`, Linux).
-Everything below the line is upstream's README; its build steps apply
-unchanged ([Build from source](#build-from-source)). If a Gemma 4 GGUF doesn't
-load, open an issue on this fork with the file name. Bug reports, benchmark
-numbers from other setups, feature requests and PRs are welcome here.
-Thanks to the Gufo maintainers for the engine this builds on.
 
 ---
 
@@ -227,11 +167,12 @@ All model documentation lives under [docs/models](docs/models/README.md):
 | --- | --- | --- | --- | --- |
 | [Qwen3.8 27B](docs/models/qwen3.8-27b/README.md) | Q4/Q8, images, AR, DFlash2 | Unsloth [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf) / [Q8_K_XL](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/blob/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q8_K_XL.gguf) · [DFlash2 Q4_K_M](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2-GGUF/blob/2d9571f8ce46e151f61c6499c99dee6079e1d610/Qwen3.8-27B-DFlash2-Q4_K_M.gguf) | Q4: **648.89 tok/s pp**; up to **71.55 tok/s tg** single user and **128.42 aggregated tok/s** on 8 concurrent requests with DFlash2 · [Benchmarks](docs/models/qwen3.8-27b/BENCHMARKS.md) | [Quality](docs/models/qwen3.8-27b/QUALITY.md) |
 | [Qwen3.8 Flash-Next](docs/models/qwen3.8-flash-next/README.md) | Q4, images, AR, MTP | Unsloth [Q4_K_XL](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/38bb39ee97821de2c9009abb7e93950eec396e66/UD-Q4_K_XL) · [MTP Q8_0](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/blob/38bb39ee97821de2c9009abb7e93950eec396e66/MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf) | **1,801.01 tok/s pp** (AR); up to **116.93 tok/s tg** single user and **245.81 aggregated tok/s** on 8 concurrent requests with MTP · [Benchmarks](docs/models/qwen3.8-flash-next/BENCHMARKS.md) | [Quality](docs/models/qwen3.8-flash-next/QUALITY.md) |
-| [DeepSeek V4 Flash](docs/models/deepseek-v4-flash/README.md) | AR, DSpark | [antirez Flash 0731 IQ2XXS](https://huggingface.co/antirez/deepseek-v4-gguf/blob/1cd7b564460821938add0475a60b942c409295e0/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf) · [DSpark](https://huggingface.co/antirez/deepseek-v4-gguf/blob/e7f04037032990db0346398d249baf9fb9df1ccc/DeepSeek-V4-Flash-DSpark-support-0731.gguf) | **484.62 tok/s pp**; up to **26.62 tok/s tg** single user and **54.74 aggregated tok/s** on 8 concurrent requests with DSpark · [Benchmarks](docs/models/deepseek-v4-flash/BENCHMARKS.md) | [Quality](docs/models/deepseek-v4-flash/QUALITY.md) |
+| [DeepSeek V4 Flash](docs/models/deepseek-v4-flash/README.md) | AR, DSpark | [antirez Flash 0731 IQ2XXS](https://huggingface.co/antirez/deepseek-v4-gguf/blob/1cd7b564460821938add0475a60b942c409295e0/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix-0731.gguf) · [DSpark](https://huggingface.co/antirez/deepseek-v4-gguf/blob/e7f04037032990db0346398d249baf9fb9df1ccc/DeepSeek-V4-Flash-DSpark-support-0731.gguf) | **474.87 tok/s pp**; up to **29.57 tok/s tg** single user with DSpark and **77.12 aggregated tok/s** on 8 concurrent requests with AR · [Benchmarks](docs/models/deepseek-v4-flash/BENCHMARKS.md) | [Quality](docs/models/deepseek-v4-flash/QUALITY.md) |
 | [Qwen3-ASR 1.7B](docs/models/qwen3-asr/README.md) | Speech recognition | [BF16](https://huggingface.co/Qwen/Qwen3-ASR-1.7B/tree/7278e1e70fe206f11671096ffdd38061171dd6e5) | **15.27× realtime** · [Benchmarks](docs/models/qwen3-asr/BENCHMARKS.md) | [Quality](docs/models/qwen3-asr/QUALITY.md) |
 | [EmbeddingGemma 2](docs/models/embeddinggemma-2/README.md) | Text and image embeddings | [BF16](https://huggingface.co/google/embeddinggemma-2/tree/914f7f89142e33e77833254d9c9b90c3cef7303b) | Up to **41.5k tokens/s** over HTTP; **13.0 ms** for a 404-token request · [Benchmarks](docs/models/embeddinggemma-2/BENCHMARKS.md) | [Quality](docs/models/embeddinggemma-2/QUALITY.md) |
 | [Qwen3-TTS 1.7B](docs/models/qwen3-tts/README.md) | Speech synthesis and voice cloning | BF16 [CustomVoice](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) / [VoiceDesign](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign) / [Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base) | Up to **2.54× realtime**; **201 ms** to first audio (CustomVoice) · [Benchmarks](docs/models/qwen3-tts/BENCHMARKS.md) | [Quality](docs/models/qwen3-tts/QUALITY.md) |
 | [Qwen-Image-2.1](docs/models/qwen-image-2.1/README.md) | BF16 image generation and editing | [Complete pipeline](https://huggingface.co/Qwen/Qwen-Image-2.1/tree/b3179ad355be050328e483a9dfdd9e60cd62adfa) | In progress · [Benchmarks](docs/models/qwen-image-2.1/BENCHMARKS.md) | [Quality](docs/models/qwen-image-2.1/QUALITY.md) |
+| [Qwen-Image-2.1-Turbo](docs/models/qwen-image-2.1/README.md#qwen-image-21-turbo) | BF16 eight-step image generation and editing | [Complete pipeline](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/tree/fc13ba1986fcb905854dc8de2f52eee395f49b5b) | **18.6 s** per 1024² image, **4.8×** faster than the 40-step base model · [Benchmarks](docs/models/qwen-image-2.1/BENCHMARKS.md#qwen-image-21-turbo) | [Quality](docs/models/qwen-image-2.1/QUALITY.md#qwen-image-21-turbo) |
 | [MiniMax H3](docs/models/minimax-h3/README.md) | BF16 text to video/audio | [FL2VA pipeline](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/42ed227ee7df40d41602854ae760620d6eb651fe/FL2VA) | In progress · [Benchmarks](docs/models/minimax-h3/BENCHMARKS.md) | [Quality](docs/models/minimax-h3/QUALITY.md) |
 
 Peak measured workloads; text pp is autoregressive (AR), while tg uses the
@@ -239,6 +180,8 @@ named speculative mode. Peaks include repetitive output; aggregate tg sums
 individual request decode rates. Qwen27B's single-user peak uses the short-prompt
 C1 workload. Audio excludes loading.
 Each model guide lists the required files and complete benchmark settings.
+
+To add or maintain a model, start with the [source extension guide](docs/extensions.md).
 
 ## Philosophy
 

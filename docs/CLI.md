@@ -16,9 +16,13 @@ prompt caching.
 
 This is an exhaustive list of functionalities and features offered by the gufo cli, the mapping between features and flags is not documented here and should be discovered using the `--help` command to avoid divergences between the implementation and the documentation.
 
-The supported model types are LLM, image, video, audio (TTS, ASR), and text embeddings.
+The supported model types are LLM, image, video, audio (TTS, ASR), text
+embeddings and decision models.
 `gufo serve embedding` provides [EmbeddingGemma 2 text embeddings](SERVER.md#embeddings).
 `gufo serve image` provides [Qwen-Image-2.1 generation and editing](models/qwen-image-2.1/README.md).
+
+For Nix command generation and deployment validation, see
+[Nix serving from extension metadata](model-extensions/serving.md).
 
 ### LLM or text
 
@@ -33,8 +37,10 @@ The supported model types are LLM, image, video, audio (TTS, ASR), and text embe
 - `context` — maximum context capacity; memory use depends on the model and
   the number of resident sessions.
 - `enableYarn` — Qwen3.8-Flash-Next only: allow a `context` above the native
-  262144 tokens through static YaRN, which applies to every request. Required
-  above 262144 and rejected at or below it.
+  262144 tokens through YaRN. A session keeps the native rotation while it
+  holds at most 262144 tokens, then takes the smallest whole factor covering
+  its positions, up to `context` / 262144. Required above 262144 and rejected
+  at or below it.
 - `prefillChunk` — prompt tokens processed between active decode steps in
   HTTP serving. Model runtimes choose their own internal prefill batch sizes.
 - `maxTokens` — maximum number of tokens a request may generate. In practice:
@@ -72,7 +78,7 @@ The supported model types are LLM, image, video, audio (TTS, ASR), and text embe
 - `think` (`"on"` / `"off"` / `"auto"`) — whether the model produces its
   visible thinking before answering. In practice: off for quick chats, on
   for hard problems. Auto uses the model default: enabled for Qwen3.8 and
-  DeepSeek V4 Flash, disabled for Gemma 4.
+  DeepSeek V4 Flash.
 - `reasoningEffort` (`"auto"`, `"minimal"`, `"low"`, `"medium"`, `"high"`,
   `"xhigh"`, `"max"`) — model instructions controlling reasoning depth,
   not a token limit. Auto selects Qwen `xhigh` or DeepSeek `high`; more effort
@@ -105,9 +111,8 @@ distribution, but need not match an autoregressive run's sequence for the same
 seed. Speed depends on acceptance and verification cost.
 
 - `speculative` — `dflash2` for Qwen3.8-27B, `dspark` for DeepSeek V4 Flash,
-  `mtp` for models with a supported MTP head or drafter (Flash-Next, Gemma 4
-  31B and 26B-A4B), or `off`. HTTP serving supports `dflash2`, `dspark`, and Flash-Next
-  and Gemma 4 `mtp`.
+  `mtp` for models with a supported MTP head, or `off`. HTTP serving
+  supports `dflash2`, `dspark`, and Flash-Next `mtp`.
 - `dflashModel` — path to the DFlash2 companion draft.
 - `dsparkModel` — path to the DSpark support GGUF.
 - `mtpModel` — path to the MTP draft model.
@@ -116,9 +121,7 @@ seed. Speed depends on acceptance and verification cost.
 - `draftPolicy` (`"fixed"` / `"adaptive"`) — DFlash2 block-length policy;
   defaults to adaptive.
 - `minDraftTokens` — minimum draft length where supported. DFlash2, DSpark,
-  and Flash-Next MTP require the default of one. Gemma 4 drafts up to
-  `draftTokens` (at most 7) and its draft policy chooses how many a cycle
-  verifies; see the [Gemma 4 model card](models/gemma-4-31b/README.md).
+  and Flash-Next MTP require the default of one.
 
 **Server limits (protecting the machine from clients)**
 
@@ -165,6 +168,23 @@ The Nix helper uses the same `modality`, `model`, `context`, and
 per audio chunk, so long files do not require one enormous context. The
 standalone `gufo transcribe` command also uses `--model` and `--context`;
 `--prompt` supplies optional transcription hints.
+
+Models that take an audio projector sidecar (an mmproj GGUF) accept
+`--mmproj` on `serve tts`, `serve asr`, `transcribe` and `speak`; without it
+the model's provider looks up its own. `transcribe --live` feeds the audio
+in 100 ms pieces to models with live transcription and prints text as it is
+decoded. `gufo speak` synthesizes speech (`--mode tts`) or answers a written
+or spoken message in interleaved text and speech (`--mode chat`) or in text
+(`--mode text`, optionally `--reasoning` and `--tools`) with speech models
+that provide it.
+
+### Decisions
+
+`gufo serve decision --model PATH [--mmproj GGUF]` serves decision models
+at `POST /v1/systemone`; `gufo decide --model PATH --request request.json`
+(or `--jsonl` on standard input) answers the same requests without HTTP.
+`--context` bounds the complete decision prompt (default 8192). Request and
+response shapes belong to the model.
 
 **Voices**
 
@@ -223,16 +243,14 @@ These apply to every modality, before or after the subcommand:
 - `maxRequestBytes` — maximum request body size. In practice: matters mostly
   for ASR, since requests carry whole audio files (the audio benchmark used
   32 MiB).
-- `apiKey` — if set, requests require `Authorization: Bearer <key>`, including
-  health checks. Browser CORS preflight (`OPTIONS`) remains unauthenticated.
 - `logLevel` (`--log-level <error|warn|info|debug>`, default `info`) — how much
   the server logs. In practice: `debug` is the level that explains a stalled
   client, because it also shows health polls, admission refusals with the limit
   that rejected them, and cache candidate decisions. `verbose` (`-v`) is
   shorthand for `--log-level=debug`; passing both is a usage error. The tier is
   a threshold all the way down, and the `event=listening` startup confirmation
-  is INFO-tier, so `warn` and `error` boot and stop silently. Prompt text,
-  message bodies and the API key are never logged at any level; only the
+  is INFO-tier, so `warn` and `error` boot and stop silently. Prompt text and
+  message bodies are never logged at any level; only the
   separate, opt-in `trace` file records content. Debug admission lines do name
   the client by the peer IP address of its connection. See
   [server logs](SERVER.md#troubleshooting-logs).
@@ -247,6 +265,8 @@ gufo eval
 gufo bench
 gufo video
 gufo transcribe
+gufo speak
+gufo decide
 gufo diagnose
 ```
 
@@ -254,7 +274,8 @@ gufo diagnose
 conversation. `prompt` executes one request and exits. `eval` grades the pinned
 DS4 capability questions through an already running OpenAI-compatible server.
 `bench` measures model execution, `video` runs MiniMax H3 generation,
-`transcribe` runs native Qwen3-ASR-1.7B speech recognition, and `diagnose` runs
+`transcribe` runs speech recognition, `speak` runs speech synthesis and voice
+chat, `decide` answers decision requests, and `diagnose` runs
 non-interactive system and hardware diagnostics.
 
 All commands support `--help` and `--version`. Unknown options and invalid

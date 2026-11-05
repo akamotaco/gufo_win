@@ -71,20 +71,9 @@ struct LeaseState final : MutationGuard {
   // Foreground mutation can erase registrations. Reset this cursor whenever
   // execution releases the slot; the idle worker never uses it while leased.
   std::list<Entry>::iterator idle_next{rows.end()};
-  // Conservative per-component hull of registered ranges. A mutation wholly
-  // outside it, such as an append beyond the highest end or a ring eviction
-  // below the lowest first, skips the registry scan on every execution step.
-  struct Hull {
-    Rows first{}, end{};
-  };
-  std::unordered_map<std::uint32_t, Hull> borrowed;
-  void Widen(ComponentId c, Rows first, Rows end) {
-    const auto [it, inserted] = borrowed.try_emplace(c.value, Hull{first, end});
-    if (!inserted) {
-      it->second.first = std::min(it->second.first, first);
-      it->second.end = std::max(it->second.end, end);
-    }
-  }
+  // Conservative per-component upper bound of registered ends. Appends at
+  // or beyond it skip the registry scan on every execution step.
+  std::unordered_map<std::uint32_t, Rows> borrowed_end;
   bool leased{false}, live{false}, spilling{false}, idle_failed{false};
   bool idle_pending{false};
   std::condition_variable_any changed;
@@ -256,6 +245,14 @@ struct LeaseState final : MutationGuard {
           "slot lease cancelled while waiting for readers");
   }
   void RunIdle(std::stop_token cancelled) {
+    // Another slot's prefill keeps the device busy for seconds. Polling every
+    // millisecond wakes a core 1000 times a second: on Strix Halo, a core of
+    // an otherwise sleeping CCD costs ~4 W of the package limit the GPU
+    // shares, ~5% of a long prefill. Back off while deferred; the delay only
+    // postpones optional idle work.
+    constexpr auto kDeferMin = std::chrono::milliseconds(1);
+    constexpr auto kDeferMax = std::chrono::milliseconds(32);
+    auto defer = kDeferMin;
     std::unique_lock lock(mutex);
     while (!cancelled.stop_requested()) {
       // No polling once retained ranges are complete. Only a released lease
@@ -287,6 +284,7 @@ struct LeaseState final : MutationGuard {
       }
       if (!candidate) {
         idle_pending = false;
+        defer = kDeferMin;
         continue;
       }
       spilling = true;
@@ -312,9 +310,12 @@ struct LeaseState final : MutationGuard {
       spilling = false;
       idle_failed = failed;
       changed.notify_all();
-      if (!admitted)
-        changed.wait_for(lock, cancelled, std::chrono::milliseconds(1),
-                         [] { return false; });
+      if (admitted) {
+        defer = kDeferMin;
+      } else {
+        changed.wait_for(lock, cancelled, defer, [] { return false; });
+        defer = std::min(defer * 2, kDeferMax);
+      }
     }
   }
   void Guard(ComponentId component, Rows first, Rows end, bool release) {
@@ -322,9 +323,8 @@ struct LeaseState final : MutationGuard {
       throw std::invalid_argument("reversed mutation range");
     if (!release)
       CheckStop();
-    if (const auto hull = borrowed.find(component.value);
-        hull == borrowed.end() || hull->second.end <= first ||
-        end <= hull->second.first)
+    if (const auto bound = borrowed_end.find(component.value);
+        bound == borrowed_end.end() || bound->second <= first)
       return;
     // Iterate without allocating a request-time snapshot. Leased execution
     // serializes Borrow and mutation; readers never change this registry.
@@ -347,7 +347,7 @@ struct LeaseState final : MutationGuard {
     CheckStop();
     if (spill && spill->reassignment_batch_size > 1) {
       PrepareBatchedReassignment();
-      borrowed.clear();
+      borrowed_end.clear();
       CheckStop();
       return;
     }
@@ -363,7 +363,7 @@ struct LeaseState final : MutationGuard {
       Preserve(r, false);
     }
     // Every registered range is now preserved; later guards need no scan.
-    borrowed.clear();
+    borrowed_end.clear();
     CheckStop();
   }
   void PrepareBatchedReassignment() {
@@ -727,7 +727,8 @@ std::shared_ptr<BorrowedRows> SlotLease::Borrow(
   rows->metadata = metadata.Convert();
   // Raise the guard bound before registration: a failure afterwards may only
   // leave it conservatively high, never hide a registered range.
-  state_->Widen(c, first, end);
+  auto& bound = state_->borrowed_end[c.value];
+  bound = std::max(bound, end);
   auto result = std::shared_ptr<BorrowedRows>(new BorrowedRows(rows));
   state_->rows.push_back({rows->metadata, rows, c, first, end});
   return result;
@@ -760,7 +761,8 @@ std::shared_ptr<BorrowedRows> SlotLease::Observe(
   rows->bytes = source.size();
   rows->category = ResourceCategory::kBackingAssigned;
   rows->metadata = metadata.Convert();
-  state_->Widen(c, first, end);
+  auto& bound = state_->borrowed_end[c.value];
+  bound = std::max(bound, end);
   auto result = std::shared_ptr<BorrowedRows>(new BorrowedRows(rows));
   state_->rows.push_back({rows->metadata, rows, c, first, end});
   return result;
@@ -798,13 +800,6 @@ void LeasedSlot::StopIdleSpill() {
 }
 SlotLease LeasedSlot::Acquire(std::optional<BorrowedLocation> live,
                               std::stop_token stop) {
-  return Claim(live, stop, false);
-}
-SlotLease LeasedSlot::AcquireInPlace(std::stop_token stop) {
-  return Claim({}, stop, true);
-}
-SlotLease LeasedSlot::Claim(std::optional<BorrowedLocation> live,
-                            std::stop_token stop, bool in_place) {
   const auto start = detail::LeaseState::Clock::now();
   {
     std::unique_lock lock(state_->mutex);
@@ -812,8 +807,6 @@ SlotLease LeasedSlot::Claim(std::optional<BorrowedLocation> live,
       throw std::runtime_error("slot acquisition cancelled");
     if (state_->leased)
       throw SlotBusy();
-    if (in_place && !state_->slot)
-      throw std::logic_error("no slot state to restore in place");
     if (live) {
       std::lock_guard source_lock(state_->source->mutex);
       if (!state_->live || live->slot != state_->source->id ||
@@ -832,11 +825,9 @@ SlotLease LeasedSlot::Claim(std::optional<BorrowedLocation> live,
       throw std::runtime_error("slot acquisition cancelled during idle spill");
     }
     state_->stop = stop;
-    if (in_place)
-      state_->live = false;
   }
   try {
-    if (!live && !in_place) {
+    if (!live) {
       // Finish cancellable admission, copies and reader waits BEFORE entering
       // the adapter's nonthrowing invalidation/release path. On refusal the
       // original generation and execution frontier remain reusable.
