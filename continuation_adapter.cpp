@@ -38,10 +38,13 @@ using Coverage = std::vector<std::pair<std::size_t, std::size_t>>;
 // Loaded byte ranges cover [begin, end) without a gap.
 // Copies a gather launch can serve: 16-byte aligned memory the device reads
 // and writes in place (device or registered host memory, not pageable).
+// Windows maps registered host memory at a different device address, so a
+// kernel can use the pointer only where the device address is the same.
 bool Accessible(const void* pointer) {
   hipPointerAttribute_t attributes{};
   return hipPointerGetAttributes(&attributes, pointer) == hipSuccess &&
-         attributes.type != hipMemoryTypeUnregistered;
+         attributes.type != hipMemoryTypeUnregistered &&
+         attributes.devicePointer == pointer;
 }
 bool Gatherable(const rocm::CopyRun& run) {
   return (reinterpret_cast<std::uintptr_t>(run.from) |
