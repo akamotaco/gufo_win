@@ -39,6 +39,28 @@ bool DiskCacheEnabled(const TextDiskCacheConfig& config) {
 
 }  // namespace
 
+std::size_t CountReasoningTokens(
+    std::span<const tokenization::TokenId> tokens,
+    std::span<const tokenization::TokenId> open,
+    std::span<const tokenization::TokenId> close,
+    const std::function<bool(std::span<const tokenization::TokenId>)>& blank) {
+  if (close.empty())
+    return 0;
+  auto begin = tokens.begin();
+  if (!open.empty()) {
+    const auto at =
+        std::search(tokens.begin(), tokens.end(), open.begin(), open.end());
+    if (at == tokens.end())
+      return 0;
+    const auto prefix = static_cast<std::size_t>(at - tokens.begin());
+    if (prefix != 0 && !(blank && blank(tokens.first(prefix))))
+      return 0;
+    begin = at + static_cast<std::ptrdiff_t>(open.size());
+  }
+  const auto end = std::search(begin, tokens.end(), close.begin(), close.end());
+  return static_cast<std::size_t>(end - begin);
+}
+
 struct InferenceBackend::Impl {
 #if defined(ENGINE_ENABLE_HIP)
   struct State {
@@ -59,13 +81,21 @@ struct InferenceBackend::Impl {
         std::shared_ptr<const State> model_state,
         TextGenerationScheduler::Request scheduled_request,
         InitialOutputState initial = InitialOutputState::kContent,
-        std::optional<sampling::JsonConstraint::ToolFormat> tool_format = {})
+        std::optional<sampling::JsonConstraint::ToolFormat> tool_format = {},
+        std::string tool_dialect = {})
         : state_(std::move(model_state)),
           request_(std::move(scheduled_request)),
-          tool_format_(tool_format) {
-      if (initial == InitialOutputState::kReasoning)
-        reasoning_end_ =
-            state_->scheduler->runner().TokenizeControl("</think>");
+          tool_format_(tool_format),
+          tool_dialect_(std::move(tool_dialect)),
+          reasoning_(state_->scheduler->runner().ReasoningDelimiters()) {
+      const auto& runner = state_->scheduler->runner();
+      if (initial == InitialOutputState::kReasoning ||
+          (initial == InitialOutputState::kAuto && !reasoning_.open.empty())) {
+        reasoning_end_ = runner.TokenizeControl(reasoning_.close);
+      }
+      // An automatic phase counts only a block the model opens itself.
+      if (initial == InitialOutputState::kAuto && !reasoning_.open.empty())
+        reasoning_open_ = runner.TokenizeControl(reasoning_.open);
     }
 
     Result Wait(const TokenCallback& on_token,
@@ -73,27 +103,42 @@ struct InferenceBackend::Impl {
                 const StartCallback& on_start) override {
       auto result = request_.Wait(on_token, on_progress, on_start);
       if (!reasoning_end_.empty()) {
-        const auto end =
-            std::search(result.tokens.begin(), result.tokens.end(),
-                        reasoning_end_.begin(), reasoning_end_.end());
-        result.reasoning_tokens =
-            static_cast<std::size_t>(end - result.tokens.begin());
+        const auto& runner = state_->scheduler->runner();
+        result.reasoning_tokens = CountReasoningTokens(
+            result.tokens, reasoning_open_, reasoning_end_,
+            [&runner](std::span<const tokenization::TokenId> prefix) {
+              const auto text = runner.Decode(prefix);
+              return std::ranges::all_of(text, [](unsigned char c) {
+                return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+              });
+            });
       }
       return result;
     }
 
     void Cancel() noexcept override { request_.Cancel(); }
 
+    ext::ReasoningMarkup ReasoningDelimiters() const override {
+      return reasoning_;
+    }
+
     std::optional<sampling::JsonConstraint::ToolFormat> ToolFormat()
         const override {
       return tool_format_;
+    }
+
+    std::optional<std::string> ToolDialectId() const override {
+      return tool_dialect_;
     }
 
   private:
     std::shared_ptr<const State> state_;
     TextGenerationScheduler::Request request_;
     std::vector<tokenization::TokenId> reasoning_end_;
+    std::vector<tokenization::TokenId> reasoning_open_;
     const std::optional<sampling::JsonConstraint::ToolFormat> tool_format_;
+    const std::string tool_dialect_;
+    const ext::ReasoningMarkup reasoning_;
   };
 
   [[nodiscard]] std::shared_ptr<const State> Snapshot() const {
@@ -173,7 +218,10 @@ bool InferenceBackend::load(std::shared_ptr<ext::TextModelRunner> runner,
     auto new_state = std::make_unique<Impl::State>();
     new_state->model_path = desc.model_id;
     new_state->sampling_defaults.max_tokens = 0;
-    new_state->sampling_defaults.model = desc.sampling_preset;
+    new_state->sampling_defaults.provider =
+        desc.sampling_defaults.has_value()
+            ? desc.sampling_defaults
+            : sampling::PresetDefaults(desc.sampling_preset);
     new_state->sampling_defaults.sampling = sampling::SamplingConfig{};
     new_state->sampling_defaults.supplied = {};
     new_state->supports_images = desc.capabilities.supports_vision;
@@ -585,8 +633,10 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
 
   auto effective_sampling = sampling_config;
   std::optional<sampling::JsonConstraint::ToolFormat> tool_format;
-  auto constrained = ConstrainChatRequest(request, state->scheduler->runner(),
-                                          &effective_sampling, &tool_format);
+  std::string tool_dialect;
+  auto constrained =
+      ConstrainChatRequest(request, state->scheduler->runner(),
+                           &effective_sampling, &tool_format, &tool_dialect);
   const auto& effective_request = constrained ? *constrained : request;
   auto prompt = state->scheduler->runner().PreparePrompt(effective_request);
   if (!prompt.has_value() || prompt->tokens.empty()) {
@@ -618,7 +668,8 @@ InferenceBackend::start_chat(const ChatRequest& request, std::size_t max_tokens,
           .return_progress = request.return_progress,
       });
   return std::make_shared<Impl::ScheduledGenerationRequest>(
-      state, std::move(scheduled_request), initial, tool_format);
+      state, std::move(scheduled_request), initial, tool_format,
+      std::move(tool_dialect));
 #else
   return TextGenerationBackend::start_chat(request, max_tokens, sampling_config,
                                            is_cancelled, stream_output);
