@@ -1,5 +1,19 @@
 # Gemma 4 for Gufo
 
+> [!NOTE]
+> **This is the `gemma4-ext` branch of [akamotaco/gufo_win](https://github.com/akamotaco/gufo_win):**
+> [franzmoca/gemma4-gufo-extension](https://github.com/franzmoca/gemma4-gufo-extension) `main`
+> plus two changes that let it build and run on native Windows:
+>
+> - `extension.json` lists `windows` among the platforms.
+> - Cache gather copies use a pointer only where it is also the device address
+>   (`continuation_adapter.cpp`, `Accessible`). Windows maps registered host memory
+>   at a different device address; a gather given the host pointer fails the first
+>   cache capture with "unspecified launch failure".
+>
+> Build it with gufo_win `main` and `-DGUFO_EXTENSION_DIRS=<this folder>`; see the
+> gufo_win README. Everything below is the extension's own README.
+
 A [Gufo](https://github.com/gufo-org/gufo) source extension for Google's
 Gemma 4 on Linux x86-64 / Strix Halo `gfx1151`:
 
