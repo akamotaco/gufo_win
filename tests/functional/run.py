@@ -8,8 +8,9 @@ template facts in templates.py and the expectations that read them) and runs
 the copy's run.py with the remaining arguments:
 
   python3 run.py --host ~/projects/gufo-ext -- \\
-      --output out/31b-mtp --sampling-preset gemma4 --suite tools -- \\
-      build/release/gufo llm --model ... --speculative mtp --mtp-model ...
+      --output out/31b-mtp --record-baseline --sampling-preset gemma4 \\
+      --suite tools -- \\
+      build/release/gufo serve llm --model ... --speculative mtp --mtp-model ...
 
 Everything after the first `--` goes to the host run.py unchanged. The host
 checkout is read only; a patch that does not apply cleanly is an error.

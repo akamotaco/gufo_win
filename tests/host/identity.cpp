@@ -1,4 +1,4 @@
-// Copied verbatim from gufo src/cache/identity.cpp at a8844cc6977b4c52349b1622f1b3f02e31fead25 (blob e5a010d71891); only the includes are rewritten.
+// Copied verbatim from gufo src/cache/identity.cpp at a8774bbc4b8231d49fa772fc0eb7690672267653 (blob e5a010d71891); only the includes are rewritten.
 // Regenerate with tools/sync_test_host.py; do not edit.
 #include <gufo/ext/adapter.hpp>
 

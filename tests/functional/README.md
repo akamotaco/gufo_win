@@ -15,7 +15,7 @@ provenance (host revision, patch hash) in `provenance.json`.
 ```sh
 G=~/projects/gufo-ext M=~/models/gemma-4
 nix develop $G -c python3 tests/functional/run.py --host $G -- \
-  --output out/31b-mtp --sampling-preset gemma4 \
+  --output out/31b-mtp --record-baseline --sampling-preset gemma4 \
   --expected-input-modalities text,image --suite tools --suite cache -- \
   $G/build/gemma-ext-release/gufo serve llm \
   --model $M/gemma-31b-it/gemma-4-31B-it-UD-Q4_K_XL.gguf \
@@ -46,8 +46,8 @@ Gemma-specific, keyed by `--sampling-preset gemma4`:
 Model-neutral harness fixes that belong upstream:
 
 - `run.py`: restart the server before `sampling-defaults`, `progress`,
-  `cache-edits` and `cache-growth`, and after the RAM cache logs
-  `reason=entry_capacity`. Each suite's server log is recorded in
+  `cache-edits` and `cache-growth`, and after the RAM cache refuses a capture
+  at its record limit. Each suite's server log is recorded in
   `report.json` `server_logs` (read by `metrics.py` and `server_metrics.py`).
   `--max-pending-per-client` defaults to `sessions + 1` for the metrics suite.
 - `openai_sdk.py`: thread-safe check recording, interrupted Responses calls
