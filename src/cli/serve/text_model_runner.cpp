@@ -18,47 +18,14 @@
 
 namespace gufo::server {
 
-namespace {
-
-using Format = sampling::JsonConstraint::ToolFormat;
-
-// The built-in format behind a dialect identity; null for a provider syntax.
-struct SelectedToolDialect {
-  std::optional<Format> format;
-  const ext::ToolDialect* dialect{nullptr};
-};
-
-SelectedToolDialect SelectToolDialect(const std::string& id) {
-  SelectedToolDialect selected{.dialect = ext::FindToolDialect(id)};
-  if (selected.dialect != nullptr) {
-    if (!selected.dialect->syntax)
-      selected.format = selected.dialect->format;
-    return selected;
-  }
-  // Built-in grammars need no registration; a missing DeepSeek registration
-  // only leaves its calls unparsed.
-  for (const auto format : {Format::kJson, Format::kQwen, Format::kDeepSeek})
-    if (id == ext::BuiltinToolDialectId(format))
-      return {.format = format};
-  throw std::invalid_argument("text runner tool dialect '" + id +
-                              "' is not registered");
-}
-
-}  // namespace
-
 std::optional<ChatRequest> ConstrainChatRequest(
     const ChatRequest& request, const TextModelRunner& runner,
     sampling::SamplingConfig* sampling,
-    std::optional<sampling::JsonConstraint::ToolFormat>* tool_format,
-    std::string* tool_dialect) {
+    std::optional<sampling::JsonConstraint::ToolFormat>* tool_format) {
   // Output parsing needs the model's dialect even without tool constraints
   // (for example Qwen's whitespace boundary after </think>).
-  const auto dialect_id = runner.ToolDialectId();
-  const auto selected = SelectToolDialect(dialect_id);
   if (tool_format)
-    *tool_format = selected.format;
-  if (tool_dialect)
-    *tool_dialect = dialect_id;
+    *tool_format = runner.ToolFormat();
   if (!request.response_format &&
       (request.tools.empty() ||
        request.tool_choice == ChatRequest::ToolChoice::kNone))
@@ -72,8 +39,7 @@ std::optional<ChatRequest> ConstrainChatRequest(
     std::vector<sampling::JsonConstraint::Tool> tools;
     const bool required =
         request.tool_choice == ChatRequest::ToolChoice::kRequired;
-    const auto* syntax = selected.format ? nullptr : &*selected.dialect->syntax;
-    const auto format = selected.format.value_or(Format::kJson);
+    auto format = runner.ToolFormat();
     for (const auto& tool : request.tools) {
       const auto definition = tool.definition_json.empty()
                                   ? json::Value()
@@ -82,20 +48,14 @@ std::optional<ChatRequest> ConstrainChatRequest(
       const auto* strict = function ? function->find("strict") : nullptr;
       const bool enforce = strict && strict->as_bool();
       auto schema = json::parse(tool.parameters_json);
-      auto native = syntax ? sampling::JsonConstraint::ToolParameters(
-                                 schema, enforce, *syntax)
-                           : sampling::JsonConstraint::ToolParameters(
-                                 schema, enforce, format);
+      auto native =
+          sampling::JsonConstraint::ToolParameters(schema, enforce, format);
       tools.emplace_back(tool.name, std::move(native));
     }
-    const bool parallel =
-        !request.response_format && request.parallel_tool_calls;
-    grammar = syntax
-                  ? sampling::JsonConstraint::WithTools(
-                        grammar, std::move(tools), required, parallel, *syntax)
-                  : sampling::JsonConstraint::WithTools(
-                        grammar, std::move(tools), required, parallel, format);
-    if (!syntax && format == Format::kJson)
+    grammar = sampling::JsonConstraint::WithTools(
+        grammar, std::move(tools), required,
+        !request.response_format && request.parallel_tool_calls, format);
+    if (format == sampling::JsonConstraint::ToolFormat::kJson)
       instruction +=
           "\nIf a tool is needed, respond using the JSON tool-call form "
           "<tool_call>{\"name\":\"function_name\",\"arguments\":{...}}</"
@@ -121,17 +81,8 @@ std::optional<ChatRequest> ConstrainChatRequest(
     constrained.messages.insert(constrained.messages.begin(),
                                 std::move(message));
   }
-  // The reasoning phase uses the provider's delimiters, as the response
-  // parsers do. Reasoning the prompt opened may still repeat the opener;
-  // otherwise the model may open it itself unless the request disabled it.
-  const auto initial = runner.InitialOutputState(request);
-  const auto reasoning = runner.ReasoningDelimiters();
-  if (initial == ext::InitialOutputState::kReasoning)
-    grammar = sampling::JsonConstraint::WithReasoning(grammar, reasoning.close);
-  else if (initial == ext::InitialOutputState::kAuto &&
-           request.reasoning.enabled.value_or(true) && !reasoning.open.empty())
-    grammar = sampling::JsonConstraint::WithReasoning(grammar, reasoning.close,
-                                                      reasoning.open);
+  if (runner.InitialOutputState(request) == ext::InitialOutputState::kReasoning)
+    grammar = sampling::JsonConstraint::WithReasoning(grammar);
   sampling->constraint = runner.BindConstraint(grammar);
   return constrained;
 }
@@ -180,11 +131,6 @@ ValidatedRunner ValidateRunner(std::shared_ptr<TextModelRunner> runner,
     throw std::invalid_argument(
         "text runner maximum context must be at least one token");
   }
-  if (runner->ReasoningDelimiters().close.empty()) {
-    throw std::invalid_argument(
-        "text runner reasoning close delimiter must not be empty");
-  }
-  (void)SelectToolDialect(runner->ToolDialectId());
   if (descriptor.capabilities.fork && !descriptor.capabilities.snapshot) {
     throw std::invalid_argument(
         "text runner fork capability requires snapshot support");
@@ -426,7 +372,7 @@ struct TextRunnerPool::Request::Impl {
     }
     ngram_baseline = runner->NgramRows(state);
     checkpoints = lease->PlannedCaptures(cache_prefix_tokens);
-    if (alignment > 1) {
+    if (alignment > 1 || context) {
       for (auto& position : checkpoints)
         position = Aligned(position);
       std::erase_if(checkpoints, [&](std::size_t position) {
@@ -436,21 +382,35 @@ struct TextRunnerPool::Request::Impl {
       checkpoints.erase(std::ranges::unique(checkpoints).begin(),
                         checkpoints.end());
     }
-    // No planned capture may split an indivisible input either. PrefillStop
-    // only moves a position back, so the plan stays sorted.
-    if (context) {
-      for (auto& position : checkpoints)
-        position = legal(position);
-      std::erase_if(checkpoints, [&](std::size_t position) {
-        return position <= prefill_offset;
-      });
-      checkpoints.erase(std::ranges::unique(checkpoints).begin(),
-                        checkpoints.end());
+  }
+
+  /// The nearest position at or before `position` where a pass may end: on
+  /// the prefill alignment and outside every indivisible input.
+  [[nodiscard]] std::size_t Aligned(std::size_t position) const {
+    for (;;) {
+      auto next = position - position % alignment;
+      if (context)
+        next = context->PrefillStop(next, false);
+      if (next == position)
+        return position;
+      position = next;
     }
   }
 
-  [[nodiscard]] std::size_t Aligned(std::size_t position) const noexcept {
-    return position - position % alignment;
+  /// The nearest such position after `position`, or the prompt end.
+  [[nodiscard]] std::size_t NextStop(std::size_t position) const {
+    for (;;) {
+      if (position >= prompt.size())
+        return prompt.size();
+      auto next = position;
+      if (const auto over = next % alignment; over != 0)
+        next += alignment - over;
+      if (context && next < prompt.size())
+        next = context->PrefillStop(next, true);
+      if (next == position)
+        return position;
+      position = next;
+    }
   }
 
   ~Impl() {
@@ -893,10 +853,8 @@ std::size_t TextRunnerPool::Request::ShareCheckpoint(
     return 0;
   // The complete prompt is retained only after decoding starts; share the
   // last prefill position instead so peers can start sooner.
-  auto target =
+  const auto target =
       impl_->Aligned(std::min(common_tokens, impl_->prompt.size() - 1));
-  if (impl_->context)
-    target = impl_->context->PrefillStop(target, false);
   const auto offset = impl_->prefill_offset;
   if (target <= offset)
     return 0;
@@ -992,18 +950,15 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
             : std::min(max_input_tokens + impl_->alignment - over,
                        impl_->prompt.size() - impl_->prefill_offset);
   }
-
-  // Never end a step inside an indivisible input. A step starting at one
-  // consumes it whole, beyond the budget. Every planned stop is already legal,
-  // so the step cannot cross one by extending.
-  if (impl_->context) {
-    const auto offset = impl_->prefill_offset;
-    auto stop = impl_->context->PrefillStop(
-        offset + std::min(max_input_tokens, impl_->prompt.size() - offset),
-        false);
-    if (stop <= offset)
-      stop = impl_->context->PrefillStop(offset + 1, true);
-    max_input_tokens = std::min(stop, impl_->prompt.size()) - offset;
+  // Nor does it end inside an indivisible input: it ends before one, or a
+  // step starting at one consumes it whole, beyond the budget. Every planned
+  // stop is legal already, so later clamps keep the step legal.
+  if (const auto end = impl_->prefill_offset + max_input_tokens;
+      impl_->context && end < impl_->prompt.size()) {
+    auto stop = impl_->Aligned(end);
+    if (stop <= impl_->prefill_offset)
+      stop = impl_->NextStop(impl_->prefill_offset + 1);
+    max_input_tokens = stop - impl_->prefill_offset;
   }
 
   auto& state = dynamic_cast<TextRunnerState&>(impl_->lease->state());
