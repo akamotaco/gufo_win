@@ -60,7 +60,7 @@ struct DurableCapture {
   cache::DiskManifest manifest;
   std::vector<cache::PersistenceSource> sources;
 };
-class ComponentSnapshot final : public TextRunnerSnapshot {
+class ComponentSnapshot final : public ContinuationSnapshot {
 public:
   std::shared_ptr<const cache::Checkpoint> checkpoint;
   std::shared_ptr<DurableCapture> durable;
@@ -730,10 +730,10 @@ struct ComponentTextCache::Lease::Impl {
         .reused = cached != 0,
         .reused_tokens = cached};
   }
-  std::unique_ptr<TextRunnerSnapshot> CaptureDurable();
+  std::unique_ptr<ContinuationSnapshot> CaptureDurable();
 };
 
-std::unique_ptr<TextRunnerSnapshot>
+std::unique_ptr<ContinuationSnapshot>
 ComponentTextCache::Lease::Impl::CaptureDurable() {
   if (!persist || !cache->queue || !cache->resources->copy_observed_rows ||
       purpose == SnapshotPurpose::kHistory)
@@ -1140,7 +1140,13 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
       return boundary < prompt.size() ||
              impl_->runner->HasDecodeFrontier(*request.state);
     };
-    if (live && !decodable(found.selected->boundary)) {
+    // Prefill must not resume inside an indivisible input of this prompt,
+    // which a checkpoint from another prompt with the same tokens can do.
+    const auto whole_inputs = [&](std::size_t boundary) {
+      return !context || context->PrefillStop(boundary, false) == boundary;
+    };
+    if (live && (!decodable(found.selected->boundary) ||
+                 !whole_inputs(found.selected->boundary))) {
       live.reset();
       const std::lock_guard lock(impl_->mutex);
       entry->branch = std::make_shared<const std::uint8_t>(0);
@@ -1158,8 +1164,9 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
     for (const auto& candidate : found.candidates) {
       if (restored || (cancelled && cancelled()))
         break;
-      if (candidate.live || (candidate.boundary % alignment != 0 &&
-                             candidate.boundary < prompt.size()))
+      if (candidate.live || !whole_inputs(candidate.boundary) ||
+          (candidate.boundary % alignment != 0 &&
+           candidate.boundary < prompt.size()))
         continue;
       try {
         if (candidate.checkpoint) {
@@ -1523,7 +1530,7 @@ std::size_t ComponentTextCache::Lease::CaptureBytes(
       impl_->cache->resources->adapter->PrefillCheckpointPositions(
           impl_->slot.Execution(), boundary));
 }
-std::unique_ptr<TextRunnerSnapshot> ComponentTextCache::Lease::Capture() {
+std::unique_ptr<ContinuationSnapshot> ComponentTextCache::Lease::Capture() {
   auto& request = *impl_;
   auto& cache = *request.cache;
   auto positions =
@@ -1810,14 +1817,15 @@ std::vector<std::size_t> ComponentTextCache::Lease::PlannedCaptures(
   if (!impl_->cache->ram_enabled && !impl_->cache->queue)
     return {};
   const auto& adapter = *impl_->cache->resources->adapter;
-  // Grid checkpoints lie a whole grid step apart, beyond any window, so each
-  // keeps its own window as well as its private state.
+  // Each grid checkpoint keeps its private state and at most a window plus a
+  // partial leading chunk. Checkpoints closer than a window share those rows,
+  // so this bound can only plan fewer captures than RAM holds.
   std::size_t private_bytes = 0;
   for (const auto& d : adapter.Components())
     if (d.kind == cache::ComponentKind::kPrivateState)
       private_bytes += d.state_bytes;
     else if (d.kind == cache::ComponentKind::kWindowRows)
-      private_bytes += d.window_rows * d.row_bytes;
+      private_bytes += (d.window_rows + d.rows_per_chunk - 1) * d.row_bytes;
   const auto plan = cache::PlanCaptures(
       adapter, impl_->slot.Execution(),
       {impl_->prompt.size(),

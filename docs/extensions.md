@@ -43,9 +43,48 @@ are rejected for external extensions; keep your own implementation headers
 inside your repository. The include checks enforce the source API boundary.
 Extension code still has arbitrary native-code privileges during build and run.
 
-A text runner that provides continuation implements `cache::Adapter` and links
-`gufo_ext_cache`, the public target for the component cache and its HIP backing.
-It exists only in HIP builds, so list it under a target that requires `hip`.
+Every text runner provides continuation through the component cache. It
+implements `cache::Adapter` and links `gufo_ext_cache`, the public target for the
+component cache and, in HIP builds, its HIP backing.
+
+### Link targets
+
+`gufo_ext_runtime` declares the whole public surface but implements only its
+neutral contracts. The `gufo` executable supplies everything else at its final
+link, so a registration library needs nothing more. A test, probe or tool that
+is its own executable must link the implementation of each service it uses:
+
+| Target | Provides | Builds |
+| --- | --- | --- |
+| `gufo_ext_core` | GGUF reading and identity, sampling, JSON constraints, dequantization, SHA-256, image decoding, the hipBLASLt plan database, and `WeightUpload` in HIP builds. Also carries OpenSSL, which `sha256.hpp` exposes | all |
+| `gufo_ext_cache` | Component cache; in HIP builds also `transfer_pool`, `host_allocations` and `component_cache_resources` | all |
+| `gufo_ext_hip` | `ENGINE_ENABLE_HIP`, which the public HIP headers need, `hip::host` and the hipCUB and rocPRIM include paths | HIP only; list it under a target that requires `hip` |
+
+These targets add no Gufo include path, so the source API stays the audited
+surface. Linking `gufo_core` or `gufo_cache` directly is still rejected.
+
+## Provide continuation
+
+The cache owns every execution slot and decides what to retain, evict and write
+to disk. A runner describes its state and moves bytes on request:
+
+- `CreateComponentCacheResources` returns the adapter and its backing. Build the
+  backing with `hip::CreateHipComponentCacheResources`, and charge memory to the
+  ledger it receives.
+- `BindComponentState` wraps one slot in the runner's `TextRunnerState`.
+- `ReconcileComponentState` runs after the cache restores rows into a slot, and
+  brings the runner's own bookkeeping to that position.
+- `cache::Adapter` declares each component as append rows or whole private state
+  and copies it in and out. [adapter.hpp](../src/cache/adapter.hpp) states the
+  ordering and failure rules. Report positions per component, never from prompt
+  length.
+
+`gufo/ext/transfer_pool.hpp` and `gufo/ext/snapshot_copy.hpp` are the supported
+helpers for those copies. Set `prefix_reuse` to false only for a runner which must
+start each request cold. The cache identity must change whenever retained bytes
+stop being valid: include the model artifact, context size and every setting that
+alters state. An adapter test should restore each component and compare the
+result byte for byte with an uninterrupted run.
 
 ## Start with the template
 
@@ -149,14 +188,13 @@ matches must remain errors; do not steal another provider's artifacts with an
 overly broad probe.
 
 For a text model, own tokenization, chat/control framing and tool syntax in the
-extension. Declare supported inputs, state/persistence/resource capabilities and
-sampling defaults accurately. Implement incremental execution, cancellation,
-state isolation, snapshot/restore and batching only under the contracts you
-advertise. To capture prefill checkpoints without ending a pass at them, declare
-`in_pass_checkpoint` and `max_in_pass_checkpoints`, implement
-`PrefillCheckpointBytes` and override the boundaries form of `PrefillThrough`;
-each capture must equal the state a pass ending at its boundary leaves. The
-single-boundary form is deprecated and captures one checkpoint per call.
+extension. Declare supported inputs, state/resource capabilities and sampling
+defaults accurately. Implement incremental execution, cancellation, state
+isolation and batching only under the contracts you advertise. To capture prefill
+checkpoints without ending a pass at them, declare `in_pass_checkpoint` and
+`max_in_pass_checkpoints`, and implement `PrefillCheckpointBytes` and
+`PrefillThrough`; each capture must equal the state a pass ending at its boundary
+leaves.
 Preserve sampler/constraint state and cache compatibility identities
 across rollback and continuation. Draft models/heads and sidecars stay with the
 target model's artifact set. Wire the CLI prompt/chat/benchmark drivers as well
@@ -166,11 +204,28 @@ A text provider supplies its recommended sampling through
 `TextRunnerDescriptor::sampling_defaults` (HTTP) and
 `TextProvider::sampling_defaults` (`prompt`/`chat`), both a
 `sampling::TextSamplingDefaults` holding one set of optional values for thinking
-enabled, disabled and unspecified. Set values, including zero, apply as written;
-unset controls stay neutral; the seed and output constraint are never defaults.
-Precedence is provider defaults, explicit server/CLI settings, then per-request
-overrides, identically for HTTP, `prompt` and `chat`. `sampling_preset` remains
-for existing extensions.
+enabled, disabled and unspecified. A provider with `prompt` or `chat` drivers
+must set both, from one function: core cannot detect a provider that sets only
+one, and its HTTP and command-line defaults would differ. Set values, including
+zero, apply as written; unset controls stay neutral; the seed and output
+constraint are never defaults. Invalid values fail model load or the command
+before generation. Precedence is provider defaults, explicit server/CLI settings,
+then per-request overrides, identically for HTTP, `prompt` and `chat`.
+`sampling_preset` remains for existing extensions; in-tree models no longer use
+it.
+
+A text runner declares the literal framing of its reasoning with
+`TextModelRunner::ReasoningDelimiters()`. The default follows
+`ReasoningBudgetTags()`; override it when the model's text differs from those
+control tokens, such as an opener spanning several tokens. Both describe the same
+block: `ReasoningBudgetTags().start` is the one control token that begins `open`,
+and `ends` include the control token for `close`. `close` must be non-empty and
+`open` must not begin with whitespace; model load rejects either. With
+`InitialOutputState::kThought` the prompt opened reasoning; with `kAuto` the
+output opens it, and the parsers, usage accounting and reasoning budget all
+start at a leading `open`. The budget counts from `start`, so the rest of `open`
+counts toward it. Line breaks after `close` are framing and dropped, and Qwen's
+tool dialect also drops other whitespace there.
 
 ### Native tool calls
 
@@ -203,11 +258,51 @@ The contract, ownership and error rules are documented on `ToolDialect` in
 the default `ToolDialectId()` is the built-in identity (`json`, `qwen`,
 `deepseek`) of `ToolFormat()`.
 
-Provider options use canonical names and manifest types. CMake checks conflicting
-declarations. The Nix serving helper derives provider arguments and validation
-from metadata, including optional `serving` declarations. New runtime controls
-also need actual command parsing/execution support; metadata alone cannot
-implement them. See [Nix serving](model-extensions/serving.md).
+Provider options use canonical names and manifest types. Extensions may declare
+the same option when the type agrees, as providers sharing `--mtp-model` do; CMake
+rejects conflicting types. The Nix serving helper derives provider arguments and validation
+from metadata, including optional `serving` declarations. See
+[Nix serving](model-extensions/serving.md).
+
+Text providers declare the draft settings a speculative backend runs with in
+`TextProvider::speculative_defaults`, one entry per backend (`mtp`, `dflash2`,
+`dspark`). Core resolves each setting once the provider is selected, before any
+weights load, and logs the result in `load_completed`: an explicit
+`--draft-tokens`, `--min-draft-tokens` or `--draft-policy`, else the declared
+value, else the host's fallback of 7, 1 and no policy (DFlash2 accepts `fixed`
+and `adaptive`). `--draft-policy` must be in the entry's `draft_policies`. The
+resolved values reach `TextSpeculativeConfig`, `TextPromptOptions` and
+`TextBenchOptions`.
+
+```cpp
+.speculative_defaults = {{.backend = "mtp",
+                          .max_draft_tokens = 15,
+                          .min_draft_tokens = 1,
+                          .draft_policy = "calibrated",
+                          .draft_policies = {"calibrated", "fixed"}}},
+```
+
+Text providers receive their options. `serve`, `prompt`, `chat` and `bench`
+accept every option an available provider declares for that command, list the
+ones core does not own under "Provider options" in `--help`, and parse values
+with the manifest types. Once the model's provider is selected, the explicit
+values of its declared options reach `TextRunnerOptions`, `TextPromptOptions`
+or `TextBenchOptions` as `provider_options`; read them with
+`ext::FindOption<T>`:
+
+```cpp
+std::uint32_t image_tokens = kDefaultImageTokens;
+if (const auto* value = ext::FindOption<std::int64_t>(
+        options.provider_options, "--image-tokens")) {
+  image_tokens = ValidateImageTokens(*value);  // provider-owned validation
+}
+```
+
+An option that was not given is absent, so defaults stay with the provider; an
+explicit `false` or `0` is present. An option the selected provider does not
+declare for the command fails before any weights load, as do type errors and a
+repeated option. Spellings core parses itself, such as `--mtp-model`, keep
+their core handling and fields and are not part of `provider_options`.
 
 ## Build and exercise the extension
 

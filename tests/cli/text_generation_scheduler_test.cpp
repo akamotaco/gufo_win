@@ -13,6 +13,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <optional>
 #include <semaphore>
 #include <span>
@@ -118,6 +119,7 @@ struct Event {
 struct FakeControl {
   gufo::sampling::TextModelPreset sampling_preset{
       gufo::sampling::TextModelPreset::kUnspecified};
+  std::optional<gufo::sampling::TextSamplingDefaults> sampling_defaults;
   void Log(Event event) {
     const std::lock_guard<std::mutex> lock(mutex);
     events.push_back(event);
@@ -220,7 +222,7 @@ struct FakeControl {
   std::uint32_t max_context{128};
   std::optional<std::size_t> stop_after;
   std::optional<std::size_t> eos_after;
-  // Retained state needs snapshot capabilities; a capture observer implies it.
+  // Requests share nothing unless asked; a capture observer implies it.
   bool snapshots{false};
   std::function<void()> snapshot_callback;
   [[nodiscard]] bool Retains() const {
@@ -312,8 +314,6 @@ public:
         .capabilities =
             TextRunnerCapabilities{
                 .incremental_prefill = control_->incremental_prefill,
-                .snapshot = control_->Retains(),
-                .fork = control_->Retains(),
                 .final_token_advance_required =
                     control_->final_token_advance_required,
                 .incremental_text_is_exact =
@@ -322,9 +322,9 @@ public:
                 .batched_multi_token_decode =
                     control_->batched_multi_token_decode,
                 .batched_multi_token_decode_max_width = 4,
-                .prefix_reuse = control_->prefix_reuse,
+                .prefix_reuse = control_->prefix_reuse && control_->Retains(),
             },
-        .persistence = std::nullopt,
+        .sampling_defaults = control_->sampling_defaults,
         .sampling_preset = control_->sampling_preset,
     };
   }
@@ -395,11 +395,6 @@ public:
     return text;
   }
 
-  [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
-    throw std::logic_error("slots are owned by the component cache");
-  }
-
-  [[nodiscard]] bool UsesComponentCache() const override { return true; }
   [[nodiscard]] std::unique_ptr<gufo::server::ComponentCacheResources>
   CreateComponentCacheResources(gufo::cache::ResourceLedger& ledger,
                                 std::size_t) const override {
@@ -820,7 +815,7 @@ void TestParkedFollowerSurvivesLeaderCancellation() {
   }
 }
 
-void TestSharedPrefixWaitRequiresSnapshots() {
+void TestSharedPrefixWaitRequiresPrefixReuse() {
   auto control = SharedPrefixControl(false);
   control->block_prefill_label = 1;
   auto scheduler = MakeScheduler(control, 2);
@@ -833,7 +828,7 @@ void TestSharedPrefixWaitRequiresSnapshots() {
   const auto b = follower.Wait();
   Expect(b.tokens == ExpectedTokens(1, 2) && b.shared_prefix_wait_ms == 0.0 &&
              b.prefill_tokens == prompt.size(),
-         "runners without snapshots never park concurrent requests");
+         "runners without prefix reuse never park concurrent requests");
 }
 
 void TestParkedFollowersReserveVisibleSessions() {
@@ -3166,40 +3161,59 @@ void TestBackendPreservesModelSamplingPreset() {
            "server overrides retain the model preset for omitted fields");
   }
 }
+
+void TestBackendRejectsInvalidSamplingDefaults() {
+  auto control = std::make_shared<FakeControl>();
+  control->sampling_defaults.emplace();
+  control->sampling_defaults->thinking_disabled.temperature = -1.0F;
+  gufo::server::InferenceBackend backend;
+  std::string error;
+  Expect(!backend.load(std::make_shared<FakeRunner>(control), &error) &&
+             !error.empty(),
+         "invalid provider sampling defaults fail model load");
+}
 #endif
 
 void TestReasoningTokenCount() {
-  using Tokens = std::vector<gufo::tokenization::TokenId>;
-  const Tokens open{7, 8};
-  const Tokens close{9};
-  const auto count = [](const Tokens& tokens, const Tokens& open,
-                        const Tokens& close) {
-    return gufo::server::CountReasoningTokens(tokens, open, close);
+  using State = gufo::server::TextGenerationBackend::InitialOutputState;
+  using Pieces = std::vector<std::string>;
+  const gufo::ext::ReasoningMarkup markup{"<a>\n", "</a>"};
+  const auto count = [&markup](const Pieces& pieces, State initial) {
+    std::vector<gufo::tokenization::TokenId> tokens(pieces.size());
+    std::iota(tokens.begin(), tokens.end(), 0);
+    return gufo::server::CountReasoningTokens(
+        tokens, initial, markup,
+        [&pieces](gufo::tokenization::TokenId token) { return pieces[token]; });
   };
-  Expect(count({1, 2, 9, 3}, {}, close) == 2,
+  Expect(count({"x", "y", "</a>", "z"}, State::kThought) == 2,
          "output inside reasoning counts to the close");
-  Expect(count({1, 2, 3}, {}, close) == 3,
+  Expect(count({"x", "y", "z"}, State::kThought) == 3,
          "unclosed reasoning counts to the end");
-  Expect(count({7, 8, 1, 2, 9, 3}, open, close) == 2,
+  Expect(count({"<a>", "\n", "x", "</a>"}, State::kThought) == 1,
+         "a repeated opener is not reasoning");
+  Expect(count({"<a>", "\n", "x", "y", "</a>", "z"}, State::kAuto) == 2,
          "a model-opened block counts without its delimiters");
-  Expect(count({1, 7, 8, 2, 9}, open, close) == 0,
+  Expect(count({"<a>", "\n\n", "x", "</a>"}, State::kAuto) == 2,
+         "a delimiter token merged with its neighbour still opens the block");
+  Expect(count({"<a>\n", "x", "y</", "a>"}, State::kAuto) == 2,
+         "a token holding text before the close counts");
+  Expect(count({"x", "<a>\n", "y", "</a>"}, State::kAuto) == 0,
          "an automatic phase counts only a leading block");
-  const auto blank = [](std::span<const gufo::tokenization::TokenId> prefix) {
-    return std::ranges::all_of(prefix, [](auto token) { return token == 0; });
-  };
-  Expect(gufo::server::CountReasoningTokens(Tokens{0, 7, 8, 2, 9}, open, close,
-                                            blank) == 1,
-         "a blank prefix may precede the opener");
-  Expect(gufo::server::CountReasoningTokens(Tokens{1, 7, 8, 2, 9}, open, close,
-                                            blank) == 0,
-         "text before the opener is not blank");
-  Expect(count({7}, open, close) == 0, "a partial opener is not reasoning");
-  Expect(count({1, 2}, {}, {}) == 0, "no close delimiter counts nothing");
+  Expect(count({" \n", "<a>\n", "y", "</a>"}, State::kAuto) == 1,
+         "blank text may precede the opener");
+  Expect(count({"<a>"}, State::kAuto) == 0,
+         "a partial opener is not reasoning");
+  Expect(count({"<a>\n", "x"}, State::kAuto) == 1,
+         "an unclosed model-opened block counts to the end");
+  Expect(count({"<a>\n", "x", "</a>"}, State::kText) == 0,
+         "text output has no reasoning");
+  Expect(count({}, State::kThought) == 0, "no output counts nothing");
 }
 
 int main() {
 #if defined(ENGINE_ENABLE_HIP)
   TestBackendPreservesModelSamplingPreset();
+  TestBackendRejectsInvalidSamplingDefaults();
 #endif
   TestTokenLogprobs();
   TestReasoningTokenCount();
@@ -3270,7 +3284,7 @@ int main() {
   TestConcurrentSharedPrefixesPrefillOnce();
   TestLeaderCancelledBeforeFollowerIsAdmitted();
   TestParkedFollowerSurvivesLeaderCancellation();
-  TestSharedPrefixWaitRequiresSnapshots();
+  TestSharedPrefixWaitRequiresPrefixReuse();
   TestParkedFollowersReserveVisibleSessions();
   TestRetainedHistoryBeatsSharedPrefixWait();
   TestAwaitedCheckpointSurvivesCachePressure();

@@ -1088,7 +1088,7 @@ std::string_view Trim(std::string_view value) {
 
 std::string_view AfterReasoningSeparator(std::string_view value,
                                          const ToolMarkup& markup) {
-  // Only the boundary after an explicit </think> is framing; answer and
+  // Only the boundary after an explicit reasoning close is framing; answer and
   // argument interiors are untouched.
   const auto first = value.find_first_not_of(markup.reasoning_separator);
   return first == std::string_view::npos ? std::string_view{}
@@ -2073,7 +2073,11 @@ ParsedGeneration ParseStructuredGeneration(
       raw = AfterReasoningSeparator(raw, markup);
     }
   }
-  const auto content = tool_only ? raw : Trim(raw);
+  const auto trimmed = Trim(raw);
+  const bool held_opener = choice == ChatRequest::ToolChoice::kRequired &&
+                           trimmed.empty() && !raw.empty() &&
+                           ToolMarkerPrefix(raw, markers);
+  const auto content = tool_only || held_opener ? raw : trimmed;
   quotes.Reset(content);
   if (const auto marker = EarliestMarker(content, markers, quotes);
       !tools.empty() && choice != ChatRequest::ToolChoice::kNone &&
@@ -2379,9 +2383,9 @@ public:
     }
 
     if (state_ == State::kThinking) {
-      const std::string_view kThinkEnd = reasoning_.close;
+      const std::string_view close = reasoning_.close;
       const auto offset = pending_offset();
-      const auto think_found = raw_.find(kThinkEnd, offset);
+      const auto think_found = raw_.find(close, offset);
       const std::size_t end_pos = think_found == std::string::npos
                                       ? std::string::npos
                                       : think_found - offset;
@@ -2407,10 +2411,10 @@ public:
           return false;
         }
         std::string_view remaining = pending_;
-        remaining.remove_prefix(end_pos + kThinkEnd.size());
+        remaining.remove_prefix(end_pos + close.size());
         pending_ = std::string(remaining);
         state_ = State::kContent;
-        quotes_.Reset(raw_, offset + end_pos + kThinkEnd.size());
+        quotes_.Reset(raw_, offset + end_pos + close.size());
         trim_reasoning_separator_ = true;
       } else {
         std::size_t held = !recognize_tools_
@@ -2418,9 +2422,9 @@ public:
                                : HeldMarkerPrefix(raw_, raw_.size(),
                                                   thinking_markers, quotes_);
         held = std::min(held, pending_.size());
-        for (std::size_t len = std::min(pending_.size(), kThinkEnd.size() - 1);
+        for (std::size_t len = std::min(pending_.size(), close.size() - 1);
              len > 0; --len) {
-          if (kThinkEnd.starts_with(pending_.substr(pending_.size() - len))) {
+          if (close.starts_with(pending_.substr(pending_.size() - len))) {
             held = std::max(held, len);
             break;
           }

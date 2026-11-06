@@ -28,6 +28,7 @@
 #include "src/models/qwen38_flash_next/continuation_identity.hpp"
 #include "src/models/qwen38_flash_next/engine.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/executor.hpp"
+#include "src/models/qwen38_flash_next/probe.hpp"
 #include "src/models/qwen38_flash_next/rope_scaling.hpp"
 
 namespace gufo::models::qwen38_flash_next {
@@ -234,17 +235,12 @@ public:
     // lifetime is an exact process-local identity; durable caches still
     // require the validated full artifact fingerprints below.
     if (!artifact_fingerprint.empty()) {
-      persistence_ = TextRunnerPersistenceDescriptor{
-          .compatibility_identity = QwenFlashNextCompatibilityIdentity(
-              artifact_fingerprint, use_mtp_ ? mtp_fingerprint : std::string{},
-              use_mtp_, max_context_, max_draft_tokens_,
-              model_->DecodeConcurrency(),
-              models::qwen38_flash_next::RopePositionPolicy(
-                  model_->config().rope_scaling)),
-          .payload_version =
-              models::qwen38_flash_next::Session::kSnapshotPayloadVersion,
-      };
-      component_identity_ = persistence_->compatibility_identity;
+      component_identity_ = QwenFlashNextCompatibilityIdentity(
+          artifact_fingerprint, use_mtp_ ? mtp_fingerprint : std::string{},
+          use_mtp_, max_context_, max_draft_tokens_,
+          model_->DecodeConcurrency(),
+          models::qwen38_flash_next::RopePositionPolicy(
+              model_->config().rope_scaling));
     } else {
       component_identity_ = QwenFlashNextProcessIdentity(
           model_.get(), max_context_, use_mtp_, max_draft_tokens_,
@@ -252,7 +248,6 @@ public:
     }
   }
 
-  [[nodiscard]] bool UsesComponentCache() const override { return true; }
   [[nodiscard]] std::unique_ptr<ComponentCacheResources>
   CreateComponentCacheResources(cache::ResourceLedger& ledger,
                                 std::size_t ram) const override {
@@ -286,8 +281,6 @@ public:
             TextRunnerCapabilities{
                 .supports_vision = model_->VisionEncoder() != nullptr,
                 .incremental_prefill = true,
-                .snapshot = true,
-                .fork = true,
                 .final_token_advance_required = false,
                 .incremental_text_is_exact = true,
                 .multi_token_decode = use_mtp_,
@@ -302,8 +295,7 @@ public:
                     std::max<std::size_t>(1, model_->config().compress_ratio),
                 .max_in_pass_checkpoints = rocm::kMaxPassCheckpoints,
             },
-        .persistence = persistence_,
-        .sampling_preset = sampling::TextModelPreset::kQwen38,
+        .sampling_defaults = FlashNextSamplingDefaults(),
     };
   }
 
@@ -415,11 +407,6 @@ public:
     return model_->tokenizer().Decode(tokens);
   }
 
-  [[nodiscard]] std::unique_ptr<TextRunnerState> CreateState() const override {
-    throw std::logic_error(
-        "Flash-Next execution slots are owned by the component cache");
-  }
-
   void PreparePrefixReuse(
       TextRunnerState& state,
       std::span<const TextRunnerToken> prefix) const override {
@@ -489,7 +476,6 @@ public:
     return bytes ? std::optional<std::size_t>(bytes) : std::nullopt;
   }
 
-  using TextModelRunner::PrefillThrough;
   [[nodiscard]] TextPrefillStep PrefillThrough(
       TextRunnerState& state, std::span<const TextRunnerToken> prompt,
       std::size_t offset, std::size_t budget,
@@ -519,7 +505,7 @@ public:
           qfn.slot(), prefix, points,
           [&](std::size_t index) {
             const auto started = std::chrono::steady_clock::now();
-            consume(index, nullptr);
+            consume(index);
             capture_ms += std::chrono::duration<double, std::milli>(
                               std::chrono::steady_clock::now() - started)
                               .count();
@@ -766,7 +752,6 @@ private:
   std::uint32_t max_context_;
   bool use_mtp_;
   std::uint32_t max_draft_tokens_;
-  std::optional<TextRunnerPersistenceDescriptor> persistence_;
   cache::Identity component_identity_;
 };
 
@@ -852,6 +837,13 @@ std::shared_ptr<ext::TextModelRunner> CreateQwenFlashNextTextRunner(
   if (!model) {
     if (error)
       *error = "Failed to load Flash-Next model: " + load_error;
+    return nullptr;
+  }
+  try {
+    models::qwen::vision::PrepareForServing(model->VisionEncoder());
+  } catch (const std::exception& e) {
+    if (error)
+      *error = e.what();
     return nullptr;
   }
   // Each eight rows of wide copy verification past the first reserve

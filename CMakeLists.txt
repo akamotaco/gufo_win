@@ -217,6 +217,7 @@ if (WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
 endif()
 
 add_subdirectory(src/cache)
+add_subdirectory(src/sched)
 
 if (ENGINE_ENABLE_HIP)
   add_library(gufo_hip_host STATIC src/core/hip/host_allocations.cpp)
@@ -250,10 +251,6 @@ if (ENGINE_ENABLE_HIP)
   if (BUILD_TESTING)
     target_compile_options(gufo_cache_hip PRIVATE -UNDEBUG)
   endif()
-  # The link contract for extension adapters. It carries no include path: the
-  # headers come from the audited public surface of gufo_ext_runtime.
-  add_library(gufo_ext_cache INTERFACE)
-  target_link_libraries(gufo_ext_cache INTERFACE $<LINK_ONLY:gufo_cache_hip>)
   if (GUFO_BUILD_TOOLS)
     add_executable(cache_idle_spill_bench tests/cache/idle_spill_bench.cpp)
     target_link_libraries(cache_idle_spill_bench PRIVATE gufo_cache_hip)
@@ -346,6 +343,25 @@ if (ENGINE_ENABLE_HIP)
     roc::hipblaslt roc::rocblas)
 endif()
 
+# The link contracts for extensions. They add no Gufo include path: the headers
+# come from the audited public surface of gufo_ext_runtime.
+add_library(gufo_ext_core INTERFACE)
+target_link_libraries(gufo_ext_core INTERFACE $<LINK_ONLY:gufo_core>
+  OpenSSL::Crypto)
+add_library(gufo_ext_cache INTERFACE)
+if (ENGINE_ENABLE_HIP)
+  target_link_libraries(gufo_ext_cache INTERFACE $<LINK_ONLY:gufo_cache_hip>)
+  add_library(gufo_ext_hip INTERFACE)
+  target_compile_definitions(gufo_ext_hip INTERFACE ENGINE_ENABLE_HIP=1)
+  target_include_directories(gufo_ext_hip SYSTEM INTERFACE
+    ${HIPCUB_INCLUDE_DIR}
+    ${ROCPRIM_INCLUDE_DIR})
+  target_link_libraries(gufo_ext_hip INTERFACE $<LINK_ONLY:gufo_hip_host>
+    hip::host)
+else()
+  target_link_libraries(gufo_ext_cache INTERFACE $<LINK_ONLY:gufo_cache>)
+endif()
+
 # Card 08 (RFC step 5): the model, comparison and eval tiers that used to be
 # object files of gufo_core are separate targets now. They are added here,
 # after the warning/sanitizer block, so their sources keep the compile
@@ -355,7 +371,9 @@ add_subdirectory(src/eval)
 
 add_library(gufo_llm_cli STATIC
   src/cli/bench/bench.cpp
-  src/cli/prompt/prompt.cpp)
+  src/cli/prompt/prompt.cpp
+  src/cli/provider_options.cpp
+  src/cli/speculative_settings.cpp)
 target_link_libraries(gufo_llm_cli PUBLIC gufo_core gufo_compare gufo_ext_runtime)
 
 add_subdirectory(src/ext)
@@ -370,7 +388,7 @@ add_library(gufo_serving STATIC
   src/cli/serve/text_generation_scheduler.cpp
   src/cli/serve/inference_backend.cpp)
 target_link_libraries(gufo_serving PUBLIC gufo_ext_runtime gufo_logging
-  gufo_core gufo_cache)
+  gufo_core gufo_cache gufo_sched)
 # The executable's own objects carried production NDEBUG, the test binaries that
 # re-compiled these sources forced assertions on. One library can only pick
 # one: test builds keep assertions, so a test-preset `gufo` now asserts where it
@@ -520,6 +538,7 @@ if (BUILD_TESTING)
   target_link_libraries(gufo_test_support PUBLIC gufo_http gufo_serving)
 
   add_subdirectory(tests/cache)
+  add_subdirectory(tests/sched)
   add_subdirectory(tests/extensions)
 
   # Opt-in live process-failure checks, never preloaded into hosted tests or
@@ -947,6 +966,18 @@ endfunction()
     tests/cli/text_generation_scheduler_test.cpp)
   target_link_libraries(text_generation_scheduler_test PRIVATE gufo_cache_fake
     gufo_serving)
+  # Text models load only in HIP builds; the CPU build rejects every load.
+  if (ENGINE_ENABLE_HIP)
+    add_executable(serve_provider_options_test
+      tests/cli/serve_provider_options_test.cpp)
+    target_link_libraries(serve_provider_options_test PRIVATE gufo_serving
+      gufo_llm_cli)
+    add_test(NAME serve_provider_options_test
+      COMMAND serve_provider_options_test)
+    set_tests_properties(serve_provider_options_test PROPERTIES
+      LABELS "gpu;server;cli;extensions")
+  endif()
+
   add_test(NAME text_generation_scheduler_test
     COMMAND text_generation_scheduler_test)
   set_tests_properties(text_generation_scheduler_test PROPERTIES

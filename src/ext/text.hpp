@@ -24,6 +24,7 @@
 #include "gufo/ext/gguf_reader.hpp"
 #include "gufo/ext/host_budget.hpp"
 #include "gufo/ext/ledger.hpp"
+#include "gufo/ext/options.hpp"
 #include "gufo/ext/reasoning.hpp"
 #include "gufo/ext/sampling.hpp"
 #include "gufo/ext/text_contracts.hpp"
@@ -53,8 +54,11 @@ struct TextPromptContext {
   /// token (up). Positions at span edges and outside spans are legal and must
   /// be returned unchanged, and the result must be a fixed point of this
   /// function. The pool applies it to cache checkpoints, snapshot and shared
-  /// prefix boundaries; a step that starts at a span consumes the whole span
-  /// even beyond its token budget. The default declares no spans.
+  /// prefix boundaries, and never restores a checkpoint inside a span. A step
+  /// that starts at a span consumes the whole span even beyond its token
+  /// budget, so the runner's scratch must fit its largest span, and a runner
+  /// consuming less than a step must not stop inside one. The default declares
+  /// no spans.
   [[nodiscard]] virtual std::size_t PrefillStop(std::size_t position,
                                                 bool /*up*/) const {
     return position;
@@ -70,7 +74,6 @@ struct TextPreparedPrompt {
 
 struct TextRunnerRamCacheOptions {
   static constexpr std::size_t kAutomaticMaxBytes = std::size_t{32} << 30;
-  static constexpr std::size_t kMaxEntries = 128;
   std::size_t capacity_bytes{0};
   bool enabled{true};
 };
@@ -104,8 +107,6 @@ struct TextExecutionPlan {
 struct TextRunnerCapabilities {
   bool supports_vision{false};
   bool incremental_prefill{false};
-  bool snapshot{false};
-  bool fork{false};
   bool final_token_advance_required{true};
   bool incremental_text_is_exact{false};
   bool multi_token_decode{false};
@@ -120,16 +121,8 @@ struct TextRunnerCapabilities {
   /// rounded down to it, except the complete prompt, which only an
   /// unchanged retry restores; one keeps every position.
   std::size_t prefill_alignment{1};
-  /// Boundaries one PrefillThrough call may capture in place. A runner that
-  /// overrides only the deprecated single-boundary form keeps one.
+  /// Boundaries one PrefillThrough call may capture in place.
   std::size_t max_in_pass_checkpoints{1};
-};
-
-struct TextRunnerPersistenceDescriptor {
-  std::vector<std::uint8_t> compatibility_identity;
-  std::uint32_t payload_version{0};
-
-  bool operator==(const TextRunnerPersistenceDescriptor&) const = default;
 };
 
 struct TextRunnerDescriptor {
@@ -137,7 +130,6 @@ struct TextRunnerDescriptor {
   std::string state_abi;
   std::uint32_t max_context{0};
   TextRunnerCapabilities capabilities;
-  std::optional<TextRunnerPersistenceDescriptor> persistence;
   /// Provider-defined sampling defaults. They take precedence over
   /// `sampling_preset`; neither set leaves controls to the caller.
   std::optional<sampling::TextSamplingDefaults> sampling_defaults;
@@ -220,17 +212,6 @@ public:
 private:
   bool stop_at_eos_{true};
   std::span<const TextRunnerToken> prefill_lookahead_;
-};
-
-class TextRunnerSnapshot : public ContinuationSnapshot {
-public:
-  TextRunnerSnapshot() = default;
-  ~TextRunnerSnapshot() override = default;
-
-  TextRunnerSnapshot(const TextRunnerSnapshot&) = delete;
-  TextRunnerSnapshot& operator=(const TextRunnerSnapshot&) = delete;
-  TextRunnerSnapshot(TextRunnerSnapshot&&) = delete;
-  TextRunnerSnapshot& operator=(TextRunnerSnapshot&&) = delete;
 };
 
 struct TextRunnerAdvance {
@@ -389,13 +370,18 @@ public:
   /// and streamed alike. By default they follow the budget tags: `start` opens
   /// and the first of `ends` closes (Qwen and DeepSeek: `<think>`, `</think>`);
   /// runners that declare no budget tags keep `<think>`, `</think>`.
-  /// Override when the literal framing differs from the budget control tokens.
+  /// Override when the literal framing differs from the budget control tokens,
+  /// keeping them about the same block: `ReasoningBudgetTags().start` is the
+  /// control token that begins `open`, and its `ends` include the one for
+  /// `close`. `open` must not begin with whitespace, which parsers skip.
   using ReasoningMarkup = ext::ReasoningMarkup;
   [[nodiscard]] virtual ReasoningMarkup ReasoningDelimiters() const;
   [[nodiscard]] virtual std::uint32_t VocabularySize() const { return 0; }
   [[nodiscard]] std::shared_ptr<const sampling::ReasoningBudget>
   BuildReasoningBudget(std::size_t tokens,
-                       std::span<const TextRunnerToken> prompt) const;
+                       std::span<const TextRunnerToken> prompt,
+                       ext::InitialOutputState initial =
+                           ext::InitialOutputState::kThought) const;
 
   [[nodiscard]] virtual std::vector<TextRunnerToken> Tokenize(
       std::string_view text) const = 0;
@@ -442,15 +428,14 @@ public:
   [[nodiscard]] virtual std::string Decode(
       std::span<const TextRunnerToken> tokens) const = 0;
 
-  [[nodiscard]] virtual std::unique_ptr<TextRunnerState> CreateState()
-      const = 0;
-
-  [[nodiscard]] virtual bool UsesComponentCache() const { return false; }
+  /// Continuation contract. The cache owns every execution slot: it creates
+  /// the resources once, binds a state to each slot, and reconciles a state
+  /// after restoring rows into its slot at the given position.
   [[nodiscard]] virtual std::unique_ptr<ComponentCacheResources>
-  CreateComponentCacheResources(cache::ResourceLedger&, std::size_t) const;
+  CreateComponentCacheResources(cache::ResourceLedger&, std::size_t) const = 0;
   [[nodiscard]] virtual std::unique_ptr<TextRunnerState> BindComponentState(
-      cache::Adapter&, cache::Slot&) const;
-  virtual void ReconcileComponentState(TextRunnerState&, std::size_t) const;
+      cache::Adapter&, cache::Slot&) const = 0;
+  virtual void ReconcileComponentState(TextRunnerState&, std::size_t) const = 0;
   [[nodiscard]] virtual bool HasDecodeFrontier(const TextRunnerState&) const {
     return true;
   }
@@ -488,38 +473,12 @@ public:
   /// with a PrefillCheckpointBytes claim) without ending a pass there. Each
   /// capture must equal the state a pass ending at its boundary leaves. The
   /// runner invokes `consume` with each boundary's index, synchronously while
-  /// that boundary is readable as the lease's component state (it must drain
-  /// its captures before returning), or with the boundary's own snapshot
-  /// (native snapshot runners). Override this form; the default forwards one
-  /// boundary to the deprecated single-boundary form.
-  using InPassConsumer =
-      std::function<void(std::size_t, std::unique_ptr<TextRunnerSnapshot>)>;
-  [[nodiscard]] virtual TextPrefillStep PrefillThrough(
-      TextRunnerState& state, std::span<const TextRunnerToken> prompt,
-      std::size_t offset, std::size_t budget,
-      std::span<const std::size_t> boundaries,
-      const InPassConsumer& consume) const {
-    if (boundaries.size() != 1)
-      throw std::logic_error("runner captures one in-pass checkpoint per call");
-    bool captured = false;
-    std::unique_ptr<TextRunnerSnapshot> native;
-    auto step = PrefillThrough(state, prompt, offset, budget, boundaries[0],
-                               &native, [&] {
-                                 captured = true;
-                                 consume(0, nullptr);
-                                 return std::unique_ptr<TextRunnerSnapshot>{};
-                               });
-    if (!captured)
-      consume(0, std::move(native));
-    return step;
-  }
-  /// Deprecated: captures one boundary, into `checkpoint` or through
-  /// `capture` while the boundary is readable as the lease's component
-  /// state. Override the boundaries form instead.
+  /// that boundary is readable as the lease's component state; it must drain
+  /// its captures before returning.
+  using InPassConsumer = std::function<void(std::size_t)>;
   [[nodiscard]] virtual TextPrefillStep PrefillThrough(
       TextRunnerState&, std::span<const TextRunnerToken>, std::size_t,
-      std::size_t, std::size_t, std::unique_ptr<TextRunnerSnapshot>*,
-      const std::function<std::unique_ptr<TextRunnerSnapshot>()>& = {}) const {
+      std::size_t, std::span<const std::size_t>, const InPassConsumer&) const {
     throw std::logic_error("runner does not support in-pass checkpoints");
   }
   [[nodiscard]] virtual TextDecodeSelection SelectNext(
@@ -540,30 +499,6 @@ public:
   }
   [[nodiscard]] virtual bool DeviceUsable() const { return true; }
 
-  [[nodiscard]] virtual std::size_t SnapshotPayloadBytes(
-      const TextRunnerState& state) const;
-  [[nodiscard]] virtual std::unique_ptr<TextRunnerSnapshot> Snapshot(
-      const TextRunnerState& state) const;
-  [[nodiscard]] virtual std::unique_ptr<TextRunnerSnapshot>
-  SnapshotForPersistence(const TextRunnerState& state) const;
-
-  virtual void RestoreOrFork(TextRunnerState& state,
-                             const TextRunnerSnapshot& snapshot) const;
-
-  [[nodiscard]] virtual std::size_t PersistentSnapshotPayloadBytes(
-      const TextRunnerSnapshot& snapshot) const;
-
-  [[nodiscard]] virtual std::size_t SerializePersistentSnapshot(
-      const TextRunnerSnapshot& snapshot,
-      std::span<std::uint8_t> destination) const;
-
-  using SnapshotSink = std::function<void(std::span<const std::uint8_t>)>;
-  virtual void StreamPersistentSnapshot(const TextRunnerSnapshot& snapshot,
-                                        const SnapshotSink& sink) const;
-
-  virtual void RestorePersistentSnapshot(
-      TextRunnerState& state, std::span<const std::uint8_t> payload) const;
-
 private:
   mutable std::mutex constraint_mutex_;
   mutable std::shared_ptr<const sampling::ConstraintVocabulary>
@@ -571,6 +506,7 @@ private:
   mutable std::vector<std::shared_ptr<const sampling::TokenConstraint>>
       constraints_;
   mutable std::shared_ptr<const std::vector<bool>> partial_utf8_;
+  mutable std::shared_ptr<const std::vector<bool>> blank_tokens_;
 };
 
 using TextRunner = TextModelRunner;
@@ -628,6 +564,9 @@ struct TextSpeculativeConfig {
   std::uint32_t max_draft_tokens{7};
   std::uint32_t min_draft_tokens{1};
   TextDFlashDraftPolicy dflash_policy{TextDFlashDraftPolicy::kAdaptive};
+  /// The resolved `--draft-policy` (see `TextSpeculativeDefaults`); empty when
+  /// the backend has no policy.
+  std::string draft_policy{};
 };
 
 struct TextDiskCacheConfig {
@@ -651,6 +590,10 @@ struct TextRunnerOptions {
   TextDiskCacheConfig disk_cache{};
   TextRunnerRamCacheOptions ram_cache{};
   bool enable_yarn{false};
+  /// Explicit command-line values of the options the selected provider
+  /// declares for this command (see `ext::FindOption`). An option that was not
+  /// given is absent and keeps the provider's default.
+  ParsedOptions provider_options{};
 };
 
 struct TextBenchOptions {
@@ -675,6 +618,10 @@ struct TextBenchOptions {
   }()};
   bool enable_yarn{false};
   bool verbose{false};
+  /// Explicit command-line values of the options the selected provider
+  /// declares for this command (see `ext::FindOption`). An option that was not
+  /// given is absent and keeps the provider's default.
+  ParsedOptions provider_options{};
 };
 
 struct TextPromptOptions {
@@ -702,6 +649,19 @@ struct TextPromptOptions {
   std::string dspark_model_path;
   std::uint32_t draft_tokens{7};
   std::uint32_t min_draft_tokens{1};
+  /// Explicit command-line values of the options the selected provider
+  /// declares for this command (see `ext::FindOption`). An option that was not
+  /// given is absent and keeps the provider's default.
+  ParsedOptions provider_options{};
+
+  /// Thinking mode these options select; a reasoning effort implies enabled.
+  [[nodiscard]] std::optional<bool> thinking_mode() const {
+    if (reasoning_mode == "on" || reasoning_effort != "auto")
+      return true;
+    if (reasoning_mode == "off")
+      return false;
+    return std::nullopt;
+  }
 };
 
 struct ScannedToolArgument {
@@ -802,6 +762,23 @@ using TextChatDriver =
     int (*)(const TextPromptOptions& options, const core::GgufReader& reader,
             std::chrono::steady_clock::time_point load_start);
 
+/// A provider's draft settings for one speculative backend. The commands
+/// resolve each setting as the explicit flag, else this default, else the
+/// host's (7 draft tokens, minimum 1, no policy; DFlash2 accepts `fixed` and
+/// `adaptive`) when the provider declares nothing for the backend.
+struct TextSpeculativeDefaults {
+  /// The `--speculative` value: `mtp`, `dflash2` or `dspark`.
+  std::string backend;
+  /// `--draft-tokens` when it is not given.
+  std::uint32_t max_draft_tokens{7};
+  /// `--min-draft-tokens` when it is not given.
+  std::uint32_t min_draft_tokens{1};
+  /// `--draft-policy` when it is not given; may be empty.
+  std::string draft_policy;
+  /// The `--draft-policy` values this backend accepts; empty accepts none.
+  std::vector<std::string> draft_policies;
+};
+
 struct TextProvider {
   std::string id;
   TextProbe probe = nullptr;
@@ -811,6 +788,8 @@ struct TextProvider {
   TextPromptDriver prompt_driver = nullptr;
   TextChatDriver chat_driver = nullptr;
   TextSamplingDefaultsProbe sampling_defaults = nullptr;
+  /// Draft settings per speculative backend the provider supports.
+  std::vector<TextSpeculativeDefaults> speculative_defaults{};
 };
 
 void RegisterTextProvider(TextProvider provider);
