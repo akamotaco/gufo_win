@@ -1,6 +1,6 @@
 {
   description = "Pinned Gufo source-extension package";
-  inputs.gufo.url = "github:gufo-org/gufo/6cc8a42ca84438a0566ee498a315f35c6190dc8e";
+  inputs.gufo.url = "github:franzmoca/gufo/98c4547bfdbbb5d357cc7f806eac833c554f6ee2";
   outputs = { self, gufo }: {
     packages.x86_64-linux.default = gufo.packages.x86_64-linux.default.override {
       extensions = [ self.outPath ];

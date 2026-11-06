@@ -27,6 +27,7 @@
 #include "chat_template.hpp"
 #include "continuation_adapter.hpp"
 #include "engine.hpp"
+#include "provider_options.hpp"
 #include "text_contract.hpp"
 #include "vision/encoder.hpp"
 #include "vision/prompt.hpp"
@@ -867,16 +868,21 @@ std::shared_ptr<ext::TextModelRunner> CreateGemma4TextRunner(
              "Gemma 4 MTP requires --mtp-model and a positive draft limit");
     return nullptr;
   }
-  // TODO(gemma4): --draft-policy, --draft-calibration, --draft-trace,
-  // --prefill-weights and --image-tokens need serve plumbing (#979); they
-  // keep their defaults. The host passes --draft-tokens without telling
-  // whether it was given, so its value (default 7) is used as is.
   ModelOptions model_options{
       .max_context = options.max_context,
       .mtp_model_path = mtp ? speculative.draft_model_path : std::string{},
       .draft_tokens = speculative.max_draft_tokens,
       .min_draft_tokens = speculative.min_draft_tokens,
   };
+  std::uint32_t image_tokens = 0;
+  try {
+    model_options.draft_policy = ParseDraftPolicy(speculative.draft_policy);
+    ApplyProviderOptions(options.provider_options, model_options);
+    image_tokens = ImageTokens(options.provider_options);
+  } catch (const std::invalid_argument& e) {
+    SetError(error, e.what());
+    return nullptr;
+  }
   std::string load_error;
   auto model = Model::Load(options.model_path, model_options, &load_error);
   if (model == nullptr) {
@@ -892,7 +898,6 @@ std::shared_ptr<ext::TextModelRunner> CreateGemma4TextRunner(
     SetError(error, std::string("Gemma 4 vision sidecar: ") + e.what());
     return nullptr;
   }
-  const std::uint32_t image_tokens = vision::kDefaultSoftTokens;
   std::uint32_t max_context = options.max_context;
   if (max_context == 0) {
     max_context = model->MaxContext();

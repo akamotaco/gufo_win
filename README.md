@@ -25,6 +25,9 @@ Working today, on Gemma 4 31B `UD-Q4_K_XL` with the MTP drafter:
   `reasoning_tokens`), native tool calls (buffered and streamed), image input,
   and prompt-cache reuse.
 - `gufo prompt` and `gufo bench` through the extension's drivers.
+- Provider options: `--image-tokens`, `--draft-calibration`, `--draft-trace` and
+  `--prefill-weights`. MTP drafts up to 15 tokens with the calibrated policy
+  unless `--draft-tokens` or `--draft-policy` say otherwise.
 - Unit tests: configuration, tokenizer, chat template, tool syntax and the
   text contracts without models; kernels, target parity, continuation and
   vision with models.
@@ -34,11 +37,6 @@ Still missing:
 - **Parity validation** against `feat/gemma`: greedy outputs, decode KL,
   functional suites (including cache and long context) and speed for all
   three checkpoints. Only 31B `UD-Q4_K_XL` has run so far, as a smoke test.
-- **Provider options**
-  ([#979](https://github.com/gufo-org/gufo/issues/979)): `--image-tokens`,
-  `--draft-calibration`, `--draft-policy`, `--draft-trace` and
-  `--prefill-weights` keep their defaults. The draft limit defaults to the
-  host's 7; pass `--draft-tokens 15` for the `feat/gemma` default.
 - **Cache features not upstream:** in-place same-slot restore and shared
   transfer streams (batches of 256 jobs instead of 16).
 - **Known failures:** `reasoning-budget` (budgets are ignored; the runner
@@ -50,11 +48,14 @@ Still missing:
 
 ## Build with Gufo
 
-Gufo's upstream `main` carries every contract the extension uses (extension
-API 0.2.7).
+The extension needs extension API 0.2.9. Until the two pull requests for
+provider options ([#979](https://github.com/gufo-org/gufo/issues/979)) and
+speculation defaults merge upstream, build it on the `gemma-main` branch of
+[franzmoca/gufo](https://github.com/franzmoca/gufo): upstream `main` plus those
+two changes.
 
 ```sh
-git clone https://github.com/gufo-org/gufo
+git clone -b gemma-main https://github.com/franzmoca/gufo
 cd gufo
 cmake --preset release -DGUFO_EXTENSION_DIRS=/path/to/gemma4-gufo-extension
 cmake --build --preset release --parallel 4
@@ -69,7 +70,7 @@ With Nix, `nix build` in this repository builds the Gufo revision pinned in
 ```sh
 ./build/release/gufo serve llm \
   -m gemma-4-31B-it-UD-Q4_K_XL.gguf \
-  --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf --draft-tokens 15
+  --speculative mtp --mtp-model mtp-gemma-4-31B-it-Q8_0.gguf
 ```
 
 The vision sidecar `mmproj-BF16.gguf` is found beside the model, or given with
