@@ -36,6 +36,10 @@ Fork-only changes:
   - A failed cache copy clears the HIP error and logs `[gemma4] event=cache_copy_failed`
     with both pointers' attributes. Before, the stale error failed the next decode
     (`candidates.hip.cpp ... invalid argument`) instead of costing only a cache miss.
+  - The vision encoder uploads its padded MLP weights with a 1D copy from a host
+    buffer. The 2D copy from the mapped GGUF failed inside the Windows driver
+    ("Failed PAL memory allocation", 27 times at every load) while reporting
+    success, so Gemma 4 described images that were not there.
 - The per-request image budget is 256 MiB instead of 20 MiB (agents resend every image).
 - `tools\windows\gufo_monitor.py` (a read-only web monitor) and `tools\windows\tdr_delay.bat`
   (GPU timeout).
@@ -67,7 +71,8 @@ token for token.
 
 Re-checked on v0.31.0 (November 6, 2026): Gemma 4 26B and 31B greedy outputs still
 match `feat/gemma` on all 8 prompts, the copy test passes at 75K tokens on both,
-tool calls (buffered and streamed) and a 6-turn agent chat work, and Gemma 4 26B
+tool calls (buffered and streamed), a 6-turn agent chat and image reading (shapes,
+colors and text of a test image) work, and Gemma 4 26B
 speeds are within 4% of the table below.
 
 | Model | Sessions x context | Prompt | Prefill (tok/s) | Decode, MTP (tok/s) |
