@@ -39,8 +39,8 @@ if(TARGET gufo_gemma4)
 endif()
 
 # Device side: Gemma's kernels, executor, engine, vision encoder and
-# continuation adapter, plus the Qwen and Flash-Next kernels it reuses
-# (lib/, copied with provenance notes).
+# continuation adapter. hip/half_gemm and hip/ggml are excerpts of Gufo
+# kernels (each file names its source).
 gufo_extension_target(
   NAME gufo_gemma4_hip
   SOURCES
@@ -55,7 +55,6 @@ gufo_extension_target(
     gufo_ext_cache
     gufo_ext_hip
     roc::hipblas
-    roc::hipblaslt
     Threads::Threads
 )
 
@@ -68,7 +67,7 @@ if(TARGET gufo_gemma4_hip)
       hip/candidates.hip.cpp
       hip/kernels.hip.cpp
       hip/moe_prefill.hip.cpp
-      lib/flash_next/kernels.hip
+      hip/half_gemm.hip.cpp
       vision/encoder.hip
     OPTIONS ${_gemma4_hip_options}
   )
@@ -82,40 +81,27 @@ if(TARGET gufo_gemma4_hip)
       hip/wmma_gemv.hip.cpp
     OPTIONS ${_gemma4_hip_options} -fno-fast-math -ffp-contract=off
   )
-  # The Qwen units keep their upstream options: the configuration's HIP flags
-  # without fast math (decode GEMV and the small-batch passes agree bit for
-  # bit), wave64 helpers sharing their kernels' wave size, iterative ILP for
-  # the Q4/Q5 groups of sixteen, and no SLP vectorization in the blocked
-  # K-quant prefill tiles, which otherwise spill.
+  # The GGML-format units keep their upstream options: the configuration's
+  # HIP flags without fast math (decode GEMV and the small-batch passes agree
+  # bit for bit), the wave64 prefill tiles built for their wave size, and no
+  # SLP vectorization in the blocked K-quant prefill tiles, which otherwise
+  # spill.
   gufo_extension_hip_sources(gufo_gemma4_hip
     SOURCES
-      lib/qwen/argmax.hip
-      lib/qwen/gemv.hip
-      lib/qwen/gemv_quant.hip
-      lib/qwen/hipblaslt_gemm.hip
-      lib/qwen/prefill_embed.hip
-      lib/qwen/verify_gemm_27b.hip
+      hip/ggml/argmax.hip.cpp
+      hip/ggml/gemv.hip.cpp
+      hip/ggml/gemv_quant.hip.cpp
+      hip/ggml/prefill_embed.hip.cpp
   )
   gufo_extension_hip_sources(gufo_gemma4_hip
     SOURCES
-      lib/qwen/prefill_quant_gemm.hip
+      hip/ggml/prefill_quant_gemm.hip.cpp
     OPTIONS -fno-slp-vectorize
   )
   gufo_extension_hip_sources(gufo_gemma4_hip
     SOURCES
-      lib/qwen/prefill_quant_wave64.hip
+      hip/ggml/prefill_quant_wave64.hip.cpp
     OPTIONS -mwavefrontsize64 -fno-slp-vectorize
-  )
-  gufo_extension_hip_sources(gufo_gemma4_hip
-    SOURCES
-      lib/qwen/small_batch_wave64.hip
-    OPTIONS -mwavefrontsize64
-  )
-  gufo_extension_hip_sources(gufo_gemma4_hip
-    SOURCES
-      lib/qwen/small_batch_quant16_wave64.hip
-    OPTIONS -mwavefrontsize64 -gline-tables-only -Xarch_device
-      -mllvm=-amdgpu-sched-strategy=iterative-ilp
   )
   target_compile_options(gufo_gemma4_hip PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-O3>

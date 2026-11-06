@@ -1,5 +1,6 @@
-// Copied from Gufo src/families/qwen/kernels/prefill_embed.hip at upstream
-// 1c75887b (gufo-org/gufo), moved into the gemma4 extension namespace.
+// Excerpt of Gufo src/families/qwen/kernels/prefill_embed.hip at upstream
+// 1c75887b (gufo-org/gufo): the paths Gemma 4 dispatches for the formats its
+// loader accepts, in the gemma4 extension namespace.
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_fp16.h>
@@ -10,13 +11,12 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "lib/qwen/quant_ops.hpp"
-#include "lib/qwen/token.hpp"
+#include "hip/ggml/quant_ops.hpp"
+#include "hip/ggml/token.hpp"
 
-namespace gufo::models::gemma4::qwen {
+namespace gufo::models::gemma4::ggml {
 
-// Quant block layouts (Q8_0 / Q5_K / Q6_K / Q8_K) and the quant helpers are
-// shared via src/families/qwen/hip_common/quant_ops.hpp.
+// Quant block layouts and the quant helpers come from hip/ggml/quant_ops.hpp.
 __global__ void BatchedEmbeddingLookupKernel(
     const void* __restrict__ table, core::GgmlType type,
     const std::uint32_t* __restrict__ token_ids, float* __restrict__ out_hidden,
@@ -66,5 +66,5 @@ void LaunchBatchedEmbeddingLookup(const void* table, core::GgmlType type,
                                  stream>>>(table, type, token_ids, out_hidden,
                                            batch_size, hidden_size);
 }
-}  // namespace gufo::models::gemma4::qwen
+}  // namespace gufo::models::gemma4::ggml
 #endif  // defined(ENGINE_ENABLE_HIP)

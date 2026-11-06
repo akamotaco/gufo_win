@@ -84,7 +84,8 @@ skipped without them.
 
 ## License
 
-The extension source is MIT licensed ([LICENSE](LICENSE)). Files copied from
-Gufo (`lib/` and `vision/resize.*`; each names its source) keep
-Gufo's MIT license ([LICENSES/gufo.txt](LICENSES/gufo.txt)). Gemma 4 weights
+The extension source is MIT licensed ([LICENSE](LICENSE)). Code copied from
+Gufo (`hip/ggml/`, `hip/half_gemm.*`, `mtp_sampling.hpp`, `prompt_lookup.hpp`,
+`vision/resize.*` and `DraftVocab` in `draft_vocab.hpp`; each names its
+source) keeps Gufo's MIT license ([LICENSES/gufo.txt](LICENSES/gufo.txt)). Gemma 4 weights
 are downloaded separately under their own license.

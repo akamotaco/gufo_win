@@ -15,13 +15,13 @@
 #include "continuation_hooks.hpp"
 #include "draft_vocab.hpp"
 #include "hip/gemv.hpp"
+#include "hip/ggml/gemm.hpp"
+#include "hip/ggml/token.hpp"
+#include "hip/half_gemm.hpp"
 #include "hip/kernels.hpp"
 #include "hip/moe.hpp"
 #include "hip/wmma_gemv.hpp"
-#include "lib/flash_next/kernels.hpp"
-#include "lib/flash_next/mtp_sampling.hpp"
-#include "lib/qwen/gemm.hpp"
-#include "lib/qwen/token.hpp"
+#include "mtp_sampling.hpp"
 
 namespace gufo::models::gemma4::rocm {
 namespace {
@@ -61,7 +61,7 @@ std::uint32_t MaxKvDim(const Config& c) {
   return m;
 }
 
-/// Token rows per routed binary16 GEMM tile of Flash-Next's kernel: 48 for a
+/// Token rows per tile of half_gemm's routed binary16 GEMM: 48 for a
 /// Q8_0 gate/up, 64 for the Q5_1/Q8_0 down projection (2.5% faster than 48).
 constexpr std::uint32_t kRoutedTileRows = 48;
 constexpr std::uint32_t kRoutedDownRows = 64;
@@ -111,7 +111,7 @@ Layout Plan(const Config& c, const Config* draft, std::uint32_t vocab,
   l.wmma = take(WmmaGemvScratchBytes(static_cast<std::uint32_t>(max_cols)));
   const std::uint32_t q8_rows = std::max(rows, logit_rows);
   l.q8 = take(q8_rows > kSplitRows
-                  ? qwen::QuantizedActivationBytes(q8_rows, max_cols)
+                  ? ggml::QuantizedActivationBytes(q8_rows, max_cols)
                   : 0);
   // Binary16 activation rows: every prefill input of an expert model, the
   // inputs of binary16 projections otherwise (all of a binary16-prefill
@@ -141,8 +141,7 @@ Layout Plan(const Config& c, const Config* draft, std::uint32_t vocab,
     l.moe_sync = take(sizeof(std::uint32_t));
     l.moe_bounds = take((c.num_experts + 1) * sizeof(std::int32_t));
     l.moe_cursors = take(c.num_experts * sizeof(std::int32_t));
-    const std::size_t compact =
-        flash_next::RoutedCompactRows(slots, c.num_experts);
+    const std::size_t compact = rocm::RoutedCompactRows(slots, c.num_experts);
     l.moe_rows_token = take(compact * sizeof(std::int32_t));
     l.moe_rows_slot = take(compact * sizeof(std::int32_t));
     // The gate/up map (the shorter tiles at most) and the down map.
@@ -169,8 +168,7 @@ Layout Plan(const Config& c, const Config* draft, std::uint32_t vocab,
     l.draft_logits = take(n * vocab * f);
     l.draft_next = take(n * draft->target_hidden_size * f);
     // Top-64 proposal candidates for sampled drafting: ids, then scores.
-    const std::size_t candidate_ids =
-        flash_next::MtpCandidateWorkspaceSize(vocab);
+    const std::size_t candidate_ids = rocm::MtpCandidateWorkspaceSize(vocab);
     l.draft_candidates = take(n * candidate_ids * sizeof(std::uint32_t));
     l.draft_candidate_scratch = take(n * candidate_ids * sizeof(std::uint32_t));
   }
@@ -332,9 +330,8 @@ Executor::Executor(const DeviceModel& model, std::uint32_t max_rows,
         reinterpret_cast<std::uint32_t*>(base + l.draft_candidates);
     draft_candidate_scratch_ =
         reinterpret_cast<std::uint32_t*>(base + l.draft_candidate_scratch);
-    HIP_CHECK(hipHostMalloc(
-        &draft_candidates_host_,
-        kMaxDraftSessions * sizeof(flash_next::MtpCandidateLogits)));
+    HIP_CHECK(hipHostMalloc(&draft_candidates_host_,
+                            kMaxDraftSessions * sizeof(MtpCandidateLogits)));
   }
   HIP_CHECK(hipHostMalloc(&argmax_host_, kSplitRows * sizeof(std::uint32_t)));
   logits_host_.resize(std::size_t{max_logit_rows} * model.vocab_size());
@@ -458,11 +455,10 @@ const void* Executor::Quantize(const float* x, std::uint32_t rows,
     return nullptr;
   }
   if (half_prefill_) {
-    flash_next::NarrowActivations(x, x_half_, false, std::size_t{rows} * cols,
-                                  stream_);
+    rocm::NarrowActivations(x, x_half_, std::size_t{rows} * cols, stream_);
     return x_half_;
   }
-  qwen::LaunchQuantizeActivationQ8_1FromFp32(x, q8_, rows, cols, stream_);
+  ggml::LaunchQuantizeActivationQ8_1FromFp32(x, q8_, rows, cols, stream_);
   return q8_;
 }
 
@@ -486,14 +482,13 @@ std::optional<GemvFormat> GemvFormatOf(core::GgmlType type) {
 }
 
 /// The binary16 GEMM plan for a Q8_0 projection of a Gemma width (the
-/// Flash-Next dispatch is tuned on its own shapes): eight row groups for the
+/// default dispatch is tuned on other shapes): eight row groups for the
 /// 26B-A4B's dense MLP down (K = 2112), 605 -> 582 us per 2048 rows. The
 /// 31B's 5376 outputs (21 row tiles) take two-block stages and walk seven
 /// row tiles of a token tile in launch order: per pp2048 chunk, attention
 /// output 473 -> 344 ms and MLP down 824 -> 769 ms. Its other shapes
 /// measured slower with every staged or walking plan.
-flash_next::DenseF16Plan HalfPlan(std::uint32_t m, std::uint32_t k) {
-  using flash_next::DenseF16Plan;
+rocm::DenseF16Plan HalfPlan(std::uint32_t m, std::uint32_t k) {
   if (m == 5376 && k >= 8192) {
     return DenseF16Plan::kStagedRowGroups8Walk7;
   }
@@ -578,7 +573,7 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
       // binary16 in the WMMA GEMMs; other formats keep the W8A8 route on their
       // own Q8_1 rows.
       // The 26B-A4B's Q8_0 attention outputs (2816 outputs, 11 row tiles
-      // of Flash-Next's 256-row blocks) fill the WGPs better on Gemma's
+      // of half_gemm's 256-row blocks) fill the WGPs better on Gemma's
       // 128-row blocks, with the same sums: 1.80 -> 1.61 ms per 2048 rows.
       if (w.type == core::GgmlType::kQ8_0 && w.rows == 2816 && w.cols >= 4096 &&
           LaunchDenseHalfGemm(ExpertFormat::kQ8_0, w.data, xq, y, nullptr, rows,
@@ -586,9 +581,9 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
         return;
       }
       if (w.type == core::GgmlType::kQ8_0 &&
-          flash_next::DenseF16Gemm(w.data, static_cast<const __half*>(xq), y,
-                                   rows, w.rows, w.cols, stream_, 0,
-                                   HalfPlan(w.rows, w.cols), w.grouped)) {
+          rocm::DenseF16Gemm(w.data, static_cast<const __half*>(xq), y, rows,
+                             w.rows, w.cols, stream_, HalfPlan(w.rows, w.cols),
+                             w.grouped)) {
         return;
       }
       if (const auto format = DenseHalfFormat(w.type);
@@ -597,14 +592,14 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
                               w.cols, stream_, false, w.grouped)) {
         return;
       }
-      qwen::LaunchQuantizeActivationQ8_1FromFp32(x, q8_, rows, w.cols, stream_);
+      ggml::LaunchQuantizeActivationQ8_1FromFp32(x, q8_, rows, w.cols, stream_);
       xq = q8_;
     }
     if (w.grouped) {
       throw std::runtime_error(
           "gemma4 grouped weights reached a row-order GEMM");
     }
-    qwen::LaunchBatchedQuantGEMMPreQuantized(w.type, w.data, xq, y, rows,
+    ggml::LaunchBatchedQuantGEMMPreQuantized(w.type, w.data, xq, y, rows,
                                              w.rows, w.cols, stream_);
     return;
   }
@@ -628,7 +623,7 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
     throw std::runtime_error("gemma4 grouped weights reached a row-order GEMV");
   }
   if (rows > 1) {
-    // Gemma's K-quant shapes lie outside the Qwen-tuned dispatch; the
+    // Gemma's K-quant shapes lie outside the ggml dispatch's tuning; the
     // double-stage configuration is faster on them (the vocabulary head keeps
     // the default). Q4_0 keeps the default up to eight rows and takes the
     // double stage past that, where the default splits the rows into two
@@ -636,17 +631,17 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
     const bool double_stage =
         w.type == core::GgmlType::kQ4_0 ? rows > 8 : w.rows < 65536;
     if (double_stage &&
-        qwen::LaunchKQuantSmallBatchDoubleStage(w.type, w.data, x, y, rows,
+        ggml::LaunchKQuantSmallBatchDoubleStage(w.type, w.data, x, y, rows,
                                                 w.rows, w.cols, stream_)) {
       return;
     }
     // Q8_0 past eight rows reads its weights once instead of per eight rows.
     if (w.type == core::GgmlType::kQ8_0 &&
-        qwen::LaunchQ8_0SmallBatchWide(w.data, x, y, rows, w.rows, w.cols,
+        ggml::LaunchQ8_0SmallBatchWide(w.data, x, y, rows, w.rows, w.cols,
                                        stream_)) {
       return;
     }
-    qwen::LaunchBatchedQuantGEMMFp32(w.type, w.data, x, y, rows, w.rows, w.cols,
+    ggml::LaunchBatchedQuantGEMMFp32(w.type, w.data, x, y, rows, w.rows, w.cols,
                                      stream_);
     return;
   }
@@ -659,14 +654,14 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
     const bool double_stage =
         w.type == core::GgmlType::kQ4_K ||
         (w.type == core::GgmlType::kQ5_K && w.rows > 4096);
-    if (double_stage && qwen::LaunchKQuantSmallBatchDoubleStage(
+    if (double_stage && ggml::LaunchKQuantSmallBatchDoubleStage(
                             w.type, w.data, x, y, 1, w.rows, w.cols, stream_)) {
       return;
     }
     if (w.rows <= 4096 && w.type != core::GgmlType::kQ4_0) {
-      qwen::LaunchGEMV(w.data, w.type, x, y, w.rows, w.cols, stream_);
+      ggml::LaunchGEMV(w.data, w.type, x, y, w.rows, w.cols, stream_);
     } else {
-      qwen::LaunchBatchedQuantGEMMFp32(w.type, w.data, x, y, 1, w.rows, w.cols,
+      ggml::LaunchBatchedQuantGEMMFp32(w.type, w.data, x, y, 1, w.rows, w.cols,
                                        stream_);
     }
     return;
@@ -683,7 +678,7 @@ void Executor::Project(const DeviceTensor& w, const float* x, const void* xq,
       LaunchKQuantGemv(*format, w.data, x, y, w.rows, w.cols, stream_)) {
     return;
   }
-  qwen::LaunchGEMV(w.data, w.type, x, y, w.rows, w.cols, stream_);
+  ggml::LaunchGEMV(w.data, w.type, x, y, w.rows, w.cols, stream_);
 }
 
 void Executor::ProjectDraft(const DeviceTensor& w, const float* x,
@@ -721,16 +716,15 @@ void Executor::ProjectHalf(const DeviceTensor& w, const float* x,
   // narrows the FP32 rows here.
   const void* xh = xq;
   if (!half_prefill_) {
-    flash_next::NarrowActivations(x, x_half_, false, std::size_t{rows} * w.cols,
-                                  stream_);
+    rocm::NarrowActivations(x, x_half_, std::size_t{rows} * w.cols, stream_);
     xh = x_half_;
   }
   // Every Gemma projection is thousands of outputs wide: 128 x 128 tiles
   // from 128 rows (31B Q8 binary16 layers at 512 rows: q 1.91 -> 1.23 ms,
   // down 5.03 -> 3.46 ms).
-  if (!flash_next::UnquantizedF16Gemm(w.data, static_cast<const __half*>(xh), y,
-                                      rows, w.rows, w.cols, stream_,
-                                      /*wide_from=*/128)) {
+  if (!rocm::UnquantizedF16Gemm(w.data, static_cast<const __half*>(xh), y, rows,
+                                w.rows, w.cols, stream_,
+                                /*wide_from=*/128)) {
     throw std::runtime_error("gemma4 binary16 prefill shape unsupported");
   }
 }
@@ -805,7 +799,7 @@ void Executor::Forward(std::span<const Segment> segments,
   const auto& layers = model_.layers();
   HIP_CHECK(hipMemcpyAsync(tokens_, tokens.data(), n * sizeof(std::int32_t),
                            hipMemcpyHostToDevice, stream_));
-  qwen::LaunchBatchedEmbeddingLookup(
+  ggml::LaunchBatchedEmbeddingLookup(
       model_.token_embd().data, model_.token_embd().type,
       reinterpret_cast<const std::uint32_t*>(tokens_), x_, n, d, stream_);
   ScaleRmsNorm(x_, std::sqrt(static_cast<float>(d)), layers[0].attn_norm.f32(),
@@ -1053,7 +1047,7 @@ void Executor::Forward(std::span<const Segment> segments,
          // Q8_0 and binary16: GeGLU of the FP32 [gate | up] sums, as the
          // separate pass.
          ((gate_up_q8 || gate_up_f16) && !gate_up_packed &&
-          flash_next::DenseF16GeGluGemm(
+          rocm::DenseF16GeGluGemm(
               L.ffn_gate_up.data, static_cast<const __half*>(fq),
               static_cast<__half*>(static_cast<void*>(gate_)), n,
               L.ffn_gate_up.rows, L.ffn_gate_up.cols, stream_,
@@ -1194,9 +1188,8 @@ std::optional<ExpertFormat> ExpertFormatOf(core::GgmlType type) {
   }
 }
 
-/// Flash-Next's routed binary16 GEMM formats.
-std::optional<flash_next::WeightType> RoutedHalfType(core::GgmlType type) {
-  using flash_next::WeightType;
+/// The formats of half_gemm's routed binary16 GEMM.
+std::optional<rocm::WeightType> RoutedHalfType(core::GgmlType type) {
   switch (type) {
     case core::GgmlType::kQ4_K:
       return WeightType::kQ4_K;
@@ -1317,7 +1310,6 @@ void Executor::Experts(const DeviceLayer& l, std::uint32_t n,
 
 bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n,
                               hipStream_t stream) {
-  namespace fn = flash_next;
   const Config& c = model_.config();
   const std::uint32_t d = c.hidden_size;
   const std::uint32_t used = c.experts_used;
@@ -1347,14 +1339,14 @@ bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n,
   std::int32_t* down_map = moe_tiles_ + tiles;
   BuildRoutedTiles(moe_counts_, c.num_experts, gate_up_rows, tiles, moe_tiles_,
                    down_rows, down_tiles, down_map, stream);
-  fn::RoutedCompact(moe_ids_, moe_counts_, moe_bounds_, moe_cursors_,
-                    moe_rows_token_, moe_rows_slot_, n, used, c.num_experts,
-                    stream);
+  rocm::RoutedCompact(moe_ids_, moe_counts_, moe_bounds_, moe_cursors_,
+                      moe_rows_token_, moe_rows_slot_, n, used, c.num_experts,
+                      stream);
   // PostAttentionNorm wrote the binary16 expert input.
   const void* x_half = moe_x_half_;
   auto* gu = static_cast<__half*>(moe_gu_);
   auto* act = static_cast<__half*>(moe_act_);
-  // The Gemma routed GEMM applies GeGLU in its epilogue; Flash-Next's writes
+  // The Gemma routed GEMM applies GeGLU in its epilogue; RoutedF16Gemm writes
   // [gate | up] for the separate pass.
   if (own_gate_up) {
     const bool compact =
@@ -1367,10 +1359,10 @@ bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n,
       return false;
     }
   } else {
-    if (!fn::RoutedF16Gemm(
+    if (!rocm::RoutedF16Gemm(
             l.gate_up_exps.data, *gate_up, static_cast<const __half*>(x_half),
             moe_tiles_, tiles, kRoutedTileRows, moe_bounds_, moe_rows_token_,
-            moe_rows_slot_, nullptr, nullptr, gu, 2 * width, d, stream)) {
+            moe_rows_slot_, nullptr, gu, 2 * width, d, stream)) {
       return false;
     }
     GeGluPackedHalf(gu, act, n * used, width, stream);
@@ -1381,10 +1373,10 @@ bool Executor::PrefillExperts(const DeviceLayer& l, std::uint32_t n,
                                 moe_rows_slot_, moe_rows_slot_, moe_out_,
                                 nullptr, d, width, stream);
   }
-  return fn::RoutedF16Gemm(l.down_exps.data, *down, act, down_map, down_tiles,
-                           kRoutedDownRows, moe_bounds_, moe_rows_slot_,
-                           moe_rows_slot_, nullptr, moe_out_, nullptr, d, width,
-                           stream);
+  return rocm::RoutedF16Gemm(l.down_exps.data, *down, act, down_map, down_tiles,
+                             kRoutedDownRows, moe_bounds_, moe_rows_slot_,
+                             moe_rows_slot_, moe_out_, nullptr, d, width,
+                             stream);
 }
 
 void Executor::BeforeMutation(KvCache& cache) {
@@ -1528,10 +1520,7 @@ void Executor::DraftChains(std::span<DraftJob> jobs) {
   const float eps = c.rms_eps;
   const float embed_scale = std::sqrt(static_cast<float>(target_hidden));
   const std::uint32_t vocab = model_.vocab_size();
-  using flash_next::kMtpCandidates;
-  using flash_next::MtpCandidateLogits;
-  const std::size_t candidate_ids =
-      flash_next::MtpCandidateWorkspaceSize(vocab);
+  const std::size_t candidate_ids = rocm::MtpCandidateWorkspaceSize(vocab);
   const std::span<const std::int32_t> head_tokens = model_.draft_head_tokens();
   const bool small = n == 1 && jobs[0].head.small && !head_tokens.empty() &&
                      GemvFormatOf(dm.token_embd.type).has_value() &&
@@ -1558,7 +1547,7 @@ void Executor::DraftChains(std::span<DraftJob> jobs) {
       break;
     }
     // [scaled target embedding of the token ; target-width hidden state]
-    qwen::LaunchBatchedEmbeddingLookup(model_.token_embd().data,
+    ggml::LaunchBatchedEmbeddingLookup(model_.token_embd().data,
                                        model_.token_embd().type, draft_tokens_,
                                        draft_embed_, n, target_hidden, stream_);
     DraftConcatArgs concat{};
@@ -1669,10 +1658,10 @@ void Executor::DraftChains(std::span<DraftJob> jobs) {
         continue;
       }
       std::uint32_t* ids = draft_candidates_ + j * candidate_ids;
-      flash_next::MtpTopCandidates(
-          draft_logits_ + std::size_t{j} * vocab, ids,
-          draft_candidate_scratch_ + j * candidate_ids,
-          reinterpret_cast<float*>(ids + kMtpCandidates), scored, stream_);
+      rocm::MtpTopCandidates(draft_logits_ + std::size_t{j} * vocab, ids,
+                             draft_candidate_scratch_ + j * candidate_ids,
+                             reinterpret_cast<float*>(ids + kMtpCandidates),
+                             scored, stream_);
       HIP_CHECK(hipMemcpyAsync(
           &draft_candidates_host_[j], ids,
           offsetof(MtpCandidateLogits, logits) + count * sizeof(float),
@@ -1724,7 +1713,7 @@ std::span<const std::uint32_t> Executor::ReadArgmax(std::size_t rows) const {
   const std::size_t vocab = model_.vocab_size();
   const std::size_t scratch_floats =
       std::size_t{2} * kSplitRows * ((vocab + 1023) / 1024);
-  qwen::LaunchBatchedGPUArgmax(logits_, logit_index_, rows, vocab,
+  ggml::LaunchBatchedGPUArgmax(logits_, logit_index_, rows, vocab,
                                {gate_, scratch_floats}, stream_);
   HIP_CHECK(hipMemcpyAsync(argmax_host_, logit_index_,
                            rows * sizeof(std::uint32_t), hipMemcpyDeviceToHost,

@@ -1,9 +1,10 @@
-// Copied from Gufo src/families/qwen/kernels/prefill_quant_wave64.hip at
-// upstream 1c75887b (gufo-org/gufo), moved into the gemma4 extension namespace.
+// Excerpt of Gufo src/families/qwen/kernels/prefill_quant_wave64.hip at
+// upstream 1c75887b (gufo-org/gufo): the paths Gemma 4 dispatches for the
+// formats its loader accepts, in the gemma4 extension namespace.
 #if defined(ENGINE_ENABLE_HIP)
-#include "lib/qwen/prefill_quant_gemm.hpp"
+#include "hip/ggml/prefill_quant_gemm.hpp"
 
-namespace gufo::models::gemma4::qwen::detail {
+namespace gufo::models::gemma4::ggml::detail {
 
 bool TryLaunchQuantPrefillWave64(core::GgmlType type, const void* w,
                                  const void* x, float* y, std::size_t batch,
@@ -15,8 +16,7 @@ bool TryLaunchQuantPrefillWave64(core::GgmlType type, const void* w,
   const dim3 grid(static_cast<unsigned>((batch + 127) / 128),
                   static_cast<unsigned>((m + 127) / 128));
   const auto launch = [&]<core::GgmlType Type>() {
-    constexpr bool square =
-        Type == core::GgmlType::kQ8_0 || Type == core::GgmlType::kIQ4_XS;
+    constexpr bool square = Type == core::GgmlType::kQ8_0;
     WKQuantA8BlockedWmmaGEMMKernel<128, 128, 2, square ? 2 : 4, square ? 2 : 1,
                                    Type, 64>
         <<<grid, 256, 0, stream>>>(w, x, y, batch, m, k);
@@ -34,16 +34,10 @@ bool TryLaunchQuantPrefillWave64(core::GgmlType type, const void* w,
     case core::GgmlType::kQ8_0:
       launch.template operator()<core::GgmlType::kQ8_0>();
       return true;
-    case core::GgmlType::kIQ4_XS:
-      if (m > k) {
-        return false;
-      }
-      launch.template operator()<core::GgmlType::kIQ4_XS>();
-      return true;
     default:
       return false;
   }
 }
 
-}  // namespace gufo::models::gemma4::qwen::detail
+}  // namespace gufo::models::gemma4::ggml::detail
 #endif

@@ -3,7 +3,7 @@
 // bit at every width, so greedy speculation reproduces autoregressive
 // decoding; both must match the CPU dequantized dot product, and the W8A8
 // prefill GEMM must stay within its activation-rounding envelope. A change in
-// the Qwen-owned kernels that breaks any of this fails here.
+// the hip/ggml kernels that breaks any of this fails here.
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
 
@@ -22,11 +22,11 @@
 #include <vector>
 
 #include "hip/gemv.hpp"
+#include "hip/ggml/gemm.hpp"
+#include "hip/half_gemm.hpp"
 #include "hip/kernels.hpp"
 #include "hip/moe.hpp"
 #include "hip/wmma_gemv.hpp"
-#include "lib/flash_next/kernels.hpp"
-#include "lib/qwen/gemm.hpp"
 #include "tests/check.hpp"
 
 using gemma4_test::Require;
@@ -96,7 +96,7 @@ void CheckShape(const Format& f, std::size_t m, std::size_t k,
   // Decode reference rows.
   std::vector<float> gemv(kRows * m);
   for (std::size_t r = 0; r < kRows; ++r) {
-    gufo::models::gemma4::qwen::LaunchGEMV(dw, f.type, dx + r * k, dy + r * m,
+    gufo::models::gemma4::ggml::LaunchGEMV(dw, f.type, dx + r * k, dy + r * m,
                                            m, k, nullptr);
   }
   HIP_CHECK(hipDeviceSynchronize());
@@ -106,7 +106,7 @@ void CheckShape(const Format& f, std::size_t m, std::size_t k,
   // including the double-stage pass at one row (drafter-mode decode).
   std::vector<float> batch(kRows * m);
   HIP_CHECK(hipMemset(dy, 0xFF, m * sizeof(float)));
-  if (gufo::models::gemma4::qwen::LaunchKQuantSmallBatchDoubleStage(
+  if (gufo::models::gemma4::ggml::LaunchKQuantSmallBatchDoubleStage(
           f.type, dw, dx, dy, 1, m, k, nullptr)) {
     HIP_CHECK(hipDeviceSynchronize());
     HIP_CHECK(hipMemcpy(batch.data(), dy, m * 4, hipMemcpyDeviceToHost));
@@ -115,7 +115,7 @@ void CheckShape(const Format& f, std::size_t m, std::size_t k,
   }
   for (std::size_t width = 2; width <= 16; ++width) {
     HIP_CHECK(hipMemset(dy, 0xFF, width * m * sizeof(float)));
-    gufo::models::gemma4::qwen::LaunchBatchedQuantGEMMFp32(
+    gufo::models::gemma4::ggml::LaunchBatchedQuantGEMMFp32(
         f.type, dw, dx, dy, width, m, k, nullptr);
     HIP_CHECK(hipDeviceSynchronize());
     HIP_CHECK(
@@ -126,7 +126,7 @@ void CheckShape(const Format& f, std::size_t m, std::size_t k,
     // Q8_0 past eight rows in one weight pass.
     if (f.type == GgmlType::kQ8_0 && width > 8) {
       HIP_CHECK(hipMemset(dy, 0xFF, width * m * sizeof(float)));
-      Require(gufo::models::gemma4::qwen::LaunchQ8_0SmallBatchWide(
+      Require(gufo::models::gemma4::ggml::LaunchQ8_0SmallBatchWide(
                   dw, dx, dy, width, m, k, nullptr),
               name + ": wide Q8_0 small batch rejected");
       HIP_CHECK(hipDeviceSynchronize());
@@ -139,7 +139,7 @@ void CheckShape(const Format& f, std::size_t m, std::size_t k,
     // The double-stage configuration verification uses for Gemma shapes.
     {
       HIP_CHECK(hipMemset(dy, 0xFF, width * m * sizeof(float)));
-      if (gufo::models::gemma4::qwen::LaunchKQuantSmallBatchDoubleStage(
+      if (gufo::models::gemma4::ggml::LaunchKQuantSmallBatchDoubleStage(
               f.type, dw, dx, dy, width, m, k, nullptr)) {
         HIP_CHECK(hipDeviceSynchronize());
         HIP_CHECK(
@@ -228,37 +228,38 @@ void CheckShape(const Format& f, std::size_t m, std::size_t k,
                                   static_cast<std::uint32_t>(m),
                                   static_cast<std::uint32_t>(k), nullptr);
     });
-    const double qwen = time([&](std::uint8_t* wp) {
-      gufo::models::gemma4::qwen::LaunchGEMV(wp, f.type, dx, dy, m, k, nullptr);
+    const double shared = time([&](std::uint8_t* wp) {
+      gufo::models::gemma4::ggml::LaunchGEMV(wp, f.type, dx, dy, m, k, nullptr);
     });
-    const double qwen1 = time([&](std::uint8_t* wp) {
-      gufo::models::gemma4::qwen::LaunchBatchedQuantGEMMFp32(f.type, wp, dx, dy,
+    const double shared1 = time([&](std::uint8_t* wp) {
+      gufo::models::gemma4::ggml::LaunchBatchedQuantGEMMFp32(f.type, wp, dx, dy,
                                                              1, m, k, nullptr);
     });
-    const double qwen5 = time([&](std::uint8_t* wp) {
-      gufo::models::gemma4::qwen::LaunchBatchedQuantGEMMFp32(f.type, wp, dx, dy,
+    const double shared5 = time([&](std::uint8_t* wp) {
+      gufo::models::gemma4::ggml::LaunchBatchedQuantGEMMFp32(f.type, wp, dx, dy,
                                                              5, m, k, nullptr);
     });
     const double staged5 = time([&](std::uint8_t* wp) {
-      (void)gufo::models::gemma4::qwen::LaunchKQuantSmallBatchDoubleStage(
+      (void)gufo::models::gemma4::ggml::LaunchKQuantSmallBatchDoubleStage(
           f.type, wp, dx, dy, 5, m, k, nullptr);
     });
     std::cout << name << ": one row: Gemma GEMV " << gemma * 1e6
-              << " us, shared GEMV " << qwen * 1e6 << " us, shared small-batch "
-              << qwen1 * 1e6 << " us; five rows: shared small-batch "
-              << qwen5 * 1e6 << " us, double-stage " << staged5 * 1e6 << " us ("
-              << bytes / 1e6 << " MB)\n";
+              << " us, shared GEMV " << shared * 1e6
+              << " us, shared small-batch " << shared1 * 1e6
+              << " us; five rows: shared small-batch " << shared5 * 1e6
+              << " us, double-stage " << staged5 * 1e6 << " us (" << bytes / 1e6
+              << " MB)\n";
     for (auto* ptr : rot)
       HIP_CHECK(hipFree(ptr));
   }
 
   // Prefill W8A8 stays within Q8_1 activation rounding.
   void* dq = nullptr;
-  HIP_CHECK(hipMalloc(&dq, gufo::models::gemma4::qwen::QuantizedActivationBytes(
+  HIP_CHECK(hipMalloc(&dq, gufo::models::gemma4::ggml::QuantizedActivationBytes(
                                kPrefillRows, k)));
-  gufo::models::gemma4::qwen::LaunchQuantizeActivationQ8_1FromFp32(
+  gufo::models::gemma4::ggml::LaunchQuantizeActivationQ8_1FromFp32(
       dx, dq, kPrefillRows, k, nullptr);
-  gufo::models::gemma4::qwen::LaunchBatchedQuantGEMMPreQuantized(
+  gufo::models::gemma4::ggml::LaunchBatchedQuantGEMMPreQuantized(
       f.type, dw, dq, dy, kPrefillRows, m, k, nullptr);
   std::vector<float> prefill(kPrefillRows * m);
   HIP_CHECK(hipDeviceSynchronize());
@@ -353,7 +354,7 @@ void CheckHalfShape(std::size_t m, std::size_t k, std::mt19937& rng) {
     xh[i] = __float2half(x[i]);
   }
   auto* dxh = Device(xh.data(), xh.size());
-  Require(gufo::models::gemma4::flash_next::UnquantizedF16Gemm(
+  Require(gufo::models::gemma4::rocm::UnquantizedF16Gemm(
               dw, dxh, dy, kPrefillRows, m, k, nullptr),
           name + ": binary16 prefill GEMM rejected the shape");
   std::vector<float> prefill(kPrefillRows * m);
@@ -542,7 +543,7 @@ void CheckWmmaShape(const Format& f, std::uint32_t m, std::uint32_t k,
 /// equals the row-order GEMM bit for bit, for every plan and a narrow batch.
 void CheckGroupedHalfGemm(const Format& f, std::uint32_t m, std::uint32_t k,
                           std::mt19937& rng) {
-  namespace fn = gufo::models::gemma4::flash_next;
+  namespace hg = gufo::models::gemma4::rocm;
   namespace g4k = gufo::models::gemma4::rocm;
   const std::string name =
       "Q8_0 grouped prefill " + std::to_string(m) + "x" + std::to_string(k);
@@ -563,16 +564,16 @@ void CheckGroupedHalfGemm(const Format& f, std::uint32_t m, std::uint32_t k,
   HIP_CHECK(hipMalloc(&dy, std::size_t{kBatch} * m * sizeof(float)));
   std::vector<float> want(std::size_t{kBatch} * m), got(want.size());
   for (const auto plan :
-       {fn::DenseF16Plan::kAuto, fn::DenseF16Plan::kRowGroups8,
-        fn::DenseF16Plan::kStagedRowGroups8,
-        fn::DenseF16Plan::kStagedRowGroups8Walk7}) {
+       {hg::DenseF16Plan::kAuto, hg::DenseF16Plan::kRowGroups8,
+        hg::DenseF16Plan::kStagedRowGroups8,
+        hg::DenseF16Plan::kStagedRowGroups8Walk7}) {
     for (const std::uint32_t batch : {kBatch, 40U}) {
       const std::size_t bytes = std::size_t{batch} * m * sizeof(float);
-      Require(fn::DenseF16Gemm(dw, dx, dy, batch, m, k, nullptr, 0, plan),
+      Require(hg::DenseF16Gemm(dw, dx, dy, batch, m, k, nullptr, plan),
               name + " rejected");
       HIP_CHECK(hipMemcpy(want.data(), dy, bytes, hipMemcpyDeviceToHost));
       HIP_CHECK(hipMemset(dy, 0xFF, bytes));
-      Require(fn::DenseF16Gemm(dg, dx, dy, batch, m, k, nullptr, 0, plan, true),
+      Require(hg::DenseF16Gemm(dg, dx, dy, batch, m, k, nullptr, plan, true),
               name + " grouped rejected");
       HIP_CHECK(hipMemcpy(got.data(), dy, bytes, hipMemcpyDeviceToHost));
       Require(std::memcmp(want.data(), got.data(), bytes) == 0,
@@ -585,7 +586,7 @@ void CheckGroupedHalfGemm(const Format& f, std::uint32_t m, std::uint32_t k,
   if (m == 2816) {
     for (const std::uint32_t batch : {kBatch, 40U}) {
       const std::size_t bytes = std::size_t{batch} * m * sizeof(float);
-      Require(fn::DenseF16Gemm(dw, dx, dy, batch, m, k, nullptr),
+      Require(hg::DenseF16Gemm(dw, dx, dy, batch, m, k, nullptr),
               name + " rejected");
       HIP_CHECK(hipMemcpy(want.data(), dy, bytes, hipMemcpyDeviceToHost));
       for (const bool grouped : {false, true}) {
@@ -613,7 +614,7 @@ void CheckGroupedHalfGemm(const Format& f, std::uint32_t m, std::uint32_t k,
 /// bit, in row order and grouped.
 void CheckGeGluHalfGemm(const Format& f, std::uint32_t m, std::uint32_t k,
                         std::uint32_t batch, std::mt19937& rng) {
-  namespace fn = gufo::models::gemma4::flash_next;
+  namespace hg = gufo::models::gemma4::rocm;
   namespace g4k = gufo::models::gemma4::rocm;
   const std::string name = std::string(f.name) + " GeGLU prefill " +
                            std::to_string(m) + "x" + std::to_string(k) + ", " +
@@ -640,8 +641,8 @@ void CheckGeGluHalfGemm(const Format& f, std::uint32_t m, std::uint32_t k,
   HIP_CHECK(hipMalloc(&want_d, outputs * sizeof(__half)));
   HIP_CHECK(hipMalloc(&got_d, outputs * sizeof(__half)));
   const bool half = f.type == GgmlType::kF16;
-  Require(half ? fn::UnquantizedF16Gemm(dw, dx, gu, batch, m, k, nullptr)
-               : fn::DenseF16Gemm(dw, dx, gu, batch, m, k, nullptr),
+  Require(half ? hg::UnquantizedF16Gemm(dw, dx, gu, batch, m, k, nullptr)
+               : hg::DenseF16Gemm(dw, dx, gu, batch, m, k, nullptr),
           name + " FP32");
   g4k::GeGluPacked(gu, nullptr, batch, m / 2, nullptr, want_d);
   std::vector<std::uint16_t> want(outputs), got(outputs);
@@ -651,7 +652,7 @@ void CheckGeGluHalfGemm(const Format& f, std::uint32_t m, std::uint32_t k,
       continue;
     }
     HIP_CHECK(hipMemset(got_d, 0xFF, outputs * 2));
-    Require(fn::DenseF16GeGluGemm(grouped ? dg : dw, dx, got_d, batch, m, k,
+    Require(hg::DenseF16GeGluGemm(grouped ? dg : dw, dx, got_d, batch, m, k,
                                   nullptr, grouped, half),
             name + " rejected");
     HIP_CHECK(hipMemcpy(got.data(), got_d, outputs * 2, hipMemcpyDeviceToHost));

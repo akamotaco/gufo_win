@@ -619,8 +619,8 @@ int main() {
     // Prefill weight copies (--prefill-weights) over one 2048-row forward of
     // the conversation, which every copy serves (binary16 from 512 rows):
     // K-quant and Q4_0 copies reproduce the GGUF GEMMs bit for bit; a Q8_0
-    // copy replaces Flash-Next's GEMM, a different kernel, so it is held to
-    // the prefill envelope when it rounds differently.
+    // copy replaces half_gemm's DenseF16Gemm, a different kernel, so it is held
+    // to the prefill envelope when it rounds differently.
     model.reset();
     {
       std::vector<float> want;

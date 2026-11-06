@@ -18,8 +18,8 @@ using gemma4_test::Require;
 
 namespace {
 
-gufo::models::gemma4::flash_next::MtpCandidateLogits Candidates(float spread) {
-  gufo::models::gemma4::flash_next::MtpCandidateLogits c;
+gufo::models::gemma4::MtpCandidateLogits Candidates(float spread) {
+  gufo::models::gemma4::MtpCandidateLogits c;
   c.size = 64;
   for (std::size_t i = 0; i < c.size; ++i) {
     c.ids[i] = static_cast<gufo::sampling::TokenId>(i);
@@ -238,10 +238,9 @@ void CheckSiblings() {
 /// own top-p and without it (Gemma 4 drafts skip top-p): the sibling is a
 /// draw from q without the draft, as the engine draws it.
 void CheckSiblingFrequencies() {
-  namespace qfn = gufo::models::gemma4::flash_next;
   namespace sampling = gufo::sampling;
   const std::array<float, 6> logits{0.3F, -0.2F, 1.1F, 0.7F, -1.0F, 0.9F};
-  qfn::MtpCandidateLogits candidates;
+  g4::MtpCandidateLogits candidates;
   candidates.size = 5;
   candidates.ids = {3, 1, 5, 2, 0};
   candidates.logits = {1.2F, 0.1F, 0.8F, 0.9F, -0.7F};
@@ -262,11 +261,10 @@ void CheckSiblingFrequencies() {
       unsigned siblings = 0;
       for (unsigned trial = 0; trial < kTrials; ++trial) {
         auto draft_rng = sampling::NextRandom(sampler.mutable_rng_state());
-        const auto q =
-            qfn::SampleMtpProposal(candidates, proposals, &draft_rng);
+        const auto q = g4::SampleMtpProposal(candidates, proposals, &draft_rng);
         const double rest = 1.0 - static_cast<double>(q.probability);
         if (!(rest > 0.0)) {
-          ++counts[qfn::VerifyMtpProposal(logits, q, sampler).token];
+          ++counts[g4::VerifyMtpProposal(logits, q, sampler).token];
           continue;
         }
         const double draw = sampling::Uniform(&sibling_rng) * rest;

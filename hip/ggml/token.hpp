@@ -1,8 +1,8 @@
-// Copied from Gufo src/families/qwen/kernels/ops/token.hpp at upstream 1c75887b
-// (gufo-org/gufo), moved into the gemma4 extension namespace: only the batched
-// argmax and embedding lookup.
-#ifndef GEMMA4_LIB_QWEN_OPS_TOKEN_HPP_
-#define GEMMA4_LIB_QWEN_OPS_TOKEN_HPP_
+// Excerpt of Gufo src/families/qwen/kernels/ops/token.hpp at upstream
+// 1c75887b (gufo-org/gufo): the paths Gemma 4 dispatches for the formats its
+// loader accepts, in the gemma4 extension namespace.
+#ifndef GUFO_MODELS_GEMMA4_HIP_GGML_TOKEN_HPP_
+#define GUFO_MODELS_GEMMA4_HIP_GGML_TOKEN_HPP_
 
 #include <hip/hip_runtime.h>
 
@@ -12,7 +12,7 @@
 #include <span>
 #include <stdexcept>
 
-namespace gufo::models::gemma4::qwen {
+namespace gufo::models::gemma4::ggml {
 
 inline constexpr std::uint32_t kInvalidSampleToken = UINT32_MAX;
 
@@ -36,6 +36,6 @@ void LaunchBatchedEmbeddingLookup(const void* table, core::GgmlType type,
                                   std::size_t hidden_size,
                                   hipStream_t stream = nullptr);
 
-}  // namespace gufo::models::gemma4::qwen
+}  // namespace gufo::models::gemma4::ggml
 
-#endif  // GEMMA4_LIB_QWEN_OPS_TOKEN_HPP_
+#endif  // GUFO_MODELS_GEMMA4_HIP_GGML_TOKEN_HPP_

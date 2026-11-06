@@ -156,7 +156,7 @@ void Attention(const AttentionArgs& args, hipStream_t stream);
 
 /// x[r] += rms(o[r]) * post_norm; h[r] = rms(x[r]) * next_norm.
 /// With `q8`, h is written instead as the tiled Q8_1 prefill activation of
-/// qwen::LaunchQuantizeActivationQ8_1FromFp32 (same layout and rounding; a
+/// ggml::LaunchQuantizeActivationQ8_1FromFp32 (same layout and rounding; a
 /// block scale may differ by one ulp). With `h2`, also
 /// h2[r] = rms(x[r]) * second_norm (the expert input of a MoE layer).
 /// `h_half` / `h2_half` receive binary16 copies of h / h2 (round to
@@ -185,7 +185,7 @@ void PostFeedForwardNorm(const float* f, const float* post_norm, float scale,
 void GeGlu(const float* gate, const float* up, float* out, std::size_t count,
            hipStream_t stream);
 /// GeGlu over [rows][cols] written as the Q8_1 prefill activation, as GeGlu
-/// followed by qwen::LaunchQuantizeActivationQ8_1FromFp32 (see
+/// followed by ggml::LaunchQuantizeActivationQ8_1FromFp32 (see
 /// PostAttentionNorm).
 void GeGluQuantize(const float* gate, const float* up, void* q8,
                    std::uint32_t rows, std::uint32_t cols, hipStream_t stream);

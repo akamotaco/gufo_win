@@ -106,7 +106,7 @@ std::string_view DraftCalibrationScopeName(
   return scope == DraftCalibrationScope::kRequest ? "request" : "shared";
 }
 
-float DraftSignal(const flash_next::MtpCandidateLogits& candidates) noexcept {
+float DraftSignal(const MtpCandidateLogits& candidates) noexcept {
   if (candidates.size == 0) {
     return 0.0F;
   }

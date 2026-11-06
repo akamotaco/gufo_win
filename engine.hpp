@@ -19,10 +19,9 @@
 #include "cycle_trace.hpp"
 #include "draft_policy.hpp"
 #include "draft_vocab.hpp"
-#include "lib/flash_next/mtp_sampling.hpp"
-#include "lib/prompt_lookup.hpp"
-#include "lib/qwen/draft_vocab.hpp"
+#include "mtp_sampling.hpp"
 #include "prefill_weights.hpp"
+#include "prompt_lookup.hpp"
 #include "tokenizer.hpp"
 
 namespace gufo::core {
@@ -424,7 +423,7 @@ private:
     std::uint32_t position{0};
     std::vector<TokenId> rows;
     bool sampled{false};
-    std::vector<flash_next::MtpProposal> proposals;
+    std::vector<MtpProposal> proposals;
     std::size_t copied{0};
     std::size_t copy_start{0};  ///< committed index the copies came from
     /// The drafter chain scored the small head (PrepareDraftHead).
@@ -478,7 +477,7 @@ private:
   lookup::PromptLookup<> lookup_;
   /// The request's draft vocabulary over tokens_ (PrepareDraftHead), reset
   /// with lookup_.
-  qwen::DraftVocab draft_vocab_{kDraftTableRows};
+  DraftVocab draft_vocab_{kDraftTableRows};
   std::vector<std::int32_t> draft_added_;
   /// Host logits of the frontier token; stale while logits_on_device_, when
   /// cache_->logits holds them (EnsureLogits copies them back).

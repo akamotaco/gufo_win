@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <string_view>
 
-#include "lib/flash_next/mtp_sampling.hpp"
+#include "mtp_sampling.hpp"
 
 namespace gufo::models::gemma4 {
 
@@ -44,8 +44,7 @@ enum class DraftCalibrationScope : std::uint8_t {
 
 /// The drafter's confidence in its own step: AdaEDL's entropy bound
 /// 1 - sqrt(0.2 H) over the top-64 softmax, clamped to [0, 1].
-[[nodiscard]] float DraftSignal(
-    const flash_next::MtpCandidateLogits& candidates) noexcept;
+[[nodiscard]] float DraftSignal(const MtpCandidateLogits& candidates) noexcept;
 
 /// gfx1151 costs of one cycle in milliseconds at a context depth:
 /// `draft[n]` for n drafter steps and `verify[r]` for r verified rows, for

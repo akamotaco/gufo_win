@@ -1,5 +1,6 @@
-// Copied from Gufo src/families/qwen/kernels/gemv_quant.hip at upstream
-// 1c75887b (gufo-org/gufo), moved into the gemma4 extension namespace.
+// Excerpt of Gufo src/families/qwen/kernels/gemv_quant.hip at upstream
+// 1c75887b (gufo-org/gufo): the paths Gemma 4 dispatches for the formats its
+// loader accepts, in the gemma4 extension namespace.
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_fp16.h>
 #include <hip/hip_runtime.h>
@@ -9,10 +10,10 @@
 #include <cstdint>
 #include <gufo/ext/gguf_reader.hpp>
 
-#include "lib/qwen/gemm.hpp"
-#include "lib/qwen/quant_ops.hpp"
+#include "hip/ggml/gemm.hpp"
+#include "hip/ggml/quant_ops.hpp"
 
-namespace gufo::models::gemma4::qwen {
+namespace gufo::models::gemma4::ggml {
 
 template<std::uint32_t WavesPerBlock>
 __launch_bounds__(WavesPerBlock * 32, 4) __global__
@@ -103,52 +104,6 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
     return;
   }
 
-  if (type == core::GgmlType::kQ8_K) {
-    const std::size_t num_blocks = K / kQ8KBlockSize;
-    const auto* row0_blocks =
-        static_cast<const Q8KBlock*>(A) + (m0 * num_blocks);
-    const auto* row1_blocks =
-        (m1 < M) ? (static_cast<const Q8KBlock*>(A) + (m1 * num_blocks))
-                 : nullptr;
-    float sum0 = 0.0F;
-    float sum1 = 0.0F;
-
-    for (std::size_t b = 0; b < num_blocks; ++b) {
-      const Q8KBlock& wblk0 = row0_blocks[b];
-      const float d_w0 = wblk0.d;
-      const Q8KBlock* wblk1 =
-          (row1_blocks != nullptr) ? &row1_blocks[b] : nullptr;
-      const float d_w1 = (wblk1 != nullptr) ? wblk1->d : 0.0F;
-      const float* xb = x + (b * kQ8KBlockSize);
-      float dot0 = 0.0F;
-      float dot1 = 0.0F;
-#pragma unroll
-      for (std::size_t k = 0; k < 8; ++k) {
-        const std::size_t idx = lane_id + (32 * k);
-        const float xv = xb[idx];
-        dot0 += static_cast<float>(wblk0.qs[idx]) * xv;
-        if (wblk1 != nullptr) {
-          dot1 += static_cast<float>(wblk1->qs[idx]) * xv;
-        }
-      }
-      sum0 += d_w0 * dot0;
-      sum1 += d_w1 * dot1;
-    }
-
-    for (int off = 16; off > 0; off >>= 1) {
-      sum0 += __shfl_xor(sum0, off);
-      sum1 += __shfl_xor(sum1, off);
-    }
-
-    if (lane_id == 0) {
-      y[m0] = sum0;
-      if (m1 < M) {
-        y[m1] = sum1;
-      }
-    }
-    return;
-  }
-
   const float s0 = QuantWarpBlockDot(type, A, m0, x, K, lane_id, 0, 1);
   const float s1 =
       (m1 < M) ? QuantWarpBlockDot(type, A, m1, x, K, lane_id, 0, 1) : 0.0F;
@@ -160,7 +115,8 @@ __launch_bounds__(WavesPerBlock * 32, 4) __global__
   }
 }
 
-// opt-c1xx-q8k-gemv: launches the Q8_K / Q8_0 block GEMV.
+// opt-c1xx-q8k-gemv: launches the quantized block GEMV (Q8_0, Q4_0 and the
+// K-quants).
 void LaunchQ8KBlockGEMV(const void* A, core::GgmlType type, const float* x,
                         float* y, std::size_t M, std::size_t K,
                         hipStream_t stream) {
@@ -181,14 +137,7 @@ void LaunchQ8KBlockGEMV(const void* A, core::GgmlType type, const float* x,
       Q8KBlockGEMVKernel_2Rows<kWavesPerBlock, StaticType>
           <<<grid, kBlockThreads, 0, stream>>>(A, type, x, y, M, K);
     };
-    switch (type) {
-      case core::GgmlType::kIQ4_XS:
-        launch.template operator()<core::GgmlType::kIQ4_XS>();
-        break;
-      default:
-        launch.template operator()<core::GgmlType::kF32>();
-        break;
-    }
+    launch.template operator()<core::GgmlType::kF32>();
     return;
   }
 
@@ -197,5 +146,5 @@ void LaunchQ8KBlockGEMV(const void* A, core::GgmlType type, const float* x,
       <<<grid, kBlockThreads, 0, stream>>>(A, type, x, y, M, K);
 }
 
-}  // namespace gufo::models::gemma4::qwen
+}  // namespace gufo::models::gemma4::ggml
 #endif  // defined(ENGINE_ENABLE_HIP)
