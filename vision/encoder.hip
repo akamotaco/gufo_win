@@ -493,10 +493,19 @@ struct Encoder::Impl {
                               unsigned cols, unsigned padded) {
     const std::size_t count = std::size_t{rows} * padded;
     Allocation buffer(count * 2);
-    Check(hipMemsetAsync(buffer.data, 0, count * 2, stream));
-    Check(hipMemcpy2DAsync(buffer.data, std::size_t{padded} * 2, part.data,
-                           std::size_t{cols} * 2, std::size_t{cols} * 2, rows,
-                           hipMemcpyHostToDevice, stream));
+    // Pad on the host and copy in one piece. On Windows a 2D copy from the
+    // mapped GGUF makes the driver map the source range itself; that map fails
+    // ("Failed PAL memory allocation", submitWriteMemory failed) while the call
+    // still reports success, so the weight stayed unwritten and vision answers
+    // were unrelated to the image.
+    std::vector<std::uint16_t> host(count, 0);
+    const auto* source = static_cast<const std::uint16_t*>(part.data);
+    for (unsigned row = 0; row < rows; ++row)
+      std::memcpy(host.data() + std::size_t{row} * padded,
+                  source + std::size_t{row} * cols, std::size_t{cols} * 2);
+    Check(hipMemcpyAsync(buffer.data, host.data(), count * 2,
+                         hipMemcpyHostToDevice, stream));
+    Check(hipStreamSynchronize(stream));  // `host` dies at return
     Bf16ToHalf<<<(count + kThreads - 1) / kThreads, kThreads, 0, stream>>>(
         static_cast<std::uint16_t*>(buffer.data), count);
     uploaded_bytes += count * 2;

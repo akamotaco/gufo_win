@@ -3,7 +3,7 @@
 > [!NOTE]
 > **This is the `gemma4-ext` branch of [akamotaco/gufo_win](https://github.com/akamotaco/gufo_win):**
 > [franzmoca/gemma4-gufo-extension](https://github.com/franzmoca/gemma4-gufo-extension) `main`
-> plus three changes for native Windows:
+> plus four changes for native Windows:
 >
 > - `extension.json` lists `windows` among the platforms.
 > - Cache gather copies use a pointer only where it is also the device address
@@ -13,6 +13,11 @@
 > - A failed cache copy clears the HIP error and logs `[gemma4] event=cache_copy_failed`
 >   with the pointers' attributes, so it costs a cache miss instead of failing the
 >   next decode with a stale "invalid argument".
+> - The vision encoder pads its MLP down weights on the host and uploads them with
+>   one 1D copy (`vision/encoder.hip`, `UploadHalfPadded`). A 2D copy from the mapped
+>   GGUF fails inside the Windows driver ("Failed PAL memory allocation") while
+>   reporting success, so those 27 weights stayed unwritten and image answers had
+>   nothing to do with the image.
 >
 > Build it with gufo_win `main` and `-DGUFO_EXTENSION_DIRS=<this folder>`; see the
 > gufo_win README. Everything below is the extension's own README.
