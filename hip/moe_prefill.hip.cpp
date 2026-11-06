@@ -1,6 +1,6 @@
 // Routed expert GEMM for prefill over binary16 activations for the K-quant
 // expert formats (Q4_K, Q5_K, Q6_K), and for the blockwise ones (Q4_0, Q5_0,
-// Q5_1, Q8_0, binary16). It reads the routing layout of Flash-Next's routed
+// Q5_1, Q8_0, binary16). It reads the routing layout of half_gemm's routed
 // GEMM: RoutedCompact's 16-padded expert buckets and a tile map of expert |
 // tile << 16 entries.
 //
@@ -16,7 +16,7 @@
 // column L%16, rows 2 i + L/16.
 //
 // Q4_K and Q5_K weights are q * (d sc) - dmin m, evaluated as one binary16
-// FMA per pair with the two factors rounded to binary16, as in Flash-Next's
+// FMA per pair with the two factors rounded to binary16, as in half_gemm's
 // routed GEMM, so the two produce the same products; Q6_K weights are
 // (q - 32) * (d sc).
 #include <hip/hip_fp16.h>
@@ -657,7 +657,7 @@ constexpr int kOutStride = kRowsPerBlock + 4;
 /// Q5_1 K block (32 values) from its staged raw bytes as two fragments:
 /// element j < 16 is the low nibble of qs[j] plus bit j of qh as 16, j >= 16
 /// the high nibble of qs[j - 16] plus bit j; weight q * d + m, one binary16
-/// FMA as in Flash-Next's routed GEMM.
+/// FMA as in half_gemm's routed GEMM.
 __device__ __forceinline__ void DecodeQ51(const std::uint8_t* block, bool live,
                                           v16h* lo, v16h* hi) {
   const uint2 head = *reinterpret_cast<const uint2*>(block);
@@ -691,7 +691,7 @@ __device__ __forceinline__ void DecodeQ51(const std::uint8_t* block, bool live,
 
 /// Q8_0 K block s (< 2) of a staged row's 17 words as two fragments: codes
 /// flipped to q + 128 and taken back out by the magic, weight q * d, the
-/// binary16 FMA of Flash-Next's routed GEMM.
+/// binary16 FMA of half_gemm's routed GEMM.
 __device__ __forceinline__ void DecodeQ80(const std::uint32_t (&w)[kQ80Words],
                                           int s, bool live, v16h* lo,
                                           v16h* hi) {

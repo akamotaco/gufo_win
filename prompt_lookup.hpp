@@ -3,8 +3,8 @@
 // the agreement rule (`Find(..., agreed)`), which is prepared as an additive
 // ext-api change (core/prompt-lookup-agreement) but not part of the host API
 // yet. Replace with <gufo/ext/prompt_lookup.hpp> once it is.
-#ifndef GEMMA4_LIB_PROMPT_LOOKUP_HPP_
-#define GEMMA4_LIB_PROMPT_LOOKUP_HPP_
+#ifndef GUFO_MODELS_GEMMA4_PROMPT_LOOKUP_HPP_
+#define GUFO_MODELS_GEMMA4_PROMPT_LOOKUP_HPP_
 
 #include <algorithm>
 #include <concepts>
@@ -177,7 +177,7 @@ public:
 
   /// A backend may reject a source whose continuation crosses message framing.
   /// Keep searching earlier matches instead of repeatedly proposing the same
-  /// rejected boundary. The ordinary Flash-Next policy accepts every source.
+  /// rejected boundary. The ordinary policy accepts every source.
   /// Rejected occurrences still compete for `agreed`.
   template<std::predicate<std::size_t> AcceptSource>
   [[nodiscard]] Match Find(std::span<const TokenId> committed,
@@ -369,4 +369,4 @@ private:
 
 }  // namespace gufo::models::gemma4::lookup
 
-#endif  // GEMMA4_LIB_PROMPT_LOOKUP_HPP_
+#endif  // GUFO_MODELS_GEMMA4_PROMPT_LOOKUP_HPP_

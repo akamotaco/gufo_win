@@ -5,7 +5,7 @@ checkout). The host harness has no `gemma4` sampling preset and no Gemma
 expectations, so [run.py](run.py) copies it beside the report, applies
 [host-harness.patch](host-harness.patch) and runs the copy. The host checkout
 stays read only. The patch is the `feat/gemma` harness (`83b764b4`) rebased
-onto gemma-main and must apply without fuzz.
+onto the Gufo revision pinned in `flake.nix` and must apply without fuzz.
 
 They need a Gufo built with this extension, real weights and a GPU. Run them
 with the Gufo development shell's Python. Each run creates a new report

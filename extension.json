@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "gemma4",
   "version": "0.1.0",
-  "api_version": ">= 0.1.22",
+  "api_version": ">= 0.2.9",
   "entry": "gemma4_register",
   "registration_target": "gufo_gemma4",
   "depends": [],
@@ -19,17 +19,52 @@
       ],
       "speculative": ["mtp"],
       "target": "gufo_gemma4_text",
-      "entry": "gemma4_provider_register"
+      "entry": "gemma4_provider_register",
+      "serving": {"draft_options": {"mtp": "--mtp-model"}}
     }
   ],
-  "options": [],
+  "options": [
+    {
+      "name": "--mtp-model",
+      "type": "path",
+      "commands": ["serve", "bench", "prompt"],
+      "providers": ["gemma4"],
+      "help": "gemma4-assistant MTP drafter GGUF for --speculative mtp"
+    },
+    {
+      "name": "--draft-calibration",
+      "type": "string",
+      "commands": ["serve", "bench", "prompt", "chat"],
+      "providers": ["gemma4"],
+      "help": "Where the calibrated policy learns: shared or request (exact seeded replay; default: shared)"
+    },
+    {
+      "name": "--draft-trace",
+      "type": "path",
+      "commands": ["serve", "bench", "prompt", "chat"],
+      "providers": ["gemma4"],
+      "help": "Append one JSON line per MTP verification cycle to this file"
+    },
+    {
+      "name": "--prefill-weights",
+      "type": "string",
+      "commands": ["serve", "bench", "prompt", "chat"],
+      "providers": ["gemma4"],
+      "help": "Prefill copies of the projections: off, compact or decoded (default: off)"
+    },
+    {
+      "name": "--image-tokens",
+      "type": "integer",
+      "commands": ["serve", "prompt", "chat"],
+      "providers": ["gemma4"],
+      "help": "Soft tokens per image: 70, 140, 280, 560 or 1120 (default: 280)"
+    }
+  ],
   "targets": {
     "gufo_gemma4":                    {"requires": []},
     "gufo_gemma4_hip":                {"requires": ["hip"]},
     "gufo_gemma4_text":               {"requires": ["hip"]},
     "gufo_gemma4_reference":          {"requires": ["testing"]},
-    "gufo_gemma4_test_host":          {"requires": ["testing"]},
-    "gufo_gemma4_test_host_hip":      {"requires": ["hip", "testing"]},
     "gemma4_config_test":             {"requires": ["testing"], "role": "test"},
     "gemma4_cycle_trace_test":        {"requires": ["testing"], "role": "test"},
     "gemma4_draft_policy_test":       {"requires": ["testing"], "role": "test"},

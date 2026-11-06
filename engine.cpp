@@ -19,8 +19,8 @@
 #include "draft_vocab.hpp"
 #include "hip/device_model.hpp"
 #include "hip/executor.hpp"
-#include "lib/flash_next/mtp_sampling.hpp"
-#include "lib/qwen/token.hpp"
+#include "hip/ggml/token.hpp"
+#include "mtp_sampling.hpp"
 #include "proposal_sampler.hpp"
 #include "sibling_verification.hpp"
 #include "weights.hpp"
@@ -767,7 +767,7 @@ constexpr float kSampledChainFloor = 0.3F;
 constexpr std::uint32_t kSampledDraftCap = 4;
 
 /// The top candidate's softmax share among the top-64 logits.
-float TopShare(const flash_next::MtpCandidateLogits& candidates) {
+float TopShare(const MtpCandidateLogits& candidates) {
   float top = candidates.logits[0];
   for (std::size_t i = 1; i < candidates.size; ++i) {
     top = std::max(top, candidates.logits[i]);
@@ -780,8 +780,7 @@ float TopShare(const flash_next::MtpCandidateLogits& candidates) {
 }
 
 /// The two largest softmax shares among the top-64 logits.
-std::pair<float, float> TopTwoShares(
-    const flash_next::MtpCandidateLogits& candidates) {
+std::pair<float, float> TopTwoShares(const MtpCandidateLogits& candidates) {
   float top = -INFINITY;
   float second = -INFINITY;
   for (std::size_t i = 0; i < candidates.size; ++i) {
@@ -803,7 +802,7 @@ std::pair<float, float> TopTwoShares(
 }
 
 /// The argmax candidate, lowest token id on ties.
-std::int32_t TopToken(const flash_next::MtpCandidateLogits& candidates) {
+std::int32_t TopToken(const MtpCandidateLogits& candidates) {
   std::size_t best = 0;
   for (std::size_t i = 1; i < candidates.size; ++i) {
     if (candidates.logits[i] > candidates.logits[best] ||
@@ -824,7 +823,7 @@ struct Alternative {
 };
 
 /// Greedy: the runner-up candidate (TopToken's order).
-Alternative GreedyAlternative(const flash_next::MtpCandidateLogits& candidates,
+Alternative GreedyAlternative(const MtpCandidateLogits& candidates,
                               std::int32_t chosen) {
   std::size_t best = candidates.size;
   std::size_t top = candidates.size;
@@ -857,7 +856,7 @@ Alternative GreedyAlternative(const flash_next::MtpCandidateLogits& candidates,
 }
 
 /// Sampled: a draw from the proposal without its token.
-Alternative SampledAlternative(const flash_next::MtpProposal& proposal,
+Alternative SampledAlternative(const MtpProposal& proposal,
                                std::uint64_t* rng) {
   const double rest = 1.0 - static_cast<double>(proposal.probability);
   if (!(rest > 0.0)) {
@@ -1069,8 +1068,7 @@ struct Session::CycleDraft {
 
   /// Whether the draft just proposed ends the chain unverified. `kept`
   /// drafts precede it; `confidence` feeds the confidence policy's chain.
-  bool Stop(std::size_t kept, float confidence,
-            const flash_next::MtpCandidateLogits& c) {
+  bool Stop(std::size_t kept, float confidence, const MtpCandidateLogits& c) {
     switch (policy) {
       case DraftPolicy::kCalibrated: {
         if (SharesSpare() && FreeRows() == 0) {
@@ -1122,7 +1120,7 @@ struct Session::CycleDraft {
     return false;
   }
 
-  rocm::DraftProposal Propose(const flash_next::MtpCandidateLogits& c) {
+  rocm::DraftProposal Propose(const MtpCandidateLogits& c) {
     if (cycle.trace) {
       ++cycle.trace->drafter_steps;
       cycle.trace->proposal_signals.push_back(DraftSignal(c));
@@ -1131,8 +1129,7 @@ struct Session::CycleDraft {
       cycle.trace->proposal_margin.push_back(top - second);
     }
     if (cycle.sampled) {
-      auto proposal =
-          flash_next::SampleMtpProposal(c, draft_sampler, &draft_rng);
+      auto proposal = SampleMtpProposal(c, draft_sampler, &draft_rng);
       if (cycle.trace) {
         cycle.trace->proposal_q.push_back(proposal.probability);
         CycleRecord::Sparse& raw = cycle.trace->draft_candidates.emplace_back();
@@ -1378,9 +1375,7 @@ bool Session::BeginCycle(Cycle& cycle, std::uint32_t draft_limit,
       draft.small_head = head.small;
       model_->executor_->DraftChain(
           *cache_, pending, position, steps, &draft.drafts,
-          [&draft](const flash_next::MtpCandidateLogits& c) {
-            return draft.Propose(c);
-          },
+          [&draft](const MtpCandidateLogits& c) { return draft.Propose(c); },
           head);
       FinishDraft(cycle);
     }
@@ -1419,7 +1414,7 @@ void Session::FinishDraft(Cycle& cycle) {
     // A copied token is a point-mass proposal: accepted with the target's
     // probability, a rejection resampling without it.
     for (const std::int32_t token : draft.copies) {
-      flash_next::MtpProposal proposal;
+      MtpProposal proposal;
       proposal.ids[0] = static_cast<sampling::TokenId>(token);
       proposal.probabilities[0] = 1.0F;
       proposal.size = 1;
@@ -1611,7 +1606,7 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
   };
   const auto sample_row = [&](std::size_t r) {
     if (!argmax.empty()) {
-      return static_cast<TokenId>(qwen::CheckedSampleToken(argmax[r], vocab));
+      return static_cast<TokenId>(ggml::CheckedSampleToken(argmax[r], vocab));
     }
     if (compact(r)) {
       return static_cast<TokenId>(
@@ -1637,7 +1632,7 @@ void Session::FinishCycle(Cycle& cycle, std::span<const float> logits,
         agrees = verified.accepted;
         sibling = verified.sibling;
       } else {
-        const auto verified = flash_next::VerifyMtpTarget(
+        const auto verified = VerifyMtpTarget(
             vocab, cycle.proposals[row], sampler, [&] { return target(row); });
         emit(static_cast<TokenId>(verified.token), row);
         agrees = verified.accepted;
@@ -1815,13 +1810,11 @@ bool Session::DecodeBatch(std::span<BatchDecode> decodes) {
     }
     if (cycles[i].draft) {
       CycleDraft& draft = *cycles[i].draft;
-      jobs.push_back({d.session->cache_.get(), cycles[i].rows.front(),
-                      cycles[i].position, draft.steps,
-                      [&draft](const flash_next::MtpCandidateLogits& c) {
-                        return draft.Propose(c);
-                      },
-                      &draft.drafts,
-                      d.session->PrepareDraftHead(cycles[i].rows.front())});
+      jobs.push_back(
+          {d.session->cache_.get(), cycles[i].rows.front(), cycles[i].position,
+           draft.steps,
+           [&draft](const MtpCandidateLogits& c) { return draft.Propose(c); },
+           &draft.drafts, d.session->PrepareDraftHead(cycles[i].rows.front())});
       drafting.push_back(i);
     }
   }

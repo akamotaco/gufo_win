@@ -7,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-#include "lib/flash_next/mtp_sampling.hpp"
+#include "mtp_sampling.hpp"
 
 namespace gufo::models::gemma4 {
 
@@ -23,9 +23,8 @@ struct SiblingVerification {
 /// own proposal q' = q without the draft, with min(1, r/q'); else the token
 /// comes from norm(max(r - q', 0)). The emitted token follows p exactly.
 inline SiblingVerification VerifyWithSibling(
-    const sampling::SamplingDistribution& target,
-    const flash_next::MtpProposal& q, sampling::TokenId sibling,
-    sampling::SamplerState& sampler) {
+    const sampling::SamplingDistribution& target, const MtpProposal& q,
+    sampling::TokenId sibling, sampling::SamplerState& sampler) {
   if (sampler.Uniform() * q.probability < target.probability(q.token)) {
     return {q.token, true, false};
   }

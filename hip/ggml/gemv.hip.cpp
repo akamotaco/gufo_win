@@ -1,5 +1,6 @@
-// Copied from Gufo src/families/qwen/kernels/gemv.hip at upstream 1c75887b
-// (gufo-org/gufo), moved into the gemma4 extension namespace.
+// Excerpt of Gufo src/families/qwen/kernels/gemv.hip at upstream
+// 1c75887b (gufo-org/gufo): the paths Gemma 4 dispatches for the formats its
+// loader accepts, in the gemma4 extension namespace.
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_fp16.h>
@@ -10,12 +11,13 @@
 #include <cstdint>
 #include <cstdlib>
 #include <gufo/ext/experimental/dispatch_telemetry.hpp>
+#include <gufo/ext/experimental/ggml_dequant.hpp>
 #include <gufo/ext/gguf_reader.hpp>
+#include <limits>
 
-#include "lib/qwen/gemm.hpp"
-#include "lib/qwen/gemm_route.hpp"
+#include "hip/ggml/gemm.hpp"
 
-namespace gufo::models::gemma4::qwen {
+namespace gufo::models::gemma4::ggml {
 
 template<std::uint32_t WavesPerBlock>
 __launch_bounds__(WavesPerBlock * 32, 4) __global__
@@ -148,53 +150,54 @@ __global__ void FastGEMVBlockKernel(const void* __restrict__ A,
 
 namespace {
 
-void ExecuteDenseGemv(qwen::QwenGemmRoute route, const void* A,
-                      core::GgmlType a_type, const float* x, float* y,
-                      std::size_t M, std::size_t K, hipStream_t stream) {
+/// The decode GEMV for a dense F32 or BF16 matrix: one block per row (256
+/// threads, 512 from 16,384 inputs), or one wave per row for BF16 rows of
+/// fewer than 8,192 inputs that divide by eight.
+void ExecuteDenseGemv(const void* A, core::GgmlType a_type, const float* x,
+                      float* y, std::size_t M, std::size_t K,
+                      hipStream_t stream) {
   constexpr std::uint32_t kWavesPerBlock = 4;
   constexpr std::uint32_t kBlockThreads = kWavesPerBlock * 32;
-  if (route == qwen::QwenGemmRoute::kHipBf16Wave32Single) {
-    ::gufo::hip::detail::EmitGemvDispatch(M, K, true,
-                                          qwen::QwenGemmRouteName(route));
+  const bool bf16 = a_type == core::GgmlType::kBF16;
+  if (bf16 && K % 8 == 0 && K < 8192) {
+    ::gufo::hip::detail::EmitGemvDispatch(M, K, true, "wave32_single_row");
     const auto* A_bf16 = static_cast<const hip_bfloat16*>(A);
     const std::size_t grid = (M + kWavesPerBlock - 1) / kWavesPerBlock;
     Wave32GEMVKernel_1Row<kWavesPerBlock>
         <<<grid, kBlockThreads, 0, stream>>>(A_bf16, x, y, M, K);
     return;
   }
-
-  ::gufo::hip::detail::EmitGemvDispatch(M, K, a_type == core::GgmlType::kBF16,
-                                        qwen::QwenGemmRouteName(route));
-  const std::size_t block_size =
-      route == qwen::QwenGemmRoute::kHipF32Baseline512 ||
-              route == qwen::QwenGemmRoute::kHipBf16Baseline512
-          ? 512
-          : 256;
+  ::gufo::hip::detail::EmitGemvDispatch(M, K, bf16, "baseline_block");
+  const std::size_t block_size = K >= 16384 ? 512 : 256;
   FastGEMVBlockKernel<<<M, block_size, 0, stream>>>(A, a_type, x, y, M, K);
 }
 
 }  // namespace
 
 void LaunchGEMV(const void* A, core::GgmlType a_type, const float* x, float* y,
-                std::size_t M, std::size_t K, hipStream_t stream,
-                qwen::QwenGemmMode mode) {
-  const auto resolution = qwen::ResolveQwenGemmRoute(
-      {.type = a_type, .batch_size = 1, .m = M, .k = K, .mode = mode});
-  switch (resolution.route) {
-    case qwen::QwenGemmRoute::kHipQuantDirect:
-      LaunchQ8KBlockGEMV(A, a_type, x, y, M, K, stream);
+                std::size_t M, std::size_t K, hipStream_t stream) {
+  if (M == 0 || K == 0 || M > std::numeric_limits<std::uint32_t>::max()) {
+    std::abort();
+  }
+  switch (a_type) {
+    case core::GgmlType::kF32:
+    case core::GgmlType::kBF16:
+      ExecuteDenseGemv(A, a_type, x, y, M, K, stream);
       return;
-    case qwen::QwenGemmRoute::kHipF32Baseline256:
-    case qwen::QwenGemmRoute::kHipF32Baseline512:
-    case qwen::QwenGemmRoute::kHipBf16Baseline256:
-    case qwen::QwenGemmRoute::kHipBf16Baseline512:
-    case qwen::QwenGemmRoute::kHipBf16Wave32Single:
-      ExecuteDenseGemv(resolution.route, A, a_type, x, y, M, K, stream);
+    case core::GgmlType::kQ8_0:
+    case core::GgmlType::kQ4_0:
+    case core::GgmlType::kQ4_K:
+    case core::GgmlType::kQ5_K:
+    case core::GgmlType::kQ6_K:
+      if (K % ::gufo::quant::QuantizedBlockElements(a_type) != 0) {
+        std::abort();
+      }
+      LaunchQ8KBlockGEMV(A, a_type, x, y, M, K, stream);
       return;
     default:
       std::abort();
   }
 }
 
-}  // namespace gufo::models::gemma4::qwen
+}  // namespace gufo::models::gemma4::ggml
 #endif

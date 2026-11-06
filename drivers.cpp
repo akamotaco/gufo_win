@@ -22,6 +22,7 @@
 
 #include "chat_template.hpp"
 #include "engine.hpp"
+#include "provider_options.hpp"
 #include "vision/encoder.hpp"
 #include "vision/prompt.hpp"
 
@@ -86,10 +87,6 @@ ReasoningOptions PromptReasoning(const ext::TextPromptOptions& opt) {
   return reasoning;
 }
 
-// TODO(gemma4): --draft-policy, --draft-calibration, --draft-trace,
-// --prefill-weights and --image-tokens have no Gemma plumbing in the host's
-// prompt and bench options (#979); they keep their defaults. The host does not
-// say whether --draft-tokens was given, so its value is used as is.
 std::shared_ptr<Model> LoadModel(const ext::TextPromptOptions& opt,
                                  Clock::time_point start) {
   if (opt.force_cpu) {
@@ -105,10 +102,18 @@ std::shared_ptr<Model> LoadModel(const ext::TextPromptOptions& opt,
     std::cerr << "--speculative mtp requires --mtp-model\n";
     return nullptr;
   }
-  const ModelOptions options{.max_context = kDefaultContext,
-                             .mtp_model_path = mtp ? opt.mtp_model_path : "",
-                             .draft_tokens = opt.draft_tokens,
-                             .min_draft_tokens = opt.min_draft_tokens};
+  ModelOptions options{.max_context = kDefaultContext,
+                       .mtp_model_path = mtp ? opt.mtp_model_path : "",
+                       .draft_tokens = opt.draft_tokens,
+                       .min_draft_tokens = opt.min_draft_tokens};
+  try {
+    options.draft_policy = ParseDraftPolicy(opt.draft_policy);
+    ApplyProviderOptions(opt.provider_options, options);
+    (void)ImageTokens(opt.provider_options);
+  } catch (const std::invalid_argument& e) {
+    std::cerr << "Error: " << e.what() << '\n';
+    return nullptr;
+  }
   std::string error;
   auto model = Model::Load(opt.model_path, options, &error);
   if (model == nullptr) {
@@ -153,11 +158,11 @@ struct Prompt {
 
 Prompt RenderPrompt(const Model& model, vision::Encoder* encoder,
                     std::span<const ext::ChatMessage> history,
-                    const ChatOptions& options) {
+                    const ChatOptions& options, std::uint32_t image_tokens) {
   auto prepared = std::make_shared<const vision::Prompt>(
       vision::Prepare(model.tokenizer(), history, {}, options,
                       encoder != nullptr ? encoder->identity() : "",
-                      model.MaxContext(), vision::kDefaultSoftTokens));
+                      model.MaxContext(), image_tokens));
   Prompt prompt{prepared->tokens, {}, prepared};
   for (const auto& image : prepared->images) {
     prompt.spans.push_back(
@@ -309,7 +314,8 @@ int RunGemma4Prompt(const ext::TextPromptOptions& opt, const core::GgufReader&,
       messages.emplace_back(ext::ChatRole::kUser, opt.prompt_text);
       AttachImages(opt, messages.back());
       prompt = RenderPrompt(*model, encoder.get(), messages,
-                            ResolveChatOptions(PromptReasoning(opt)));
+                            ResolveChatOptions(PromptReasoning(opt)),
+                            ImageTokens(opt.provider_options));
     } else if (!opt.image_paths.empty()) {
       throw std::invalid_argument("--image requires chat framing");
     } else {
@@ -374,7 +380,8 @@ int RunGemma4Chat(const ext::TextPromptOptions& opt, const core::GgufReader&,
     }
     Prompt prompt;
     try {
-      prompt = RenderPrompt(*model, encoder.get(), history, chat_options);
+      prompt = RenderPrompt(*model, encoder.get(), history, chat_options,
+                            ImageTokens(opt.provider_options));
     } catch (const std::exception& e) {
       std::cerr << "Gemma 4 chat template failed: " << e.what() << '\n';
       return 1;
@@ -422,11 +429,19 @@ int RunGemma4Bench(const ext::TextBenchOptions& options,
     std::cerr << "Error: Gemma 4 benchmark context is out of range\n";
     return 1;
   }
-  const ModelOptions model_options{
+  ModelOptions model_options{
       .max_context = static_cast<std::uint32_t>(required_context),
       .mtp_model_path = mtp ? options.mtp_model_path : "",
       .draft_tokens = options.draft_tokens,
       .min_draft_tokens = options.min_draft_tokens};
+  try {
+    model_options.draft_policy = ParseDraftPolicy(options.draft_policy);
+    ApplyProviderOptions(options.provider_options, model_options);
+  } catch (const std::invalid_argument& e) {
+    std::cerr << "Error: " << e.what() << '\n';
+    PrintModelLoadTime(model_load_start, false);
+    return 1;
+  }
   std::string error;
   auto model = Model::Load(options.model_path, model_options, &error);
   if (model == nullptr) {

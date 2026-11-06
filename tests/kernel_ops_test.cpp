@@ -20,8 +20,8 @@
 #include <vector>
 
 #include "hip/candidates.hpp"
+#include "hip/ggml/gemm.hpp"
 #include "hip/kernels.hpp"
-#include "lib/qwen/gemm.hpp"
 #include "tests/check.hpp"
 
 namespace k = gufo::models::gemma4::rocm;
@@ -322,8 +322,8 @@ void CheckFusedQuantize(std::mt19937& rng) {
     constexpr std::uint32_t kDim = 5376;
     constexpr std::uint32_t kFfn = 2048;
     const std::size_t bytes = std::max(
-        gufo::models::gemma4::qwen::QuantizedActivationBytes(rows, kDim),
-        gufo::models::gemma4::qwen::QuantizedActivationBytes(rows, kFfn));
+        gufo::models::gemma4::ggml::QuantizedActivationBytes(rows, kDim),
+        gufo::models::gemma4::ggml::QuantizedActivationBytes(rows, kFfn));
     const auto random = [&](std::size_t n, float scale) {
       std::vector<float> v(n);
       for (float& x : v)
@@ -340,7 +340,7 @@ void CheckFusedQuantize(std::mt19937& rng) {
     const auto compare = [&](std::uint32_t cols, const std::string& what) {
       HIP_CHECK(hipDeviceSynchronize());
       const std::size_t n =
-          gufo::models::gemma4::qwen::QuantizedActivationBytes(rows, cols);
+          gufo::models::gemma4::ggml::QuantizedActivationBytes(rows, cols);
       std::vector<std::uint8_t> a(n), b(n);
       HIP_CHECK(hipMemcpy(a.data(), want, n, hipMemcpyDeviceToHost));
       HIP_CHECK(hipMemcpy(b.data(), got, n, hipMemcpyDeviceToHost));
@@ -384,7 +384,7 @@ void CheckFusedQuantize(std::mt19937& rng) {
     HIP_CHECK(hipMemset(want, 0x5A, bytes));
     HIP_CHECK(hipMemset(got, 0x5A, bytes));
     k::GeGlu(gate, up, act, std::size_t{rows} * kFfn, nullptr);
-    gufo::models::gemma4::qwen::LaunchQuantizeActivationQ8_1FromFp32(
+    gufo::models::gemma4::ggml::LaunchQuantizeActivationQ8_1FromFp32(
         act, want, rows, kFfn, nullptr);
     k::GeGluQuantize(gate, up, got, rows, kFfn, nullptr);
     compare(kFfn, "GeGluQuantize");
@@ -408,7 +408,7 @@ void CheckFusedQuantize(std::mt19937& rng) {
         k::PostFeedForwardNorm(d_o, d_w1, 0.7F, x, d_w2, h, rows, kDim, 1e-6F,
                                nullptr);
       }
-      gufo::models::gemma4::qwen::LaunchQuantizeActivationQ8_1FromFp32(
+      gufo::models::gemma4::ggml::LaunchQuantizeActivationQ8_1FromFp32(
           h, want, rows, kDim, nullptr);
       HIP_CHECK(hipMemcpy(x, x0.data(), x0.size() * 4, hipMemcpyHostToDevice));
       if (kind == 0) {

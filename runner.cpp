@@ -9,10 +9,10 @@
 #include <exception>
 #include <functional>
 #include <gufo/ext/component_cache_resources.hpp>
-#include <gufo/ext/experimental/transfer_pool.hpp>
 #include <gufo/ext/gguf_identity.hpp>
 #include <gufo/ext/host.hpp>
 #include <gufo/ext/host_budget.hpp>
+#include <gufo/ext/transfer_pool.hpp>
 #include <limits>
 #include <map>
 #include <optional>
@@ -27,6 +27,7 @@
 #include "chat_template.hpp"
 #include "continuation_adapter.hpp"
 #include "engine.hpp"
+#include "provider_options.hpp"
 #include "text_contract.hpp"
 #include "vision/encoder.hpp"
 #include "vision/prompt.hpp"
@@ -171,13 +172,9 @@ public:
         image_tokens_(image_tokens),
         max_context_(max_context) {
     if (!artifact_fingerprint.empty()) {
-      persistence_ = ext::TextRunnerPersistenceDescriptor{
-          .compatibility_identity = CompatibilityIdentity(
-              artifact_fingerprint, mtp_fingerprint, model_->HasMtp(),
-              max_context_, model_->DraftTokens(), ring),
-          .payload_version = Session::kSnapshotPayloadVersion,
-      };
-      component_identity_ = persistence_->compatibility_identity;
+      component_identity_ = CompatibilityIdentity(
+          artifact_fingerprint, mtp_fingerprint, model_->HasMtp(), max_context_,
+          model_->DraftTokens(), ring);
     } else {
       // Without artifact fingerprints checkpoints stay in this process.
       std::ostringstream identity;
@@ -191,7 +188,6 @@ public:
     }
   }
 
-  [[nodiscard]] bool UsesComponentCache() const override { return true; }
   // Checkpoint rows and private states live in committed host pages
   // (registered with the GPU, read by the disk tier), transferred on pooled
   // streams.
@@ -237,8 +233,6 @@ public:
             ext::TextRunnerCapabilities{
                 .supports_vision = vision_ != nullptr,
                 .incremental_prefill = true,
-                .snapshot = true,
-                .fork = true,
                 .final_token_advance_required = false,
                 .incremental_text_is_exact = true,
                 .multi_token_decode = model_->HasMtp(),
@@ -247,7 +241,6 @@ public:
                 .prefix_reuse = true,
                 .in_pass_checkpoint = true,
             },
-        .persistence = persistence_,
         .sampling_defaults = SamplingDefaults(),
     };
   }
@@ -413,12 +406,6 @@ public:
     return model_->Decode(EngineTokens(tokens));
   }
 
-  // Sessions belong to component-cache slots (BindComponentState).
-  [[nodiscard]] std::unique_ptr<ext::TextRunnerState> CreateState()
-      const override {
-    throw std::logic_error("Gemma 4 serves through the component cache");
-  }
-
   void PreparePrefixReuse(
       ext::TextRunnerState& state,
       std::span<const TextRunnerToken> prefix) const override {
@@ -470,14 +457,15 @@ public:
 
   [[nodiscard]] ext::TextPrefillStep PrefillThrough(
       ext::TextRunnerState& state, std::span<const TextRunnerToken> prompt,
-      std::size_t offset, std::size_t budget, std::size_t boundary,
-      std::unique_ptr<ext::TextRunnerSnapshot>* checkpoint,
-      const std::function<std::unique_ptr<ext::TextRunnerSnapshot>()>& capture)
-      const override {
+      std::size_t offset, std::size_t budget,
+      std::span<const std::size_t> boundaries,
+      const InPassConsumer& consume) const override {
     auto& gemma = Get(state);
-    if (checkpoint == nullptr || !capture) {
+    // One boundary per pass (max_in_pass_checkpoints keeps its default).
+    if (!consume || boundaries.size() != 1) {
       throw std::logic_error("invalid Gemma 4 in-pass checkpoint request");
     }
+    const std::size_t boundary = boundaries.front();
     const std::size_t end = StepEnd(gemma, prompt, offset, budget);
     if (!InPassBoundary(gemma, offset, end, boundary)) {
       throw std::logic_error("Gemma 4 in-pass boundary is outside the step");
@@ -485,23 +473,17 @@ public:
     const auto prefix = EngineTokens(prompt.first(end));
     Sync(gemma, std::span(prefix).first(boundary), boundary,
          std::span(prefix).subspan(boundary));
-    double capture_ms = 0;
+    // The lease captures the session at the boundary through the adapter.
     const auto started = std::chrono::steady_clock::now();
-    try {
-      *checkpoint = capture();
-    } catch (...) {
-      // Optional retention may refuse; the live prefill stays valid.
-      checkpoint->reset();
-    }
-    capture_ms = std::chrono::duration<double, std::milli>(
-                     std::chrono::steady_clock::now() - started)
-                     .count();
+    consume(0);
+    const double capture_ms = std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() - started)
+                                  .count();
     Sync(gemma, prefix, end, {});
     server::Logger::Debug(
         "gemma4", "event=in_pass_checkpoint offset=" + std::to_string(offset) +
                       " boundary=" + std::to_string(boundary) +
                       " end=" + std::to_string(end) +
-                      " captured=" + (*checkpoint ? "1" : "0") +
                       " capture_ms=" + std::to_string(capture_ms));
     return {.consumed_tokens = end - offset,
             .decode_ready = end == prompt.size(),
@@ -805,7 +787,6 @@ private:
   std::shared_ptr<vision::Encoder> vision_;
   std::uint32_t image_tokens_;
   std::uint32_t max_context_;
-  std::optional<ext::TextRunnerPersistenceDescriptor> persistence_;
   cache::Identity component_identity_;
 };
 
@@ -887,16 +868,21 @@ std::shared_ptr<ext::TextModelRunner> CreateGemma4TextRunner(
              "Gemma 4 MTP requires --mtp-model and a positive draft limit");
     return nullptr;
   }
-  // TODO(gemma4): --draft-policy, --draft-calibration, --draft-trace,
-  // --prefill-weights and --image-tokens need serve plumbing (#979); they
-  // keep their defaults. The host passes --draft-tokens without telling
-  // whether it was given, so its value (default 7) is used as is.
   ModelOptions model_options{
       .max_context = options.max_context,
       .mtp_model_path = mtp ? speculative.draft_model_path : std::string{},
       .draft_tokens = speculative.max_draft_tokens,
       .min_draft_tokens = speculative.min_draft_tokens,
   };
+  std::uint32_t image_tokens = 0;
+  try {
+    model_options.draft_policy = ParseDraftPolicy(speculative.draft_policy);
+    ApplyProviderOptions(options.provider_options, model_options);
+    image_tokens = ImageTokens(options.provider_options);
+  } catch (const std::invalid_argument& e) {
+    SetError(error, e.what());
+    return nullptr;
+  }
   std::string load_error;
   auto model = Model::Load(options.model_path, model_options, &load_error);
   if (model == nullptr) {
@@ -912,7 +898,6 @@ std::shared_ptr<ext::TextModelRunner> CreateGemma4TextRunner(
     SetError(error, std::string("Gemma 4 vision sidecar: ") + e.what());
     return nullptr;
   }
-  const std::uint32_t image_tokens = vision::kDefaultSoftTokens;
   std::uint32_t max_context = options.max_context;
   if (max_context == 0) {
     max_context = model->MaxContext();

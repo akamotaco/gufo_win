@@ -110,7 +110,7 @@ void MoeRoute(const MoeRouteArgs& args, hipStream_t stream);
 /// bit. kCompact (Q4_K, Q5_K, Q6_K): each stage's codes with binary16 scales
 /// in the GEMM's register order, 80 (Q4_K) or 112 bytes per 128 values.
 /// kDecoded (also Q4_0, Q5_0, Q8_0): the binary16 weights, 2 bytes per
-/// value. Q8_0 replaces Flash-Next's DenseF16Gemm, another kernel (it
+/// value. Q8_0 replaces half_gemm's DenseF16Gemm, another kernel (it
 /// matched the 31B UD-Q8_K_XL's prefill logits bit for bit).
 enum class PrefillLayout : std::uint32_t { kNone, kCompact, kDecoded };
 
@@ -136,11 +136,11 @@ enum class PrefillLayout : std::uint32_t { kNone, kCompact, kDecoded };
 inline constexpr std::uint32_t kRoutedHalfTileRows = 112;
 
 /// Routed prefill projection over binary16 activation rows `x` ([rows][k])
-/// in Flash-Next's routing layout (RoutedCompact buckets and a tile map of
+/// in half_gemm's routing layout (RoutedCompact buckets and a tile map of
 /// expert | tile << 16 entries built for `tile_rows` bucket rows per tile):
 /// row rows_out[i] of `out` (FP32) or `out_half` (binary16, saturated)
-/// receives W[expert] x[rows_in[i]]. Covers the formats the Flash-Next
-/// routed GEMM lacks or runs slower (Q4_K, Q5_K, Q6_K, and Q4_0 / Q5_0 /
+/// receives W[expert] x[rows_in[i]]. Covers the formats half_gemm's
+/// RoutedF16Gemm lacks or runs slower (Q4_K, Q5_K, Q6_K, and Q4_0 / Q5_0 /
 /// Q5_1 / Q8_0 / binary16 with FP32 outputs; kRoutedHalfTileRows-row
 /// tiles); returns false
 /// for others. With `geglu` (a K-quant, Q4_0, Q8_0 or binary16 fused

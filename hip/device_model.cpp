@@ -54,8 +54,8 @@ PrefillLayout ChoosePrefillLayout(PrefillWeights mode, ExpertFormat format,
   // Binary16 copies pay only on the 31B's 5376-wide inputs (pp2048,
   // 2026-10-21). From 8192 the blocks sharing a weight tile drift apart along
   // k and each reads it from DRAM (down, o: -29 to -62%); at the 26B-A4B's
-  // 2816 they lose 1-2% (Flash-Next's tuned Q8_0 GEMM, Q4_0). Q8_0 takes
-  // none: with GeGLU in Flash-Next's [gate | up] epilogue its GEMMs match
+  // 2816 they lose 1-2% (half_gemm's tuned Q8_0 GEMM, Q4_0). Q8_0 takes
+  // none: with GeGLU in half_gemm's [gate | up] epilogue its GEMMs match
   // the copies' (UD-Q8_K_XL pp2048 610.0 vs 602.8 tok/s for +32.4 GiB).
   const bool decoded =
       PrefillLayoutSupports(format, PrefillLayout::kDecoded, k) &&

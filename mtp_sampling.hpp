@@ -1,7 +1,7 @@
 // Copied from Gufo src/models/qwen38_flash_next/mtp_sampling.hpp at upstream
 // 1c75887b (gufo-org/gufo), moved into the gemma4 extension namespace.
-#ifndef GEMMA4_LIB_FLASH_NEXT_MTP_SAMPLING_HPP_
-#define GEMMA4_LIB_FLASH_NEXT_MTP_SAMPLING_HPP_
+#ifndef GUFO_MODELS_GEMMA4_MTP_SAMPLING_HPP_
+#define GUFO_MODELS_GEMMA4_MTP_SAMPLING_HPP_
 
 #include <array>
 #include <cmath>
@@ -10,7 +10,7 @@
 #include <span>
 #include <stdexcept>
 
-namespace gufo::models::gemma4::flash_next {
+namespace gufo::models::gemma4 {
 
 enum class DraftDecision { kAccept, kReject, kStop };
 
@@ -142,6 +142,6 @@ DraftDecision VerifyDraft(std::span<const float> logits, std::int32_t draft,
   return DraftDecision::kAccept;
 }
 
-}  // namespace gufo::models::gemma4::flash_next
+}  // namespace gufo::models::gemma4
 
 #endif

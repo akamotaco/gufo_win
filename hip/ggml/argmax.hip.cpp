@@ -1,15 +1,15 @@
-// Copied from Gufo src/families/qwen/kernels/sample.hip at upstream 1c75887b
-// (gufo-org/gufo), moved into the gemma4 extension namespace: only the batched
-// argmax.
+// Excerpt of Gufo src/families/qwen/kernels/sample.hip at upstream
+// 1c75887b (gufo-org/gufo): the paths Gemma 4 dispatches for the formats its
+// loader accepts, in the gemma4 extension namespace.
 #include <hip/hip_runtime.h>
 
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 
-#include "lib/qwen/token.hpp"
+#include "hip/ggml/token.hpp"
 
-namespace gufo::models::gemma4::qwen {
+namespace gufo::models::gemma4::ggml {
 namespace {
 
 constexpr std::size_t kArgmaxTile = 4096;
@@ -102,4 +102,4 @@ void LaunchBatchedGPUArgmax(const float* logits, std::uint32_t* out_tokens,
   }
 }
 
-}  // namespace gufo::models::gemma4::qwen
+}  // namespace gufo::models::gemma4::ggml

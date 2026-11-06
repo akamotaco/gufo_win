@@ -22,9 +22,9 @@
 #include <string>
 #include <vector>
 
+#include "hip/half_gemm.hpp"
 #include "hip/kernels.hpp"
 #include "hip/moe.hpp"
-#include "lib/flash_next/kernels.hpp"
 #include "tests/check.hpp"
 
 namespace g4k = gufo::models::gemma4::rocm;
@@ -611,15 +611,15 @@ void CheckFinish(std::mt19937& rng) {
 }
 
 /// The K-quant routed prefill GEMM over binary16 rows, in the routing layout
-/// the executor builds (Flash-Next compaction, kRoutedHalfTileRows-row tiles),
+/// the executor builds (RoutedCompact buckets, kRoutedHalfTileRows-row tiles),
 /// against FP64 dots of the dequantized rows and the binary16 inputs; Q4_K,
-/// Q5_K, Q5_1 and Q8_0 also bit for bit against Flash-Next's routed GEMM. At
+/// Q5_K, Q5_1 and Q8_0 also bit for bit against half_gemm's RoutedF16Gemm. At
 /// the gate/up shape the fused GeGLU matches the separate pass (for Q8_0 over
-/// Flash-Next's binary16 rows, the path it replaces; for binary16 and Q4_0
+/// RoutedF16Gemm's binary16 rows, the path it replaces; for binary16 and Q4_0
 /// over the FP32 rows rounded to binary16).
 void CheckRoutedPrefill(const Format& f, std::uint32_t m, std::uint32_t k,
                         bool gate_up, std::mt19937& rng) {
-  namespace fn = gufo::models::gemma4::flash_next;
+  namespace hg = gufo::models::gemma4::rocm;
   // About 150 rows per expert: a full tile and a partly live one.
   constexpr std::uint32_t kTokens = 300;
   constexpr std::uint32_t kExpertsHere = 16;
@@ -653,7 +653,7 @@ void CheckRoutedPrefill(const Format& f, std::uint32_t m, std::uint32_t k,
     xh[i] = __float2half(x[i]);
   }
   const std::size_t slots = kTokens * kUsed;
-  const std::size_t compact = fn::RoutedCompactRows(slots, kExpertsHere);
+  const std::size_t compact = hg::RoutedCompactRows(slots, kExpertsHere);
   auto* dw = Device(w.data(), w.size());
   auto* dx = Device(xh.data(), xh.size());
   auto* dids = Device(ids.data(), ids.size());
@@ -667,7 +667,7 @@ void CheckRoutedPrefill(const Format& f, std::uint32_t m, std::uint32_t k,
   HIP_CHECK(hipMalloc(&rows_token, compact * 4));
   HIP_CHECK(hipMalloc(&rows_slot, compact * 4));
   HIP_CHECK(hipMalloc(&dy, slots * m * sizeof(float)));
-  fn::RoutedCompact(dids, dcounts, bounds, cursors, rows_token, rows_slot,
+  hg::RoutedCompact(dids, dcounts, bounds, cursors, rows_token, rows_slot,
                     kTokens, kUsed, kExpertsHere, nullptr);
   Require(g4k::LaunchRoutedHalfGemm(f.format, dw, dx, dtiles,
                                     static_cast<std::uint32_t>(tiles.size()),
@@ -741,12 +741,12 @@ void CheckRoutedPrefill(const Format& f, std::uint32_t m, std::uint32_t k,
     } else if (f.format == g4k::ExpertFormat::kQ8_0) {
       const std::vector<std::int32_t> tiles64 = tile_map(64);
       auto* dtiles64 = Device(tiles64.data(), tiles64.size());
-      Require(fn::RoutedF16Gemm(dw, fn::WeightType::kQ8_0,
+      Require(hg::RoutedF16Gemm(dw, hg::WeightType::kQ8_0,
                                 reinterpret_cast<const __half*>(dx), dtiles64,
                                 static_cast<std::uint32_t>(tiles64.size()), 64,
-                                bounds, rows_token, rows_slot, nullptr, nullptr,
-                                gu, m, k, nullptr),
-              "Flash-Next binary16 routed GEMM rejected");
+                                bounds, rows_token, rows_slot, nullptr, gu, m,
+                                k, nullptr),
+              "RoutedF16Gemm rejected");
       HIP_CHECK(hipFree(dtiles64));
     } else {
       Require(g4k::LaunchRoutedHalfGemm(f.format, dw, dx, dtiles, n_tiles,
@@ -774,7 +774,7 @@ void CheckRoutedPrefill(const Format& f, std::uint32_t m, std::uint32_t k,
       f.format != g4k::ExpertFormat::kF16 &&
       f.format != g4k::ExpertFormat::kQ4_0 &&
       f.format != g4k::ExpertFormat::kQ5_0) {
-    // Flash-Next's widest tile per format: 48 rows (K-quants), 64 (Q5_1,
+    // RoutedF16Gemm's widest tile per format: 48 rows (K-quants), 64 (Q5_1,
     // Q8_0).
     const bool down = f.format == g4k::ExpertFormat::kQ5_1 ||
                       f.format == g4k::ExpertFormat::kQ8_0;
@@ -782,20 +782,20 @@ void CheckRoutedPrefill(const Format& f, std::uint32_t m, std::uint32_t k,
     const std::vector<std::int32_t> tiles48 = tile_map(rows);
     auto* dtiles48 = Device(tiles48.data(), tiles48.size());
     HIP_CHECK(hipMemset(dy, 0, slots * m * sizeof(float)));
-    const fn::WeightType type =
-        f.format == g4k::ExpertFormat::kQ4_K   ? fn::WeightType::kQ4_K
-        : f.format == g4k::ExpertFormat::kQ5_K ? fn::WeightType::kQ5_K
-        : f.format == g4k::ExpertFormat::kQ5_1 ? fn::WeightType::kQ5_1
-                                               : fn::WeightType::kQ8_0;
-    Require(fn::RoutedF16Gemm(
+    const hg::WeightType type =
+        f.format == g4k::ExpertFormat::kQ4_K   ? hg::WeightType::kQ4_K
+        : f.format == g4k::ExpertFormat::kQ5_K ? hg::WeightType::kQ5_K
+        : f.format == g4k::ExpertFormat::kQ5_1 ? hg::WeightType::kQ5_1
+                                               : hg::WeightType::kQ8_0;
+    Require(hg::RoutedF16Gemm(
                 dw, type, reinterpret_cast<const __half*>(dx), dtiles48,
                 static_cast<std::uint32_t>(tiles48.size()), rows, bounds,
-                rows_token, rows_slot, nullptr, dy, nullptr, m, k, nullptr),
-            "Flash-Next routed GEMM rejected " + std::string(f.name));
+                rows_token, rows_slot, dy, nullptr, m, k, nullptr),
+            "RoutedF16Gemm rejected " + std::string(f.name));
     const auto flash = Host(dy, slots * m);
     Require(
         std::memcmp(flash.data(), got.data(), got.size() * sizeof(float)) == 0,
-        std::string(f.name) + " routed prefill differs from Flash-Next");
+        std::string(f.name) + " routed prefill differs from RoutedF16Gemm");
     HIP_CHECK(hipFree(dtiles48));
   }
   const std::size_t row_bytes = k / f.block * f.bytes;

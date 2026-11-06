@@ -15,8 +15,8 @@
 #include <utility>
 #include <vector>
 
-#include "lib/flash_next/kernels.hpp"
-#include "lib/qwen/gemm.hpp"
+#include "hip/ggml/gemm.hpp"
+#include "hip/half_gemm.hpp"
 #include "vision/encoder.hpp"
 #include "vision/prompt.hpp"
 #include "vision/weights.hpp"
@@ -431,7 +431,6 @@ struct Encoder::Impl {
   std::atomic<std::size_t> resident_bytes{0};
   hipStream_t stream{nullptr};
   hipblasHandle_t blas{nullptr};
-  std::unique_ptr<gufo::models::gemma4::qwen::HipblasLtGemm> lt;
   bool uploaded{false};
   Allocation patch, position, std_bias, std_scale, projection;
   std::vector<Layer> layers;
@@ -451,7 +450,6 @@ struct Encoder::Impl {
   ~Impl() {
     if (stream != nullptr)
       (void)hipStreamSynchronize(stream);
-    lt.reset();
     layers.clear();
     if (blas != nullptr)
       (void)hipblasDestroy(blas);
@@ -513,9 +511,6 @@ struct Encoder::Impl {
     if (blas == nullptr)
       CheckBlas(hipblasCreate(&blas));
     CheckBlas(hipblasSetStream(blas, stream));
-    lt = std::make_unique<gufo::models::gemma4::qwen::HipblasLtGemm>(
-        gufo::models::gemma4::qwen::HipblasLtGemmOptions{.ignore_environment =
-                                                             true});
     uploaded_bytes = 0;
     patch = Upload({weights.patch});
     position = Upload({weights.position});
@@ -548,9 +543,8 @@ struct Encoder::Impl {
   /// 0.75 instead of 1.14 ms; below 128 rows the narrow tiles still win.
   void Gemm(const Allocation& w, const Act* x, float* y, unsigned rows,
             unsigned out, unsigned in) {
-    if (flash_next::UnquantizedF16Gemm(
-            w.data, reinterpret_cast<const __half*>(x), y, rows, out, in,
-            stream, /*wide_from=*/128))
+    if (rocm::UnquantizedF16Gemm(w.data, reinterpret_cast<const __half*>(x), y,
+                                 rows, out, in, stream, /*wide_from=*/128))
       return;
     constexpr float alpha = 1, beta = 0;
     CheckBlas(hipblasGemmEx(blas, HIPBLAS_OP_T, HIPBLAS_OP_N, out, rows, in,

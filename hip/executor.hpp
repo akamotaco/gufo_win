@@ -17,11 +17,8 @@
 #include "hip/device_model.hpp"
 #include "hip/kernels.hpp"
 
-namespace gufo::models::gemma4::flash_next {
-struct MtpCandidateLogits;
-}  // namespace gufo::models::gemma4::flash_next
-
 namespace gufo::models::gemma4 {
+struct MtpCandidateLogits;
 class ContinuationHooks;
 class ContinuationFences;
 }  // namespace gufo::models::gemma4
@@ -44,8 +41,7 @@ struct DraftHead {
 };
 
 /// Picks the next draft from the drafter's top candidate logits.
-using DraftProposer =
-    std::function<DraftProposal(const flash_next::MtpCandidateLogits&)>;
+using DraftProposer = std::function<DraftProposal(const MtpCandidateLogits&)>;
 
 /// One session's attention state. Global layers keep every position in a
 /// token-major binary16 cache; sliding layers keep a ring of `ring` slots,
@@ -370,7 +366,7 @@ private:
   float* draft_next_{nullptr};
   std::uint32_t* draft_candidates_{nullptr};
   std::uint32_t* draft_candidate_scratch_{nullptr};
-  flash_next::MtpCandidateLogits* draft_candidates_host_{nullptr};
+  MtpCandidateLogits* draft_candidates_host_{nullptr};
   std::uint32_t* argmax_host_{nullptr};
   mutable std::vector<float> logits_host_;
   /// ReadCandidates: workspace, then per-row counts (padded to 256 bytes)

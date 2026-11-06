@@ -1,7 +1,8 @@
-// Copied from Gufo src/families/qwen/kernels/prefill_quant_gemm.hpp at upstream
-// 1c75887b (gufo-org/gufo), moved into the gemma4 extension namespace.
-#ifndef GEMMA4_LIB_QWEN_KERNELS_PREFILL_QUANT_GEMM_HPP_
-#define GEMMA4_LIB_QWEN_KERNELS_PREFILL_QUANT_GEMM_HPP_
+// Excerpt of Gufo src/families/qwen/kernels/prefill_quant_gemm.hpp at upstream
+// 1c75887b (gufo-org/gufo): the paths Gemma 4 dispatches for the formats its
+// loader accepts, in the gemma4 extension namespace.
+#ifndef GUFO_MODELS_GEMMA4_HIP_GGML_PREFILL_QUANT_GEMM_HPP_
+#define GUFO_MODELS_GEMMA4_HIP_GGML_PREFILL_QUANT_GEMM_HPP_
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_bfloat16.h>
 #include <hip/hip_fp16.h>
@@ -15,10 +16,10 @@
 #include <gufo/ext/experimental/hip_utils.hpp>
 #include <type_traits>
 
-#include "lib/qwen/gemm.hpp"
-#include "lib/qwen/small_batch_gemm.hpp"
+#include "hip/ggml/gemm.hpp"
+#include "hip/ggml/small_batch_gemm.hpp"
 
-namespace gufo::models::gemma4::qwen {
+namespace gufo::models::gemma4::ggml {
 
 using int32x4_t = __attribute__((__vector_size__(4 * sizeof(int)))) int;
 using int32x8_t = __attribute__((__vector_size__(8 * sizeof(int)))) int;
@@ -87,8 +88,8 @@ __device__ __forceinline__ const std::int8_t* Q8ActTile(const void* base,
 }
 
 /// Writes one lane's quantized byte and (lane 0) the block scale into the tiled
-/// layout. `lane_id` is the element index inside the 32-element block.
-template<bool StoreActivationSum>
+/// layout and its block's activation sum into the sidecar. `lane_id` is the
+/// element index inside the 32-element block.
 __device__ __forceinline__ void StoreQ8ActLane(void* y, std::size_t batch,
                                                std::size_t num_blocks,
                                                std::size_t tok, std::size_t blk,
@@ -104,16 +105,14 @@ __device__ __forceinline__ void StoreQ8ActLane(void* y, std::size_t batch,
     *reinterpret_cast<float*>(tile + kQ8ActScaleOffset + (tl * sizeof(float))) =
         d;
   }
-  if constexpr (StoreActivationSum) {
-    int qsum = static_cast<int>(q);
-    for (int off = 16; off > 0; off >>= 1) {
-      qsum += __shfl_xor(qsum, off);
-    }
-    if (lane_id == 0) {
-      float* sums = Q8ActSumSidecar(y, batch, num_blocks * 32);
-      sums[(((tt * num_blocks) + blk) * kQ8ActTileTokens) + tl] =
-          d * static_cast<float>(qsum);
-    }
+  int qsum = static_cast<int>(q);
+  for (int off = 16; off > 0; off >>= 1) {
+    qsum += __shfl_xor(qsum, off);
+  }
+  if (lane_id == 0) {
+    float* sums = Q8ActSumSidecar(y, batch, num_blocks * 32);
+    sums[(((tt * num_blocks) + blk) * kQ8ActTileTokens) + tl] =
+        d * static_cast<float>(qsum);
   }
 }
 
@@ -133,21 +132,17 @@ __device__ __forceinline__ WmmaQuantAccumulator<WaveSize> WmmaQuant(
   }
 }
 // Both wave sizes preserve every K32 accumulator update, including the affine
-// minimum correction and the separate Q6/Q3 half-block scales. Activation
+// minimum correction and the separate Q6_K half-block scales. Activation
 // staging uses 32-thread groups; the native WMMA wave determines C ownership.
-// kPinnedOrder writes the Q8_0 update as (dx * c), then one FMA with dw: the
-// order a caller's other W8A8 kernels pin, so its rows do not depend on which
-// kernel a pass width selects. Other instantiations keep fast-math's order.
 template<int BM, int BN, int BK, int WM, int WN, core::GgmlType WType,
-         int WaveSize = 32, bool kPinnedOrder = false>
+         int WaveSize = 32>
 __launch_bounds__(WM * WN * WaveSize, 1) __global__
     void WKQuantA8BlockedWmmaGEMMKernel(const void* __restrict__ w,
                                         const void* __restrict__ x_blocks,
                                         float* __restrict__ y,
                                         std::size_t batch, std::size_t m,
                                         std::size_t k) {
-  constexpr bool PerHalfScale =
-      WType == core::GgmlType::kQ6_K || WType == core::GgmlType::kQ3_K;
+  constexpr bool PerHalfScale = WType == core::GgmlType::kQ6_K;
   constexpr bool HasOffset =
       WType == core::GgmlType::kQ4_K || WType == core::GgmlType::kQ5_K;
 
@@ -480,13 +475,7 @@ __launch_bounds__(WM * WN * WaveSize, 1) __global__
             c = WmmaQuant<WaveSize>(a1[i], b1, c);
 #pragma unroll
             for (int l = 0; l < kAccumulatorElements; ++l) {
-              if constexpr (kPinnedOrder) {
-                acc[i][j][l] =
-                    __fmaf_rn(__fmul_rn(dx, static_cast<float>(c[l])),
-                              dw0[i][l], acc[i][j][l]);
-              } else {
-                acc[i][j][l] += (dw0[i][l] * dx) * static_cast<float>(c[l]);
-              }
+              acc[i][j][l] += (dw0[i][l] * dx) * static_cast<float>(c[l]);
             }
           }
           if constexpr (HasOffset) {
@@ -571,6 +560,6 @@ namespace detail {
                                                hipStream_t stream);
 }  // namespace detail
 
-}  // namespace gufo::models::gemma4::qwen
+}  // namespace gufo::models::gemma4::ggml
 #endif
 #endif

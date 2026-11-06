@@ -10,9 +10,9 @@
 #include <utility>
 
 #include "hip/attention_wmma.hpp"
+#include "hip/ggml/prefill_quant_gemm.hpp"
 #include "hip/half_store.hpp"
 #include "hip/wmma_pack.hpp"
-#include "lib/qwen/prefill_quant_gemm.hpp"
 
 namespace gufo::models::gemma4::rocm {
 namespace {
@@ -115,7 +115,7 @@ __device__ inline float RmsScale(float sum_squares, std::uint32_t dim,
 }
 
 /// One lane's value of a 32-element block into the tiled Q8_1 prefill
-/// activation, in qwen::LaunchQuantizeActivationQ8_1FromFp32's layout and
+/// activation, in ggml::LaunchQuantizeActivationQ8_1FromFp32's layout and
 /// rounding (built here with fast-math, a scale may differ by one ulp). The
 /// wave holds the whole block; `batch` is the real row count.
 __device__ inline void QuantizeQ8Lane(void* q8, std::size_t batch,
@@ -125,15 +125,15 @@ __device__ inline void QuantizeQ8Lane(void* q8, std::size_t batch,
   const float d = max_abs / 127.0F;
   const float id = d != 0.0F ? 1.0F / d : 0.0F;
   const auto q = static_cast<std::int8_t>(roundf(val * id));
-  qwen::StoreQ8ActLane<true>(q8, batch, num_blocks, tok, blk,
-                             threadIdx.x % kWave, d, q);
+  ggml::StoreQ8ActLane(q8, batch, num_blocks, tok, blk, threadIdx.x % kWave, d,
+                       q);
 }
 
 /// Q8_1 tiles cover whole 16-row groups; rows past the batch quantize zeros.
 __host__ __device__ inline std::uint32_t Q8Rows(std::uint32_t rows) {
-  return (rows + static_cast<std::uint32_t>(qwen::kQ8ActTileTokens) - 1) /
-         static_cast<std::uint32_t>(qwen::kQ8ActTileTokens) *
-         static_cast<std::uint32_t>(qwen::kQ8ActTileTokens);
+  return (rows + static_cast<std::uint32_t>(ggml::kQ8ActTileTokens) - 1) /
+         static_cast<std::uint32_t>(ggml::kQ8ActTileTokens) *
+         static_cast<std::uint32_t>(ggml::kQ8ActTileTokens);
 }
 
 // ---------------------------------------------------------------------------
