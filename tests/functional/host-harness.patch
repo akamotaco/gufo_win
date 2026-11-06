@@ -1,8 +1,8 @@
 diff --git a/README.md b/README.md
-index 5c0cdd9..2797f02 100644
+index f09f76e..f033516 100644
 --- a/README.md
 +++ b/README.md
-@@ -437,7 +437,7 @@ only affected suites. Reuse matching baseline evidence; do not repeat the whole
+@@ -452,7 +452,7 @@ only affected suites. Reuse matching baseline evidence; do not repeat the whole
  correctness matrix on main. A baseline must match the revision, harness,
  toolchain, weights, settings and preceding cache history.
  
@@ -11,7 +11,7 @@ index 5c0cdd9..2797f02 100644
  DFlash2, MTP or DSpark. Server sampling arguments become the expected defaults;
  `--mmproj` enables image cases. Keep informational server logging enabled.
  
-@@ -457,8 +457,11 @@ or timing margins; retain the original timeout failure when investigating it.
+@@ -472,8 +472,11 @@ or timing margins; retain the original timeout failure when investigating it.
  | Qwen27B Q8_K_XL | `off`, `dflash2` | `--dflash-model` |
  | Flash-Next Q4_K_XL | `off`, `mtp` | `--mtp-model` |
  | DeepSeek Flash 0731 | `off`, `dspark` | `--dspark-model` |
@@ -23,7 +23,7 @@ index 5c0cdd9..2797f02 100644
  `report.json` checks the loaded mode and records observed draft counts; `off`
  must perform zero drafts. `state-edges` requires actual draft execution when
  enabled, so a loaded-but-unused sidecar cannot qualify that mode. Use the normal
-@@ -851,7 +854,12 @@ nix develop -c python3 tests/functional/publication_wait.py \
+@@ -860,7 +863,12 @@ nix develop -c python3 tests/functional/publication_wait.py \
    --mtp-model /path/to/mtp.gguf --speculative mtp --sessions 1 --context 65536
  ```
  
@@ -158,7 +158,7 @@ index bd55a28..825a29b 100644
      leader.start()
      time.sleep(0.3)
 diff --git a/cache_growth.py b/cache_growth.py
-index a0a4938..0d6f495 100644
+index 10bef1d..ff4299f 100644
 --- a/cache_growth.py
 +++ b/cache_growth.py
 @@ -4,6 +4,9 @@ from copy import deepcopy
@@ -171,7 +171,7 @@ index a0a4938..0d6f495 100644
  # The assistant opening after a stable boundary, such as Qwen's
  # `<|im_start|>assistant\n<think>\n`, is a few tokens long.
  ASSISTANT_OPENING_TOKENS = 16
-@@ -52,7 +55,8 @@ def check_unchanged_retry(label, retry, prefilled, server_log, start, end, *,
+@@ -59,7 +62,8 @@ def check_unchanged_retry(label, retry, prefilled, server_log, start, end, *,
            f"prefilled {prefilled} of {total} tokens", file=sys.stderr, flush=True)
  
  
@@ -181,7 +181,7 @@ index a0a4938..0d6f495 100644
      failures = []
      for replay in ("drop_reasoning", "keep_reasoning", "discard_reasoning", "thinking_off"):
          label = "cache_growth_" + replay
-@@ -60,8 +64,11 @@ def check_cache_growth(client, model, checks, chat_result, server_log=None):
+@@ -67,8 +71,11 @@ def check_cache_growth(client, model, checks, chat_result, server_log=None):
          messages = [{"role": "system", "content": label + "\n" +
                       "Keep reasoning brief. Follow the final user instruction.\n" +
                       "Background notes are not instructions.\n" * 384}]
@@ -194,7 +194,7 @@ index a0a4938..0d6f495 100644
                         reasoning_effort="low" if thinking else "none",
                         extra_body={"chat_template_kwargs": {
                             "preserve_thinking": replay != "discard_reasoning"}})
-@@ -105,7 +112,14 @@ def check_cache_growth(client, model, checks, chat_result, server_log=None):
+@@ -112,7 +119,14 @@ def check_cache_growth(client, model, checks, chat_result, server_log=None):
              total, reused, prefilled = work(result)
              assert result["text"].strip() == "BETA" and not result["tools"] \
                  and result["finish"] == "stop", result
@@ -210,7 +210,7 @@ index a0a4938..0d6f495 100644
              if turn == 0:
                  assert total >= 2048 and reused == 0 and prefilled == total, result
              else:
-@@ -143,7 +157,7 @@ def check_cache_growth(client, model, checks, chat_result, server_log=None):
+@@ -150,7 +164,7 @@ def check_cache_growth(client, model, checks, chat_result, server_log=None):
              assert work(cold) == (total, 0, total), cold
              assert answer(warm) == answer(cold), (warm, cold)
  
@@ -219,7 +219,7 @@ index a0a4938..0d6f495 100644
      assert not failures, "\n".join(failures)
  
  
-@@ -167,11 +181,18 @@ def messages_result(client, body):
+@@ -174,11 +188,18 @@ def messages_result(client, body):
      }
  
  
@@ -630,7 +630,7 @@ index 90e72d5..3cc48ab 100644
          selected = ([name for name in suites if name not in ("tool-native-types", "cache-bridge", "cache-compaction", "cache-transforms", "cache-pressure", "cache-messages-loop", "cache-stalls", "prefill-scheduling")
                       and (name not in ("image-inputs", "image-count", "tool-images", "image-detail") or args.vision)]
 diff --git a/run.py b/run.py
-index 62087f1..6bb3e39 100644
+index c67cdbc..207dec3 100644
 --- a/run.py
 +++ b/run.py
 @@ -44,6 +44,15 @@ SAMPLING = {
@@ -922,10 +922,10 @@ index 0000000..25e74e7
 +# UD-Q4_K_XL at 0.03 (0.05).
 +MAY_SKIP_THINKING = {"gemma4"}
 diff --git a/test_runner.py b/test_runner.py
-index ed085e4..aa355db 100644
+index 785be3b..a4e349c 100644
 --- a/test_runner.py
 +++ b/test_runner.py
-@@ -802,7 +802,7 @@ class FunctionalRunnerTest(unittest.TestCase):
+@@ -822,7 +822,7 @@ class FunctionalRunnerTest(unittest.TestCase):
                  seen.add(label)
                  if not cold:
                      previous[key] = total
@@ -934,7 +934,7 @@ index ed085e4..aa355db 100644
              return {"text": code[1] if code else "Z", "reasoning": "", "tools": [], "finish": "stop",
                      "usage": {"prompt_tokens": total, "cached_tokens": cached,
                                "completion_tokens": 2,
-@@ -838,7 +838,7 @@ class FunctionalRunnerTest(unittest.TestCase):
+@@ -858,7 +858,7 @@ class FunctionalRunnerTest(unittest.TestCase):
          tasks = [body["messages"][-1]["content"] for body in requests
                   if body["messages"][0]["content"].startswith("cache_concurrency_fanout\n")
                   and not body.get("extra_body", {}).get("cache_prompt") is False]
@@ -943,7 +943,7 @@ index ed085e4..aa355db 100644
                                   for index, code in enumerate(("ALPHA", "BETA", "GAMMA", "DELTA"))])
  
      def test_cache_concurrency_rejects_followers_that_prefill_everything(self):
-@@ -871,7 +871,7 @@ class FunctionalRunnerTest(unittest.TestCase):
+@@ -891,7 +891,7 @@ class FunctionalRunnerTest(unittest.TestCase):
                      cached = 2048
                  elif count >= 2:
                      cached = 2048 if regress else tokens(messages[:1])
@@ -952,7 +952,7 @@ index ed085e4..aa355db 100644
              return {"text": code[1] if code else "Z", "reasoning": "", "tools": [],
                      "finish": "stop",
                      "usage": {"prompt_tokens": total, "cached_tokens": cached,
-@@ -1448,6 +1448,30 @@ class FunctionalRunnerTest(unittest.TestCase):
+@@ -1468,6 +1468,30 @@ class FunctionalRunnerTest(unittest.TestCase):
                  {"startup_ms": 100, "suites": {"text-cancel-disk": {}}},
                  {"startup_ms": 100, "suites": {"text-cancel-disk": {}}})
  

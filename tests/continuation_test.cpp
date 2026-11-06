@@ -18,8 +18,8 @@
 #include <cstring>
 #include <functional>
 #include <gufo/ext/component_cache_resources.hpp>
-#include <gufo/ext/experimental/transfer_pool.hpp>
 #include <gufo/ext/sampling.hpp>
+#include <gufo/ext/transfer_pool.hpp>
 #include <iostream>
 #include <memory>
 #include <span>

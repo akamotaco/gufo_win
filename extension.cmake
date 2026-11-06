@@ -23,7 +23,7 @@ gufo_extension_target(
     weights.cpp
   LINK_LIBRARIES
     gufo_ext_runtime
-    OpenSSL::Crypto
+    gufo_ext_core
     Threads::Threads
 )
 
@@ -51,8 +51,9 @@ gufo_extension_target(
   LINK_LIBRARIES
     gufo_gemma4
     gufo_ext_runtime
-    hip::host
-    OpenSSL::Crypto
+    gufo_ext_core
+    gufo_ext_cache
+    gufo_ext_hip
     roc::hipblas
     roc::hipblaslt
     Threads::Threads
@@ -116,17 +117,11 @@ if(TARGET gufo_gemma4_hip)
     OPTIONS -mwavefrontsize64 -gline-tables-only -Xarch_device
       -mllvm=-amdgpu-sched-strategy=iterative-ilp
   )
-  # The public HIP headers declare their API only with the backend define.
-  target_compile_definitions(gufo_gemma4_hip PUBLIC ENGINE_ENABLE_HIP=1)
   target_compile_options(gufo_gemma4_hip PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-O3>
   )
   target_include_directories(gufo_gemma4_hip PUBLIC
     "$<BUILD_INTERFACE:${GUFO_EXTENSION_BUILD_ROOT}>"
-  )
-  target_include_directories(gufo_gemma4_hip SYSTEM PRIVATE
-    ${HIPCUB_INCLUDE_DIR}
-    ${ROCPRIM_INCLUDE_DIR}
   )
 endif()
 
@@ -142,7 +137,7 @@ gufo_extension_target(
     gufo_gemma4_hip
     gufo_gemma4
     gufo_ext_runtime
-    hip::host
+    gufo_ext_hip
 )
 if(TARGET gufo_gemma4_text)
   target_compile_options(gufo_gemma4_text PRIVATE
@@ -167,72 +162,6 @@ if(TARGET gufo_gemma4_reference)
   target_compile_options(gufo_gemma4_reference PRIVATE -O2)
 endif()
 
-# The host defines the public GGUF, sampling, JSON-constraint, dequantization,
-# hashing, image and cache declarations only inside `gufo`; test executables
-# link none of its libraries. tests/host/ holds verbatim copies of the
-# defining host sources (tools/sync_test_host.py), compiled for the tests
-# alone.
-gufo_extension_target(
-  NAME gufo_gemma4_test_host
-  SOURCES
-    tests/host/checkpoint.cpp
-    tests/host/completion.cpp
-    tests/host/ggml_dequant.cpp
-    tests/host/gguf_reader.cpp
-    tests/host/hipblaslt_plan_database.cpp
-    tests/host/identity.cpp
-    tests/host/image.cpp
-    tests/host/json_constraint.cpp
-    tests/host/json_schema_lexeme.cpp
-    tests/host/json_schema_regex.cpp
-    tests/host/ledger.cpp
-    tests/host/sampling.cpp
-    tests/host/sampling_logit_row.cpp
-    tests/host/sha256.cpp
-    tests/host/slot.cpp
-  LINK_LIBRARIES
-    gufo_ext_runtime
-    CURL::libcurl
-    ICU::i18n
-    ICU::uc
-    JPEG::JPEG
-    OpenSSL::Crypto
-    PkgConfig::WEBP
-    PNG::PNG
-    Threads::Threads
-)
-if(TARGET gufo_gemma4_test_host)
-  # As in the host: the softmax-bracket bounds were swept without contraction.
-  set_property(SOURCE "${GUFO_EXTENSION_BUILD_ROOT}/tests/host/sampling_logit_row.cpp"
-    APPEND PROPERTY COMPILE_OPTIONS -ffp-contract=off)
-  if(OpenMP_CXX_FOUND)
-    target_link_libraries(gufo_gemma4_test_host PRIVATE OpenMP::OpenMP_CXX)
-  endif()
-  # Copied host code keeps its own warnings out of the extension's.
-  target_compile_options(gufo_gemma4_test_host PRIVATE -w)
-endif()
-gufo_extension_target(
-  NAME gufo_gemma4_test_host_hip
-  SOURCES
-    tests/host/host_allocations.cpp
-    tests/host/transfer_pool.cpp
-    tests/host/weight_upload.cpp
-  LINK_LIBRARIES
-    gufo_gemma4_test_host
-    gufo_ext_runtime
-    hip::host
-)
-if(TARGET gufo_gemma4_test_host_hip)
-  target_compile_definitions(gufo_gemma4_test_host_hip PRIVATE
-    ENGINE_ENABLE_HIP=1)
-  target_compile_options(gufo_gemma4_test_host_hip PRIVATE -w)
-endif()
-if(ENGINE_ENABLE_HIP)
-  set(_gemma4_test_host gufo_gemma4_test_host_hip gufo_gemma4_test_host)
-else()
-  set(_gemma4_test_host gufo_gemma4_test_host)
-endif()
-
 # Tests. Host contracts need no model; model-backed checks read the GGUF named
 # by GUFO_GEMMA4_MODEL (with GUFO_GEMMA4_MTP_MODEL, GUFO_GEMMA4_MMPROJ) and
 # skip (77) without it. `gemma4_tests` builds every test binary, so ctest
@@ -249,7 +178,7 @@ function(_gemma4_test name labels)
   gufo_extension_target(
     NAME ${target}
     SOURCES ${ARG_SOURCES}
-    LINK_LIBRARIES ${ARG_LINK_LIBRARIES} ${_gemma4_test_host} gufo_ext_runtime
+    LINK_LIBRARIES ${ARG_LINK_LIBRARIES} gufo_ext_runtime
   )
   if(NOT TARGET ${target})
     return()
@@ -290,21 +219,21 @@ _gemma4_test(artifact "cpu;tokenization;chat_template;external-model"
 foreach(name IN ITEMS attention_ops kernel_ops moe_ops projection_ops)
   _gemma4_test(${name} "hip;gpu;gfx1151"
     SOURCES tests/${name}_test.cpp
-    LINK_LIBRARIES gufo_gemma4_hip gufo_gemma4 hip::host)
+    LINK_LIBRARIES gufo_gemma4_hip gufo_gemma4 gufo_ext_hip)
 endforeach()
 _gemma4_test(target "hip;gpu;gfx1151;quality;external-model;slow" MODEL
   SOURCES tests/target_test.cpp tests/device_headroom_fault.cpp
-  LINK_LIBRARIES gufo_gemma4_hip gufo_gemma4_reference gufo_gemma4 hip::host
+  LINK_LIBRARIES gufo_gemma4_hip gufo_gemma4_reference gufo_gemma4 gufo_ext_hip
     ${CMAKE_DL_LIBS})
 _gemma4_test(continuation "hip;gpu;gfx1151;cache;external-model" MODEL
   SOURCES tests/continuation_test.cpp
-  LINK_LIBRARIES gufo_gemma4_hip gufo_gemma4 hip::host)
+  LINK_LIBRARIES gufo_gemma4_hip gufo_gemma4 gufo_ext_hip)
 _gemma4_test(vision_encoder "hip;gpu;gfx1151;vision;external-model" MODEL
   SOURCES tests/vision_encoder_test.cpp
-  LINK_LIBRARIES gufo_gemma4_hip gufo_gemma4_reference gufo_gemma4 hip::host)
+  LINK_LIBRARIES gufo_gemma4_hip gufo_gemma4_reference gufo_gemma4 gufo_ext_hip)
 _gemma4_test(vision_session "hip;gpu;gfx1151;vision;external-model;slow" MODEL
   SOURCES tests/vision_session_test.cpp
-  LINK_LIBRARIES gufo_gemma4_hip gufo_gemma4 hip::host)
+  LINK_LIBRARIES gufo_gemma4_hip gufo_gemma4 gufo_ext_hip)
 # The oracle-backed checks run unoptimized references; -O2 as for the oracle.
 set_source_files_properties(
   "${GUFO_EXTENSION_BUILD_ROOT}/tests/target_test.cpp"
@@ -327,7 +256,7 @@ function(_gemma4_tool target)
   gufo_extension_target(
     NAME ${target}
     SOURCES ${ARG_SOURCES}
-    LINK_LIBRARIES ${ARG_LINK_LIBRARIES} ${_gemma4_test_host} gufo_ext_runtime
+    LINK_LIBRARIES ${ARG_LINK_LIBRARIES} gufo_ext_runtime
   )
   if(TARGET ${target})
     set_target_properties(${target} PROPERTIES EXCLUDE_FROM_ALL TRUE)
@@ -345,7 +274,7 @@ if(ENGINE_ENABLE_HIP)
   _gemma4_tool(gemma4_vision_probe
     SOURCES tests/vision_probe.cpp
     LINK_LIBRARIES gufo_gemma4_hip gufo_gemma4_reference gufo_gemma4
-      hip::host)
+      gufo_ext_hip)
   if(TARGET gemma4_vision_probe)
     target_compile_definitions(gemma4_vision_probe PRIVATE
       GUFO_GEMMA4_VISION_GPU)
@@ -357,10 +286,10 @@ else()
 endif()
 _gemma4_tool(gemma4_vision_generate_probe
   SOURCES tests/vision_generate_probe.cpp
-  LINK_LIBRARIES gufo_gemma4_hip gufo_gemma4 hip::host)
+  LINK_LIBRARIES gufo_gemma4_hip gufo_gemma4 gufo_ext_hip)
 _gemma4_tool(gemma4_gpu_probe
   SOURCES tests/gpu_probe.cpp
-  LINK_LIBRARIES gufo_gemma4_hip gufo_gemma4 hip::host)
+  LINK_LIBRARIES gufo_gemma4_hip gufo_gemma4 gufo_ext_hip)
 
 install(FILES "${GUFO_EXTENSION_BUILD_ROOT}/LICENSE"
   DESTINATION share/licenses/gufo/extensions/gemma4)
