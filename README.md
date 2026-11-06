@@ -14,8 +14,8 @@ so `main` here is an upstream release plus what upstream does not carry:
 
 | Layer | Source | What it brings |
 | --- | --- | --- |
-| Engine and Windows build | [gufo-org/gufo](https://github.com/gufo-org/gufo) v0.30.0 | Gufo itself, the `windows-release` preset and its Windows platform code |
-| Extension hooks for Gemma 4 | [franzmoca/gufo](https://github.com/franzmoca/gufo) `gemma-main` | Public hooks the Gemma 4 extension needs that upstream has not merged yet |
+| Engine and Windows build | [gufo-org/gufo](https://github.com/gufo-org/gufo) v0.31.0 | Gufo itself, the `windows-release` preset and its Windows platform code |
+| Extension hooks for Gemma 4 | [franzmoca/gufo](https://github.com/franzmoca/gufo) `gemma-main` | The two hooks the Gemma 4 extension needs that upstream has not merged yet (provider options, speculation defaults); the others are upstream since v0.31 |
 | Gemma 4 engine | [franzmoca/gemma4-gufo-extension](https://github.com/franzmoca/gemma4-gufo-extension) with two Windows fixes: branch [`gemma4-ext`](https://github.com/akamotaco/gufo_win/tree/gemma4-ext) of this repository, built with `-DGUFO_EXTENSION_DIRS` | Gemma 4 26B-A4B / 31B with MTP, vision and tool calls |
 | Fork-only fixes | this repository | See below |
 
@@ -26,13 +26,16 @@ Fork-only changes:
   copies (`hipErrorInvalidValue`, unchecked, so a later kernel launch reported
   "invalid argument" and the request failed).
 - **Gemma 4 extension on Windows** (branch `gemma4-ext`: franzmoca's extension `main`
-  plus one commit, MIT like the original):
+  plus these changes, MIT like the original):
   - `extension.json` lists `windows` among its platforms; without it the build skips
     the extension on Windows.
   - The cache's gather copies use a pointer only where it is also the device address.
     Windows maps registered host memory at a different device address, so a gather
     kernel given the host pointer fails the first cache capture with
     "unspecified launch failure".
+  - A failed cache copy clears the HIP error and logs `[gemma4] event=cache_copy_failed`
+    with both pointers' attributes. Before, the stale error failed the next decode
+    (`candidates.hip.cpp ... invalid argument`) instead of costing only a cache miss.
 - The per-request image budget is 256 MiB instead of 20 MiB (agents resend every image).
 - `tools\windows\gufo_monitor.py` (a read-only web monitor) and `tools\windows\tdr_delay.bat`
   (GPU timeout).
@@ -61,6 +64,11 @@ prompt cache defeated, one server at a time. A 40-identifier verbatim copy test
 passed with no misses at temperature 0 and 0.7, at about 400 and 75K prompt tokens.
 Gemma 4 26B greedy outputs on 8 fixed prompts match the earlier `feat/gemma` build
 token for token.
+
+Re-checked on v0.31.0 (November 6, 2026): Gemma 4 26B and 31B greedy outputs still
+match `feat/gemma` on all 8 prompts, the copy test passes at 75K tokens on both,
+tool calls (buffered and streamed) and a 6-turn agent chat work, and Gemma 4 26B
+speeds are within 4% of the table below.
 
 | Model | Sessions x context | Prompt | Prefill (tok/s) | Decode, MTP (tok/s) |
 | --- | --- | --- | ---: | ---: |
