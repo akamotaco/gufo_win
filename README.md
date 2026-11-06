@@ -3,13 +3,16 @@
 > [!NOTE]
 > **This is the `gemma4-ext` branch of [akamotaco/gufo_win](https://github.com/akamotaco/gufo_win):**
 > [franzmoca/gemma4-gufo-extension](https://github.com/franzmoca/gemma4-gufo-extension) `main`
-> plus two changes that let it build and run on native Windows:
+> plus three changes for native Windows:
 >
 > - `extension.json` lists `windows` among the platforms.
 > - Cache gather copies use a pointer only where it is also the device address
 >   (`continuation_adapter.cpp`, `Accessible`). Windows maps registered host memory
 >   at a different device address; a gather given the host pointer fails the first
 >   cache capture with "unspecified launch failure".
+> - A failed cache copy clears the HIP error and logs `[gemma4] event=cache_copy_failed`
+>   with the pointers' attributes, so it costs a cache miss instead of failing the
+>   next decode with a stale "invalid argument".
 >
 > Build it with gufo_win `main` and `-DGUFO_EXTENSION_DIRS=<this folder>`; see the
 > gufo_win README. Everything below is the extension's own README.
