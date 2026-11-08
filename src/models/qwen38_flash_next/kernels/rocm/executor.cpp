@@ -3058,7 +3058,21 @@ bool Executor::Moe(const DeviceLayer& l, const float* x, float* out,
   // Extend the existing wide/prefill overlap only to 1-8 decode rows. The
   // intermediate 9-32-row route keeps its previous serial dispatch until it
   // is separately qualified. Rows are the total token rows, not sessions.
-  const bool overlap = (ExpertMatrixRows(n_tokens) || n_tokens <= kVecBatch) &&
+  // gufo_win: on Windows a decode graph that forks the shared expert onto the
+  // side stream replays slower than the serial one (Q4Mix on gfx1151,
+  // 2026-11-08: 33.2 vs 38.8 tok/s short, 35.6 vs 40.8 at 31K), so decode rows
+  // stay serial there. GUFO_QWEN_DECODE_OVERLAP=1 or 0 overrides either way.
+#if defined(_WIN32)
+  constexpr bool kDecodeOverlapDefault = false;
+#else
+  constexpr bool kDecodeOverlapDefault = true;
+#endif
+  static const bool decode_overlap = [] {
+    const char* v = std::getenv("GUFO_QWEN_DECODE_OVERLAP");
+    return v == nullptr || v[0] == '\0' ? kDecodeOverlapDefault : v[0] != '0';
+  }();
+  const bool overlap = (ExpertMatrixRows(n_tokens) ||
+                        (decode_overlap && n_tokens <= kVecBatch)) &&
                        !last_only && l.shexp_gate.type == GgmlType::kQ8_0 &&
                        l.shexp_up.type == GgmlType::kQ8_0 &&
                        l.shexp_down.type == GgmlType::kQ8_0;
