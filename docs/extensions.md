@@ -3,7 +3,9 @@
 A Gufo **source extension** adds a model implementation to an existing capability
 such as text generation, embeddings, speech, image/video generation or decisions.
 Gufo compiles its C++/HIP sources into the executable and generates registration
-from its manifest. Users rebuild Gufo with that source to add the model.
+from its manifest. Users rebuild Gufo with that source to add the model, or
+build the same source as a [module](extension-modules.md) that an installed
+Gufo loads (`gufo extension install`, experimental).
 
 Community and niche models live in independent repositories. Promotion to core
 means accepting the in-tree maintenance and release obligations, with a named
@@ -119,6 +121,14 @@ In the manifest, distinguish:
 - `options`, `packages`, `licenses`, `install_data` and `runtime_libraries`:
   option declarations and the dependency/distribution inventory. Keep them in
   agreement with the build and install recipe.
+- `packages[].pkg_config`: a pkg-config module the extension builds against.
+  Configure requires it only when the extension is selected, and provides it
+  as the global imported target `PkgConfig::<module>` with the `<module>_*`
+  variables of `pkg_check_modules` (for example `PkgConfig::soxr`,
+  `libavformat_INCLUDE_DIRS`). An extension target may link
+  `PkgConfig::<module>` only for modules its own manifest declares, so it
+  does not build by accident beside another extension. Omit the key for a
+  package used only at run time, such as an executable.
 
 Separate host parsing/probes from HIP execution so diagnostics and probes can
 work without creating a GPU context. Keep test-only code under the `testing`
@@ -186,6 +196,13 @@ as `gguf:lfm3` helps dispatch; the probe must verify the actual artifact. It mus
 not need GPU initialization or load the entire model onto a device. Ambiguous
 matches must remain errors; do not steal another provider's artifacts with an
 overly broad probe.
+
+A GGUF whose tensors use a storage type or shape core cannot size, such as the
+extension's own quantization, still opens for text commands: those tensors have
+`sized == false` and a `size_bytes` spanning the bytes the file reserves for
+them. Only a provider with `accepts_unsized_tensors` probes such a file, so a
+built-in provider for the same architecture does not claim it; the provider
+then reads those tensors from their `data` itself.
 
 For a text model, own tokenization, chat/control framing and tool syntax in the
 extension. Declare supported inputs, state/resource capabilities and sampling
@@ -283,8 +300,8 @@ resolved values reach `TextSpeculativeConfig`, `TextPromptOptions` and
 ```
 
 Text providers receive their options. `serve`, `prompt`, `chat` and `bench`
-accept every option an available provider declares for that command, list the
-ones core does not own under "Provider options" in `--help`, and parse values
+accept every option an available text provider declares for that command, list
+the ones core does not own under "Provider options" in `--help`, and parse values
 with the manifest types. Once the model's provider is selected, the explicit
 values of its declared options reach `TextRunnerOptions`, `TextPromptOptions`
 or `TextBenchOptions` as `provider_options`; read them with

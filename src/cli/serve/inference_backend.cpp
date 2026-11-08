@@ -8,6 +8,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <span>
 #include <string>
@@ -251,6 +252,10 @@ bool InferenceBackend::load(std::shared_ptr<ext::TextModelRunner> runner,
       impl_->state = std::move(new_state);
     }
     return true;
+  } catch (const std::bad_alloc&) {
+    SetError(error, "out of host memory while preparing " +
+                        std::to_string(session_count) + " sessions");
+    return false;
   } catch (const std::exception& exception) {
     SetError(error, exception.what());
     return false;
@@ -267,13 +272,19 @@ bool InferenceBackend::load(
     TextRunnerRamCacheOptions ram_cache_config, bool enable_yarn,
     const PrepareRunnerOptions& prepare_runner_options) {
   std::string load_error;
-  auto reader_owner = core::GgufReader::OpenFile(model_path, &load_error);
+  auto reader_owner = core::GgufReader::OpenFile(
+      model_path, &load_error, {.allow_unsized_tensors = true});
   if (reader_owner == nullptr) {
     SetError(error, "Failed to open GGUF: " + load_error);
     return false;
   }
   const std::shared_ptr<const core::GgufReader> reader(std::move(reader_owner));
   const auto* provider = ext::ProbeTextProvider(*reader);
+  if (provider == nullptr && reader->FirstUnsizedTensor() != nullptr) {
+    // No provider owns this layout: keep the reader's own diagnostic.
+    SetError(error, "Failed to open GGUF: " + reader->UnsizedTensorError());
+    return false;
+  }
   if (provider == nullptr || provider->create == nullptr) {
     SetError(error, "No text provider found for model architecture");
     return false;
