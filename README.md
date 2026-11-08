@@ -14,9 +14,8 @@ so `main` here is an upstream release plus what upstream does not carry:
 
 | Layer | Source | What it brings |
 | --- | --- | --- |
-| Engine and Windows build | [gufo-org/gufo](https://github.com/gufo-org/gufo) v0.31.0 | Gufo itself, the `windows-release` preset and its Windows platform code |
-| Extension hooks for Gemma 4 | [franzmoca/gufo](https://github.com/franzmoca/gufo) `gemma-main` | The two hooks the Gemma 4 extension needs that upstream has not merged yet (provider options, speculation defaults); the others are upstream since v0.31 |
-| Gemma 4 engine | [franzmoca/gemma4-gufo-extension](https://github.com/franzmoca/gemma4-gufo-extension) with two Windows fixes: branch [`gemma4-ext`](https://github.com/akamotaco/gufo_win/tree/gemma4-ext) of this repository, built with `-DGUFO_EXTENSION_DIRS` | Gemma 4 26B-A4B / 31B with MTP, vision and tool calls |
+| Engine and Windows build | [gufo-org/gufo](https://github.com/gufo-org/gufo) `main` (v0.31.0 + 20, November 7, 2026) | Gufo itself, the `windows-release` preset and its Windows platform code; since #1046/#1047 also every hook the Gemma 4 extension needs |
+| Gemma 4 engine | [franzmoca/gemma4-gufo-extension](https://github.com/franzmoca/gemma4-gufo-extension) with Windows fixes: branch [`gemma4-ext`](https://github.com/akamotaco/gufo_win/tree/gemma4-ext) of this repository, built with `-DGUFO_EXTENSION_DIRS` | Gemma 4 26B-A4B / 31B with MTP, vision and tool calls |
 | Fork-only fixes | this repository | See below |
 
 Fork-only changes:
@@ -40,6 +39,10 @@ Fork-only changes:
     buffer. The 2D copy from the mapped GGUF failed inside the Windows driver
     ("Failed PAL memory allocation", 27 times at every load) while reporting
     success, so Gemma 4 described images that were not there.
+- **Flash-Next decode keeps its shared expert serial on Windows.** Upstream #1048 forks
+  it onto a side stream inside the decode graph; on Windows that graph replays slower
+  (Orca Q4Mix: 33.2 vs 38.8 tok/s short prompt, 36.4 vs 42.2 at 2K, 35.6 vs 40.8 at
+  31K). `GUFO_QWEN_DECODE_OVERLAP=1` turns upstream's behavior back on.
 - The per-request image budget is 256 MiB instead of 20 MiB (agents resend every image).
 - `tools\windows\gufo_monitor.py` (a read-only web monitor) and `tools\windows\tdr_delay.bat`
   (GPU timeout).
@@ -74,6 +77,11 @@ match `feat/gemma` on all 8 prompts, the copy test passes at 75K tokens on both,
 tool calls (buffered and streamed), a 6-turn agent chat and image reading (shapes,
 colors and text of a test image) work, and Gemma 4 26B
 speeds are within 4% of the table below.
+
+Re-checked on upstream `main` of November 7 (November 8): the same checks pass on
+Gemma 4 26B and 31B (8/8 identical, copy test, tool calls, agent chat, images), and
+Qwen3.8-Flash-Next Orca Q4Mix (1 session) passes the copy test, tool calls, agent chat
+and images at 1,554-1,595 tok/s prefill and 38.4-41.7 tok/s decode with the fix above.
 
 | Model | Sessions x context | Prompt | Prefill (tok/s) | Decode, MTP (tok/s) |
 | --- | --- | --- | ---: | ---: |
@@ -115,6 +123,9 @@ way, TheRock 10.2 produced correct output but decoded about 30x slower here
 (Gemma 4 26B: 15 tok/s prefill, 2 tok/s decode), as upstream warns. Two things
 this machine also needed:
 
+- **Rust 1.88** (upstream's PNG decoder, #913): rustup reads `rust-toolchain.toml`; a
+  rustup install with `RUSTUP_HOME`/`CARGO_HOME` in a tools folder works without
+  changing the system PATH.
 - **CMake 4.3 or newer** (4.4.4 here): Visual Studio's CMake 3.31 fails to detect
   the HIP compiler through `clang-cl` ("MSVC compiler version not detected properly").
 - **On a non-UTF-8 code page (Korean cp949 here)** vcpkg cannot extract the pkgconf
@@ -133,9 +144,8 @@ cmake --build --preset windows-release
 build\windows-release\gufo.exe --version   # lists "gemma4 ... (../gemma4-ext)"
 ```
 
-The extension pins the `gemma-main` revision it was validated against (`flake.nix`);
-`main` here carries that revision. Without `-DGUFO_EXTENSION_DIRS` the build serves
-upstream's models only.
+The extension needs extension API 0.2.14, upstream `main` since #1047, which `main`
+here carries. Without `-DGUFO_EXTENSION_DIRS` the build serves upstream's models only.
 
 After building, copy TheRock's `.kpack` folder to `build\.kpack`: rocBLAS loads its
 kernels from `..\.kpack` beside its DLL, and the preset does not stage it.
