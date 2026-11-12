@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "gufo/ext/component_cache_resources.hpp"
+#include "gufo/ext/experimental/admission_query.hpp"
 #include "gufo/ext/gguf_identity.hpp"
 #include "gufo/ext/host_budget.hpp"
 #include "gufo/ext/speculative_verifier.hpp"
@@ -585,6 +586,28 @@ const QwenTextRunnerState& RequireQwenState(const TextRunnerState& state) {
   return *qwen;
 }
 
+// Arms the session's layer hook from the host's yield for one prefill step.
+class PrefillYieldScope {
+public:
+  PrefillYieldScope(hip::QwenGpuExecutor& executor,
+                    const TextRunnerState& state)
+      : executor_(executor) {
+    if (state.prefill_yield_groups() > 1)
+      executor_.SetPrefillYield(state.prefill_yield_groups(),
+                                [&state] { state.YieldPrefill(); });
+  }
+  ~PrefillYieldScope() { executor_.SetPrefillYield(1, {}); }
+  PrefillYieldScope(const PrefillYieldScope&) = delete;
+  PrefillYieldScope& operator=(const PrefillYieldScope&) = delete;
+
+private:
+  hip::QwenGpuExecutor& executor_;
+};
+
+// Beside decoders, prompts keep the 4,096-row pass and split it into layer
+// groups: one pass takes about 6.5 s, a decode step about 82 ms.
+constexpr std::size_t kMaxPrefillLayerGroups = 16;
+
 // Shared runner base for the HIP models. Device-loss probing is the runtime's
 // `ext::DeviceProbe` (RFC step 6); the probe holds its buffer and private
 // stream from construction, with the 5 s bound the scheduler expects.
@@ -700,6 +723,15 @@ public:
                 .prefill_rollback = true,
             },
         .sampling_defaults = QwenSamplingDefaults(model_->GetConfig()),
+        // Each session owns its executor, so a yield's decodes, batched
+        // ones included, share no buffer with the pass they interrupt.
+        .scheduling =
+            TextSchedulingProfile{
+                .pass_tokens = std::min<std::size_t>(
+                    max_context_, hip::QwenGpuArena::kMaxPromptBatch),
+                .max_layer_groups = kMaxPrefillLayerGroups,
+                .max_yield_decode_width = MaximumDecodeBatchWidth(),
+            },
     };
   }
 
@@ -724,20 +756,23 @@ public:
             hip::QwenGpuArena::SsmReplayLogBytes(model_->GetConfig(),
                                                  hip::kSsmReplayCapacity);
     }
-    std::size_t free_bytes = 0;
-    std::size_t total_bytes = 0;
     std::optional<std::size_t> capacity;
-    if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
-      capacity = free_bytes;
-    }
     // Snapshot buffers are device allocations, but on a unified-memory APU
     // they are carved from the same RAM as every host allocation, and HIP's
     // free figure does not see host pressure. Cap them by the host budget too.
+    // They keep HIP's own free figure: only the state capacity check reads the
+    // OS video-memory budget.
     std::size_t snapshot_capacity = HostSnapshotBudgetBytes();
     std::size_t snapshot_ceiling = HostSnapshotCeilingBytes();
-    if (capacity.has_value()) {
-      snapshot_capacity = std::min(snapshot_capacity, *capacity);
-      snapshot_ceiling = std::min(snapshot_ceiling, *capacity);
+    if (const auto memory = gufo::hip::QueryAdmissionMemory()) {
+      capacity = memory->free_bytes;
+      snapshot_capacity =
+          std::min<std::size_t>(snapshot_capacity, memory->hip_free_bytes);
+      snapshot_ceiling =
+          std::min<std::size_t>(snapshot_ceiling, memory->hip_free_bytes);
+      gufo::hip::LogStateCapacity(
+          *memory, *capacity,
+          usage.request_state_bytes + usage.temporary_scratch_bytes, 0);
     }
     return {
         .resident_weights_bytes = resident_weights,
@@ -931,6 +966,7 @@ public:
     // Keep the entry recurrence pinned so cancellation can stop between
     // layers without discarding already completed prompt work.
     auto activity = qwen.BeginPrefill();
+    const PrefillYieldScope yield(qwen.executor(), state);
     try {
       if (offset != qwen.position()) {
         throw std::logic_error(

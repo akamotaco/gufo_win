@@ -184,6 +184,8 @@
               ".clang-tidy"
               "CMakeLists.txt"
               "rust-toolchain.toml"
+              "Cargo.toml"
+              "Cargo.lock"
               "extensions.lock"
             ];
           };
@@ -202,9 +204,11 @@
               ".clang-format"
               "CMakeLists.txt"
               "rust-toolchain.toml"
+              "Cargo.toml"
+              "Cargo.lock"
               "extensions.lock"
               "AGENTS.md"
-              "docs/RELEASING.md"
+              "docs/internal/releasing.md"
               "docs/models/README.md"
               "tools/prof/prof.py"
               "tools/bench/speculative-corpus.py"
@@ -251,26 +255,62 @@
             ];
           };
 
-          cargoSetup = import ./.devops/nix/png-decode-cargo.nix {
+          cargoSetup = import ./.devops/nix/rust-cargo.nix {
             inherit (pkgsSys) lib rustPlatform;
           };
 
+          # sccache's local storage supports one server. Build in a private
+          # snapshot, then publish immutable entries atomically with rsync.
+          # Shared files must be accessible to different Nix build users.
+          rustCacheSetup = ''
+            if [[ -d /tmp/gufo-rust-cache && -w /tmp/gufo-rust-cache ]]; then
+              rust_shared_cache=/tmp/gufo-rust-cache/objects-v1
+              (umask 000; mkdir -p "$rust_shared_cache")
+              export SCCACHE_DIR="$TMPDIR/rust-cache"
+              mkdir -p "$SCCACHE_DIR"
+              rsync -r --exclude='.*' "$rust_shared_cache/" "$SCCACHE_DIR/"
+              export SCCACHE_SERVER_UDS="$TMPDIR/sccache.sock"
+              export CARGO_INCREMENTAL=0
+              export RUSTC_WRAPPER=${pkgsSys.sccache}/bin/sccache
+              save_rust_cache() {
+                sccache --stop-server || true
+                # rsync renames complete temporary files into place. Never
+                # replace another builder's entry for the same compiler key.
+                (umask 000; rsync -r --ignore-existing --chmod=ugo=rwX \
+                  "$SCCACHE_DIR/" "$rust_shared_cache/") || true
+              }
+              trap save_rust_cache EXIT
+            fi
+          '';
+
           rustCheck = pkgsSys.runCommand "check-rust" {
-            nativeBuildInputs = [ rustToolchain pkgsSys.stdenv.cc ];
+            nativeBuildInputs = [ rustToolchain pkgsSys.stdenv.cc pkgsSys.pkg-config pkgsSys.python3 pkgsSys.sccache pkgsSys.rsync ];
+            buildInputs = [ pkgsSys.libopus ];
             src = mkFilteredSource {
-              directories = [ "src/core/png_decode" ];
-              files = [ "rust-toolchain.toml" ];
+              # One source list: a new workspace member cannot silently miss CI.
+              directories = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.members;
+              files = [
+                "rust-toolchain.toml"
+                "Cargo.toml"
+                "Cargo.lock"
+                "tools/ci/check-rust-workspace.py"
+                "tests/tools/check_rust_workspace_test.py"
+              ] ++ map (name: "src/core/${name}/Cargo.toml") (builtins.filter
+                (name: builtins.pathExists (./src/core + "/${name}/Cargo.toml"))
+                (builtins.attrNames (builtins.readDir ./src/core)));
             };
-          } (cargoSetup + ''
+          } (cargoSetup + rustCacheSetup + ''
             export HOME=$TMPDIR
             cp -r "$src" source
             chmod -R u+w source
             cd source
-            cargo fmt --manifest-path src/core/png_decode/Cargo.toml --check
-            cargo clippy --manifest-path src/core/png_decode/Cargo.toml \
-              --locked --offline --all-targets -- -D warnings
+            python3 tools/ci/check-rust-workspace.py
+            python3 tests/tools/check_rust_workspace_test.py
+            cargo fmt --all --check
+            cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+            cargo test --workspace --locked --offline
             mkdir -p $out
-            echo "PASS: Rust formatting and clippy clean" > $out/result.txt
+            echo "PASS: Rust formatting, clippy and unit tests clean" > $out/result.txt
           '');
 
           formatCheck = pkgsSys.runCommand "check-format" {
@@ -297,9 +337,8 @@
               pkgsSys.libpng
               pkgsSys.libjpeg
               pkgsSys.libwebp
+              pkgsSys.libopus
               rustToolchain
-              pkgsSys.libsndfile
-              pkgsSys.soxr
               pkgsSys.ffmpeg-headless
               pkgsSys.openssl
             ];
@@ -409,6 +448,8 @@
             nativeBuildInputs = [
               pkgsSys.stdenv.cc
               pkgsSys.ccache
+              pkgsSys.sccache
+              pkgsSys.rsync
               pkgsSys.cmake
               pkgsSys.ninja
               pkgsSys.pkg-config
@@ -420,14 +461,13 @@
               pkgsSys.libpng
               pkgsSys.libjpeg
               pkgsSys.libwebp
+              pkgsSys.libopus
               rustToolchain
-              pkgsSys.libsndfile
-              pkgsSys.soxr
               pkgsSys.ffmpeg-headless
               pkgsSys.openssl
             ];
             src = testSource;
-          } (cargoSetup + ''
+          } (cargoSetup + rustCacheSetup + ''
             export HOME=$TMPDIR
             set -euo pipefail
 
@@ -717,6 +757,17 @@
           };
           llama-cpp-reference = llamaReferences.${system}.release;
           llama-cpp-mtp-reference = llamaReferences.${system}.mtp;
+          # Experimental HRX HIP runtime and Gufo wrapped to run on it; not
+          # part of releases or hosted checks (docs/internal/hrx-migration.md).
+          hrx = pkgs.${system}.callPackage ./.devops/nix/hrx {
+            rocmPackages = pkgs.${system}.rocmPackages.gfx1151;
+          };
+          # HRX with Loom's compiler and serving tools for GPU and NPU.
+          hrx-loom = self.packages.${system}.hrx.override { withLoom = true; };
+          gufo-hrx = pkgs.${system}.callPackage ./.devops/nix/hrx/gufo.nix {
+            gufo = base;
+            hrx = self.packages.${system}.hrx;
+          };
         }
       );
 

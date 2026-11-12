@@ -420,6 +420,10 @@ struct TextRunnerPool::Request::Impl {
       }
     }
     snapshot_tokens.reserve(prompt.size());
+    // A runner without prefix reuse captures nothing: an earlier snapshot
+    // target would only end the first prefill pass there.
+    if (!runner->Descriptor().capabilities.prefix_reuse)
+      count = prompt.size();
     snapshot_tokens.assign(prompt.begin(), prompt.begin() + count);
     // A live continuation can already be beyond the desired snapshot point.
     // Keep its existing immutable checkpoint; never snapshot mismatched state.
@@ -432,6 +436,10 @@ struct TextRunnerPool::Request::Impl {
     }
     ngram_baseline = runner->NgramRows(state);
     checkpoints = lease->PlannedCaptures(cache_prefix_tokens);
+    // A runner without prefix reuse keeps no captures: planned checkpoints
+    // would only split prefill passes (and run the tail as decode steps).
+    if (!runner->Descriptor().capabilities.prefix_reuse)
+      checkpoints.clear();
     if (alignment > 1 || context) {
       for (auto& position : checkpoints)
         position = Aligned(position);
@@ -971,7 +979,9 @@ void TextRunnerPool::Request::PrepareBatchExecution() {
       dynamic_cast<TextRunnerState&>(impl_->lease->state()));
 }
 
-TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
+TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens,
+                                                 std::size_t layer_groups,
+                                                 const PrefillYield& yield) {
   if (!*this) {
     throw std::logic_error("text runner request is empty");
   }
@@ -1107,7 +1117,8 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
   }
   if (stop < impl_->prefill_offset + max_input_tokens)
     max_input_tokens = stop - impl_->prefill_offset;
-  if (!in_pass_prompt && impl_->prefill_offset < snapshot_position)
+  if (!in_pass_prompt && impl_->prefill_offset < snapshot_position &&
+      impl_->runner->Descriptor().capabilities.prefix_reuse)
     max_input_tokens =
         std::min(max_input_tokens, snapshot_position - impl_->prefill_offset);
 
@@ -1192,7 +1203,7 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
     for (const auto point : impl_->checkpoints)
       if (point > frontier)
         lookahead_end = std::min(lookahead_end, point);
-    if (snapshot_position > frontier)
+    if (snapshot_position > frontier && capabilities.prefix_reuse)
       lookahead_end = std::min(lookahead_end, snapshot_position);
   }
   struct ClearLookahead {
@@ -1205,6 +1216,14 @@ TextPrefillStep TextRunnerPool::Request::Prefill(std::size_t max_input_tokens) {
   state.SetPrefillLookahead(std::span<const TextRunnerToken>(impl_->prompt)
                                 .subspan(frontier, lookahead_end - frontier));
   state.SetPrefillPromptEnd(impl_->prompt.size());
+  // The yield lives for this step only: a later step, or a lone pass, runs
+  // unsplit unless the scheduler asks again.
+  struct ClearYield {
+    TextRunnerState& state;
+    ~ClearYield() { state.SetPrefillYield(1, {}); }
+  } clear_yield{state};
+  if (layer_groups > 1 && yield)
+    state.SetPrefillYield(layer_groups, yield);
   std::vector<std::size_t> in_pass_positions;
   for (const auto& capture : in_pass)
     in_pass_positions.push_back(capture.position);
@@ -1534,6 +1553,10 @@ const TextModelRunner& TextRunnerPool::runner() const noexcept {
   return *impl_->validated.runner;
 }
 
+const TextRunnerResourceClaim& TextRunnerPool::resource_claim() const noexcept {
+  return impl_->validated.resources;
+}
+
 std::size_t TextRunnerPool::capacity() const noexcept {
   return impl_->component_cache->capacity();
 }
@@ -1772,6 +1795,14 @@ std::size_t TextRunnerPool::CachedPrefixTokens(
     std::span<const TextRunnerToken> prompt,
     const TextPromptContext* context) const {
   return impl_->component_cache->CachedPrefixTokens(prompt, context);
+}
+
+bool TextRunnerPool::AlignToLiveFrontier(std::vector<TextRunnerToken>& prompt,
+                                         std::size_t& cache_prefix_tokens,
+                                         bool chat_template) const {
+  return impl_->component_cache->AlignToLiveFrontier(
+      prompt, cache_prefix_tokens, impl_->validated.descriptor.max_context,
+      chat_template);
 }
 
 }  // namespace gufo::server

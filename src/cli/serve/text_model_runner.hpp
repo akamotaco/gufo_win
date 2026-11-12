@@ -31,6 +31,7 @@ using ext::InitialOutputState;
 using ext::kHostSnapshotHeadroomBytes;
 using ext::MeminfoAvailableBytes;
 using ext::ParseRamCacheOption;
+using ext::PrefillYield;
 using ext::ReasoningMarkup;
 using ext::TextDecodeSelection;
 using ext::TextDecodeStep;
@@ -114,7 +115,11 @@ public:
     static constexpr std::size_t kSharedPrefixMinTokens = 512;
 
     void PrepareBatchExecution();
-    [[nodiscard]] TextPrefillStep Prefill(std::size_t max_input_tokens);
+    /// With `yield`, a runner with a scheduling profile splits the pass into
+    /// at most `layer_groups` layer groups and runs it between them.
+    [[nodiscard]] TextPrefillStep Prefill(std::size_t max_input_tokens,
+                                          std::size_t layer_groups = 1,
+                                          const PrefillYield& yield = {});
     [[nodiscard]] TextDecodeSelection SelectNext();
     void Advance();
     [[nodiscard]] TextDecodeStep DecodeStep(std::size_t max_tokens);
@@ -156,6 +161,8 @@ public:
 
   [[nodiscard]] const TextModelRunner& runner() const noexcept;
   [[nodiscard]] std::size_t capacity() const noexcept;
+  /// Validated resource claim, including host prompt-state admission inputs.
+  [[nodiscard]] const TextRunnerResourceClaim& resource_claim() const noexcept;
   [[nodiscard]] TextExecutionPlan SelectDecodePlan(
       std::size_t ready_requests) const;
   [[nodiscard]] std::vector<TextDecodeStep> DecodeBatch(
@@ -182,6 +189,14 @@ public:
   [[nodiscard]] std::optional<TextPendingPublication> PendingPublication(
       std::span<const TextRunnerToken> prompt, const TextPromptContext* context,
       std::uint64_t checkpoint_id = 0) const;
+  /// When a text-only prompt repeats an idle live frontier's text, uses that
+  /// frontier's tokens for it, so a different split of a previous answer does
+  /// not lose the frontier (#1154). Moves `cache_prefix_tokens` with the
+  /// rewrite. `chat_template` allows whitespace the template trimmed from
+  /// the edges of a reply.
+  bool AlignToLiveFrontier(std::vector<TextRunnerToken>& prompt,
+                           std::size_t& cache_prefix_tokens,
+                           bool chat_template) const;
 
 private:
   struct Impl;

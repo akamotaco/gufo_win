@@ -17,17 +17,20 @@ set(gufo_pr_targets
   extension_runtime_test extension_role_test
   arg_parser_test transcribe_cli_test json_test json_constraint_test gguf_reader_test qwen_config_test qwen_draft_vocab_test
   gguf_identity_test
-  png_decode_test
+  png_decode_test wav_decode_test audio_decode_test base64_test websocket_frame_test
+  http_request_test multipart_test
   heap_placement_test
+  admission_memory_test
   platform_publish_test platform_prefault_test platform_mapped_file_test
   platform_fs_test platform_library_test
   logit_sampler_test ggml_dequant_test
-  quote_tracker_test logprobs_test sampling_test
+  quote_tracker_test logprobs_test sampling_test image_api_test
   openai_chat_test http_server_test http_server_signals_test trace_test
   audio_websocket_test
-  text_generation_scheduler_test
+  text_generation_scheduler_test layered_prefill_conformance_test
   component_text_cache_test text_model_runner_test
   bench_cli_test prompt_cli_test text_cli_dispatch_test eval_http_client_test
+  extension_diagnostics_test
   # BEGIN GENERATED MODEL PR TARGETS
   deepseek_v4_flash_continuation_identity_test ds4_chat_template_test ds4_cli_test
   ds4_sampling_test embedding_gemma2_batch_scheduler_test embedding_gemma2_config_test
@@ -37,8 +40,8 @@ set(gufo_pr_targets
   qwen38_flash_next_continuation_identity_test qwen38_flash_next_continuation_layout_test
   qwen38_flash_next_mtp_sampling_test qwen38_flash_next_probe_test qwen38_flash_next_rope_scaling_test
   qwen38_flash_next_runner_options_test qwen3_asr_audio_api_test qwen3_asr_config_test
-  qwen3_tts_audio_api_test qwen3_tts_config_test qwen_chat_template_test qwen_image_21_test
-  qwen_image_21_weights_test qwen_tokenizer_test video_api_test
+  qwen3_tts_audio_api_test qwen3_tts_config_test qwen_chat_template_test qwen_image_21_lora_test
+  qwen_image_21_test qwen_image_21_weights_test qwen_tokenizer_test video_api_test
   # END GENERATED MODEL PR TARGETS
 )
 set(gufo_pr_tests ${gufo_pr_targets})
@@ -76,7 +79,7 @@ if (WIN32)
   # per-file fsync stress in component_text_cache_test.
   set(gufo_pr_linux_only
     gguf_reader_test gguf_identity_test platform_publish_test
-    platform_prefault_test trace_test http_server_signals_test
+    trace_test http_server_signals_test
     http_server_test audio_websocket_test
     component_text_cache_test eval_http_client_test cache_disk_faults_test
     cache_boundary_test sched_boundary_test cache_adapter_test cache_slot_test
