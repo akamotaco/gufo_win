@@ -14,7 +14,7 @@ so `main` here is an upstream release plus what upstream does not carry:
 
 | Layer | Source | What it brings |
 | --- | --- | --- |
-| Engine and Windows build | [gufo-org/gufo](https://github.com/gufo-org/gufo) `main` (v0.31.0 + 20, November 7, 2026) | Gufo itself, the `windows-release` preset and its Windows platform code; since #1046/#1047 also every hook the Gemma 4 extension needs |
+| Engine and Windows build | [gufo-org/gufo](https://github.com/gufo-org/gufo) `main` (v0.34.0 + 5, November 12, 2026) | Gufo itself, the `windows-release` preset and its Windows platform code; since #1046/#1047 also every hook the Gemma 4 extension needs |
 | Gemma 4 engine | [franzmoca/gemma4-gufo-extension](https://github.com/franzmoca/gemma4-gufo-extension) with Windows fixes: branch [`gemma4-ext`](https://github.com/akamotaco/gufo_win/tree/gemma4-ext) of this repository, built with `-DGUFO_EXTENSION_DIRS` | Gemma 4 26B-A4B / 31B with MTP, vision and tool calls |
 | Fork-only fixes | this repository | See below |
 
@@ -39,10 +39,6 @@ Fork-only changes:
     buffer. The 2D copy from the mapped GGUF failed inside the Windows driver
     ("Failed PAL memory allocation", 27 times at every load) while reporting
     success, so Gemma 4 described images that were not there.
-- **Flash-Next decode keeps its shared expert serial on Windows.** Upstream #1048 forks
-  it onto a side stream inside the decode graph; on Windows that graph replays slower
-  (Orca Q4Mix: 33.2 vs 38.8 tok/s short prompt, 36.4 vs 42.2 at 2K, 35.6 vs 40.8 at
-  31K). `GUFO_QWEN_DECODE_OVERLAP=1` turns upstream's behavior back on.
 - The per-request image budget is 256 MiB instead of 20 MiB (agents resend every image).
 - `tools\windows\gufo_monitor.py` (a read-only web monitor) and `tools\windows\tdr_delay.bat`
   (GPU timeout).
@@ -81,7 +77,16 @@ speeds are within 4% of the table below.
 Re-checked on upstream `main` of November 7 (November 8): the same checks pass on
 Gemma 4 26B and 31B (8/8 identical, copy test, tool calls, agent chat, images), and
 Qwen3.8-Flash-Next Orca Q4Mix (1 session) passes the copy test, tool calls, agent chat
-and images at 1,554-1,595 tok/s prefill and 38.4-41.7 tok/s decode with the fix above.
+and images at 1,554-1,595 tok/s prefill and 38.4-41.7 tok/s decode with the fork's
+then serial shared expert (upstream #1048 had made Windows decode 13-15% slower; since
+#1107 upstream measures both layouts at load and keeps the faster one, so the fork
+no longer carries that change).
+
+Re-checked on v0.34.0 + 5 (November 12): extension API 0.3 requires a scheduling
+profile, which the `gemma4-ext` branch declares. Gemma 4 26B: 8/8 identical, copy test
+at 439 and 75,648 tokens, tool calls, agent chat and images pass; prefill/decode
+3,183/55.2 tok/s at 2K, 2,809/52.9 at 31K, 1,400/39.8 at 160K. Flash-Next was not
+re-measured on this version.
 
 | Model | Sessions x context | Prompt | Prefill (tok/s) | Decode, MTP (tok/s) |
 | --- | --- | --- | ---: | ---: |
@@ -144,8 +149,8 @@ cmake --build --preset windows-release
 build\windows-release\gufo.exe --version   # lists "gemma4 ... (../gemma4-ext)"
 ```
 
-The extension needs extension API 0.2.14, upstream `main` since #1047, which `main`
-here carries. Without `-DGUFO_EXTENSION_DIRS` the build serves upstream's models only.
+Use this repository's `gemma4-ext` branch: upstream Gufo is on extension API 0.3
+(#1175), and that branch adds the scheduling profile 0.3 requires. Without `-DGUFO_EXTENSION_DIRS` the build serves upstream's models only.
 
 After building, copy TheRock's `.kpack` folder to `build\.kpack`: rocBLAS loads its
 kernels from `..\.kpack` beside its DLL, and the preset does not stage it.
