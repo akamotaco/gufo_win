@@ -25,6 +25,7 @@ void Check(hipError_t result) {
 // Append rows share chunks of 2048 rows: rows are small (4-256 bytes), and
 // fewer chunks mean fewer copies when lent rows are spilled or captured.
 constexpr Rows kChunkRows = 2048;
+constexpr hipStream_t kExecutionStream = nullptr;
 constexpr std::array<int, 4> kRowParts = {
     DS41_STATE_COMP, DS41_STATE_COMP_SCALE, DS41_STATE_INDEX_K,
     DS41_STATE_INDEX_SCALE};
@@ -396,6 +397,8 @@ cache::Completion ContinuationAdapter::Transfer(
     State& state, bool load, cache::Stream& stream,
     const std::function<void(gufo::hip::TransferStream&)>& submit) {
   auto& hip_stream = dynamic_cast<gufo::hip::TransferStream&>(stream);
+  if (!load)
+    Check(hipStreamSynchronize(kExecutionStream));
   auto job = std::make_shared<State::Job>();
   job->owner = &state;
   job->load = load;

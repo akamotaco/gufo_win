@@ -36,8 +36,7 @@ struct ContinuationComponent {
 // counted per component (one row per compression ratio tokens); the device
 // rows can be lent. The 128-row window rings, the compressor frontiers, the
 // frontier logits and metadata are one private component each, and so are
-// the DSpark drafter's rings for speculative sessions. Sessions evaluate
-// synchronously, so no device work is pending once execution returns.
+// the DSpark drafter's rings for speculative sessions.
 class ContinuationAdapter final : public cache::Adapter {
 public:
   ContinuationAdapter(std::shared_ptr<Model>, std::uint32_t context,

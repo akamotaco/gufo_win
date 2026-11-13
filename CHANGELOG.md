@@ -11,6 +11,11 @@ Notable user-facing changes are recorded here. Versions follow `version` in
   keeps its restored state. Before, up to 6 in 10 such hits gave a greedy reply
   that parted from the uncached reply at its second token
   ([E121](docs/models/deepseek-v4.1-flash/EXPERIMENTS.md#e121--wait-for-the-decoder-reset-before-a-prompt-cache-restore-retained)).
+* **dspark:** the prompt-cache checkpoint 3 tokens before the end of each prompt
+  keeps the drafter's rings. Before, it saved them before the last batch's
+  writes finished, so a later hit would draft from stale rows. Replies did not
+  change
+  ([E122](docs/models/deepseek-v4.1-flash/EXPERIMENTS.md#e122--wait-for-queued-writes-before-a-prompt-cache-capture-retained)).
 
 ## 0.2.0 (2026-11-11)
 
