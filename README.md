@@ -88,6 +88,11 @@ at 439 and 75,648 tokens, tool calls, agent chat and images pass; prefill/decode
 3,183/55.2 tok/s at 2K, 2,809/52.9 at 31K, 1,400/39.8 at 160K. Flash-Next was not
 re-measured on this version.
 
+Re-checked on upstream `main` of November 13 (#1209 MTP Q4_K draft head, #1186/#1204
+XRT NPU runtime): Gemma 4 26B and Qwen3.8-Flash-Next Orca Q4Mix load and pass tool
+calls, images and the copy test; `gufo diagnose` finds the NPU through the driver's
+XRT. Speeds were not re-measured.
+
 | Model | Sessions x context | Prompt | Prefill (tok/s) | Decode, MTP (tok/s) |
 | --- | --- | --- | ---: | ---: |
 | Gemma 4 26B-A4B Q8_0 (MeroMero) | 1 x 262,144 | short, 512 generated | | 53.5 |
@@ -131,6 +136,9 @@ this machine also needed:
 - **Rust 1.88** (upstream's PNG decoder, #913): rustup reads `rust-toolchain.toml`; a
   rustup install with `RUSTUP_HOME`/`CARGO_HOME` in a tools folder works without
   changing the system PATH.
+- **XRT Windows SDK 2.21** (#1186/#1204, BUILD-WINDOWS.md step 1): unpacked anywhere
+  and passed as `-DXRT_DIR=<dir>/xrt_sdk/xrt/share/cmake/XRT` instead of `C:\xrt`
+  works. At run time Gufo uses the NPU driver's XRT.
 - **CMake 4.3 or newer** (4.4.4 here): Visual Studio's CMake 3.31 fails to detect
   the HIP compiler through `clang-cl` ("MSVC compiler version not detected properly").
 - **On a non-UTF-8 code page (Korean cp949 here)** vcpkg cannot extract the pkgconf
