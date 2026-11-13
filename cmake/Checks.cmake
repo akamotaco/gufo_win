@@ -22,7 +22,7 @@ set(gufo_pr_targets
   heap_placement_test
   admission_memory_test
   platform_publish_test platform_prefault_test platform_mapped_file_test
-  platform_fs_test platform_library_test
+  platform_fs_test platform_library_test npu_test
   logit_sampler_test ggml_dequant_test
   quote_tracker_test logprobs_test sampling_test image_api_test
   openai_chat_test http_server_test http_server_signals_test trace_test
@@ -71,7 +71,8 @@ list(APPEND gufo_pr_tests
   extension_family_graph_gate extension_metadata_test
   check_target_graph_test extension_link_graph_gate
   extension_discovery_test extension_api_policy_test extension_api_surface
-  extension_cli_provenance_test extension_module_cli_test)
+  extension_cli_provenance_test extension_module_cli_test
+  extension_model_cli_test extension_model_locks_test)
 if (WIN32)
   # Linux-only hosted suites: RLIMIT_FSIZE and fork()-based tests, the
   # dup2/mmap/socket fixture tests, the permission-fault disk-store cases,
