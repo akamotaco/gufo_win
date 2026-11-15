@@ -150,7 +150,15 @@ if(TARGET gufo_gemma4_reference)
   target_compile_options(gufo_gemma4_reference PRIVATE -O2)
   # Without OpenMP its parallel loops silently run on one thread.
   find_package(OpenMP REQUIRED)
-  target_link_libraries(gufo_gemma4_reference PRIVATE OpenMP::OpenMP_CXX)
+  # clang-cl: the gufo external-extension validator rejects the
+  # "-Xclang -fopenmp" that OpenMP::OpenMP_CXX carries, so pass the plain
+  # driver flag and link only the runtime library.
+  if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC" AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(gufo_gemma4_reference PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/clang:-fopenmp>)
+    target_link_libraries(gufo_gemma4_reference PRIVATE ${OpenMP_CXX_LIBRARIES})
+  else()
+    target_link_libraries(gufo_gemma4_reference PRIVATE OpenMP::OpenMP_CXX)
+  endif()
 endif()
 
 # Tests. Host contracts need no model; model-backed checks read the GGUF named
