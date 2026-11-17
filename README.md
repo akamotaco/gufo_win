@@ -14,7 +14,7 @@ so `main` here is an upstream release plus what upstream does not carry:
 
 | Layer | Source | What it brings |
 | --- | --- | --- |
-| Engine and Windows build | [gufo-org/gufo](https://github.com/gufo-org/gufo) `main` (v0.34.0 + 5, November 12, 2026) | Gufo itself, the `windows-release` preset and its Windows platform code; since #1046/#1047 also every hook the Gemma 4 extension needs |
+| Engine and Windows build | [gufo-org/gufo](https://github.com/gufo-org/gufo) `main` (v0.35.0 + 2, November 17, 2026) | Gufo itself, the `windows-release` preset and its Windows platform code; since #1046/#1047 also every hook the Gemma 4 extension needs |
 | Gemma 4 engine | [franzmoca/gemma4-gufo-extension](https://github.com/franzmoca/gemma4-gufo-extension) with Windows fixes: branch [`gemma4-ext`](https://github.com/akamotaco/gufo_win/tree/gemma4-ext) of this repository, built with `-DGUFO_EXTENSION_DIRS` | Gemma 4 26B-A4B / 31B with MTP, vision and tool calls |
 | Fork-only fixes | this repository | See below |
 
@@ -92,6 +92,12 @@ Re-checked on upstream `main` of November 13 (#1209 MTP Q4_K draft head, #1186/#
 XRT NPU runtime): Gemma 4 26B and Qwen3.8-Flash-Next Orca Q4Mix load and pass tool
 calls, images and the copy test; `gufo diagnose` finds the NPU through the driver's
 XRT. Speeds were not re-measured.
+
+Re-checked on v0.35.0 + 2 (November 17; #1215 fixes clang-cl dropping the fast-math and
+unrolling flags of the Flash-Next kernels on Windows): Gemma 4 26B 8/8 identical, tool
+calls, images and copy test pass. Qwen3.8-Flash-Next Orca Q4Mix, 1 x 262,144: prefill
+1,651 (2.1K), 1,693 (8.5K), 1,700 (31.8K), 1,611 (160K) tok/s; decode 39.0-54.9 tok/s
+with MTP (41.0 short); tool calls, images and copy test pass.
 
 | Model | Sessions x context | Prompt | Prefill (tok/s) | Decode, MTP (tok/s) |
 | --- | --- | --- | ---: | ---: |
