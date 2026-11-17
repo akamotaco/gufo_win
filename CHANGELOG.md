@@ -5,6 +5,11 @@ Notable user-facing changes are recorded here. Versions follow `version` in
 
 ## Unreleased
 
+### Dependencies
+
+* **Gufo:** pinned to `a27bbf98`. The extension now needs Gufo's extension
+  API 0.3.3 or later, whose text runners must declare a scheduling profile.
+
 ### Bug Fixes
 
 * **prompt cache:** a prompt-cache hit into a session that held another prompt
@@ -16,6 +21,16 @@ Notable user-facing changes are recorded here. Versions follow `version` in
   writes finished, so a later hit would draft from stale rows. Replies did not
   change
   ([E122](docs/models/deepseek-v4.1-flash/EXPERIMENTS.md#e122--wait-for-queued-writes-before-a-prompt-cache-capture-retained)).
+
+### Performance
+
+* **scheduling:** a prompt that arrives while another session decodes is
+  prefilled one prefill batch per pass (2,048 tokens by default, following
+  `--prefill-batch`) instead of 512 tokens. On streamed `UD-IQ2_XXS` a 9K-token
+  prompt beside a decoding session prefills 36% faster (736 → 1,001 tok/s),
+  and the decoding session stalls 25% less in total, though its longest stall
+  grows from 1.9 to 2.3 s
+  ([E123](docs/models/deepseek-v4.1-flash/EXPERIMENTS.md#e123--one-prefill-batch-per-pass-beside-decoders-retained)).
 
 ## 0.2.0 (2026-11-11)
 

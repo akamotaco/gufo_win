@@ -102,6 +102,8 @@ public:
   [[nodiscard]] std::uint32_t MaxContext() const noexcept;
   [[nodiscard]] bool HasDspark() const;
   [[nodiscard]] bool ExactPrefill() const;
+  /// Most prompt tokens one prefill batch evaluates (`--prefill-batch`).
+  [[nodiscard]] std::uint32_t PrefillBatch() const noexcept;
   /// Routed experts stream from the SSD through a bounded cache.
   [[nodiscard]] bool StreamsExperts() const noexcept;
   /// Re-sizes the streamed expert cache from the memory free now, shrinking it

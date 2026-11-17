@@ -280,6 +280,11 @@ bool Model::ExactPrefill() const {
   return ds41_engine_exact_prefill(engine_);
 }
 
+std::uint32_t Model::PrefillBatch() const noexcept {
+  return options_.prefill_batch != 0 ? options_.prefill_batch
+                                     : DS41_DEFAULT_PREFILL_BATCH;
+}
+
 bool Model::StreamsExperts() const noexcept {
   return options_.stream_experts;
 }

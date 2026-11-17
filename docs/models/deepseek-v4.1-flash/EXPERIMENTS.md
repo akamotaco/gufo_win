@@ -156,6 +156,7 @@ Measurements first recorded in the backlog, without an E-number, are in
 | [E120](#e120--every-admitted-miss-read-straight-into-its-slot-rejected) | expert cache | rejected | Reading every admitted miss into its slot, not only a batch's misses past the 64 stage rows, removes the stage-to-slot copy but slows decode: replies +1.2%, agent replay +1.8%, prefill unchanged. Outputs identical. |
 | [E121](#e121--wait-for-the-decoder-reset-before-a-prompt-cache-restore-retained) | prompt cache | retained | Before a restore into a used session, the decoder reset zeroes its windows on the null stream without waiting, and the restore writes them on non-blocking transfer streams, so a late fill could zero restored rows. The reset now waits for the null stream. Greedy cache hits that part from the uncached reply at their second token: 16 / 70 before, 0 / 70 after. Restores 2.1-2.5 → 0.4-0.9 ms, decode unchanged. |
 | [E122](#e122--wait-for-queued-writes-before-a-prompt-cache-capture-retained) | prompt cache, DSpark | retained | Captures read on non-blocking transfer streams while the drafter's ring stores were still queued on the null stream. The checkpoint 3 tokens before the end of each prompt saved stale drafter rings every time, 36 of 36 over three servers with 4 and 16 hardware queues. With a wait for the null stream before each capture, 0 of those 24 checkpoints stale (0 of 136 drafter captures, two servers with 16 queues). Window, pool, rows and logits captures matched in every arm. |
+| [E123](#e123--one-prefill-batch-per-pass-beside-decoders-retained) | scheduling, prefill | retained | Gufo's extension API 0.3 has each runner declare the prompt tokens per pass beside decoding sessions; the 0.2 host used 512. An uncached 8.6-9.7K-token prompt arriving while another session decodes: 512 → 736 tok/s, 1,024 → 873, 2,048 → 1,001, 4,096 → 1,002. The decoding session's total stall 16.1 → 12.0 s, its longest 1.9 → 2.3 s, decode unchanged. Passes now take one prefill batch (2,048 by default). Outputs identical. |
 
 ## Milestones
 
@@ -4614,6 +4615,48 @@ arm. Each arm had 1,616 row captures and 68 of each private component. A
 restore from such a checkpoint would draft from stale rows. The target model checks every
 draft, so replies were identical (all 50 greedy cache hits correct), and
 decode on the hits was 15.5-17.5 tok/s before and 15.5-16.3 after.
+
+## E123 — one prefill batch per pass beside decoders (retained)
+
+Gufo's extension API 0.3 has each text runner declare a scheduling profile.
+Its `pass_tokens` sets how many prompt tokens one pass covers while other
+sessions decode: the scheduler alternates a decode step for every due
+session with one such pass. The 0.2 host used 512 tokens for every model,
+and the first port to API 0.3 declared the same. On a streamed build each
+pass routes and reads experts for all layers, so short passes repeat that
+cost; long passes make the decoding sessions wait longer between steps.
+
+Streamed `UD-IQ2_XXS` with the `MXFP8` Engram, DSpark and vision, two
+sessions, `--context 16384`, a fresh server per arm in the order 512, 1,024,
+2,048, 4,096, 4,096, 2,048, 1,024, 512 (expert cache 97.9-98.6 GiB). In each
+round session A streams a 768-token greedy reply; after its 16th chunk,
+session B sends an uncached prompt of 8,580 to 9,728 tokens for a 32-token
+reply. The first round warms the expert cache and is left out; the table
+averages three rounds per arm and both arms of each value. Stalls are the
+gaps between A's streamed chunks while B's request runs:
+
+| `pass_tokens` | B prefill (tok/s) | B prefill (s) | A longest stall (s) | A stalls in total (s) | A decode (tok/s) |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 512 | 736 | 12.3 | 1.88 (at most 2.00) | 16.1 | 19.9 |
+| 1,024 | 873 | 10.4 | 2.06 (at most 2.20) | 13.6 | 20.0 |
+| 2,048 | 1,001 | 9.1 | 2.26 (at most 2.72) | 12.0 | 20.0 |
+| 4,096 | 1,002 | 9.1 | 2.26 (at most 2.73) | 12.0 | 20.1 |
+
+Both arms of each value agree within 1%. Every arm gave the same replies for
+A and B in every round. Larger passes finish B's prompt sooner and also
+shorten A's stalls in total, since fewer passes means fewer repeated expert
+reads; A's longest single stall grows by about 0.4 s.
+
+4,096 matches 2,048 because no step went past 2,048 tokens. The prompt cache
+plans up to four checkpoints on a 2,048-token grid, and this runner ends a
+step at each, so a 9K-token prompt stops at 2,048, 4,096, 6,144 and 8,192.
+Longer prompts space their four checkpoints further apart, but a pass longer
+than the runtime's prefill batch (2,048 by default) only runs more batches
+back to back: no faster per token, a longer wait for the decoders. The runner
+now declares its prefill batch (`--prefill-batch`, 2,048 by default) as
+`pass_tokens`. With the final build, one more 2,048 arm gave 999 tok/s and the
+same replies. The probe and the arms' JSON are in
+[artifacts/2026-11-17-scheduling-pass/](artifacts/2026-11-17-scheduling-pass/).
 
 ## Backlog measurements without an E-number
 

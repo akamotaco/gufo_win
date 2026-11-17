@@ -335,6 +335,12 @@ public:
                 .prefix_reuse = true,
             },
         .sampling_defaults = SamplingDefaults(),
+        // Prompts beside decoders take one prefill batch per pass: larger
+        // passes only queue more batches, smaller ones repeat each pass's
+        // expert reads. Passes run unsplit.
+        .scheduling = {.pass_tokens = model_->PrefillBatch(),
+                       .max_layer_groups = 1u,
+                       .max_yield_decode_width = 8u},
     };
   }
 

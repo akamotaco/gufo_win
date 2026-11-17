@@ -74,7 +74,7 @@ Streaming it costs 2-8% of decode speed and gains 15-31% in prefill.
 
 ## Quick start
 
-Build Gufo with the extension (it needs Gufo's extension API 0.2.17, upstream `main`):
+Build Gufo with the extension (it needs Gufo's extension API 0.3.3 or later, upstream `main`):
 
 ```sh
 git clone https://github.com/franzmoca/ds41-gufo-extension
