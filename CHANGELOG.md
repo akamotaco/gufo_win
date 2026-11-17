@@ -5,6 +5,13 @@ Notable user-facing changes are recorded here. Versions follow `version` in
 
 ## Unreleased
 
+### Bug Fixes
+
+* **prompt cache:** a prompt-cache hit into a session that held another prompt
+  keeps its restored state. Before, up to 6 in 10 such hits gave a greedy reply
+  that parted from the uncached reply at its second token
+  ([E121](docs/models/deepseek-v4.1-flash/EXPERIMENTS.md#e121--wait-for-the-decoder-reset-before-a-prompt-cache-restore-retained)).
+
 ## 0.2.0 (2026-11-11)
 
 Built on upstream Gufo `0e2de43e` (0.33.0); needs extension API 0.2.17 or

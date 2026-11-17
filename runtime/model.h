@@ -346,7 +346,8 @@ int ds41_decoder_commit(ds41_decoder* decoder, uint32_t keep);
 int ds41_decoder_step(ds41_decoder* decoder, int token, float* logits,
                       ds41_decoder_layer_fn layer_fn, void* ctx);
 uint32_t ds41_decoder_pos(const ds41_decoder* decoder);
-/* Returns to position 0; rows past the position are never read again. */
+/* Returns to position 0 with the windows and pools zeroed on the device; rows
+ * past the position are never read again. */
 int ds41_decoder_reset(ds41_decoder* decoder);
 /* Appends the decoder state to `out`; load consumes it from `data`. */
 uint64_t ds41_decoder_state_bytes(const ds41_decoder* decoder);

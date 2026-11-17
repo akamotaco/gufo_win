@@ -2049,11 +2049,15 @@ int ds41_decoder_reset(ds41_decoder* d) {
   for (uint32_t il = 0; il < DS41_N_LAYER; il++) {
     const LayerState& s = d->layer[il];
     const uint32_t ratio = ds41_layer_compress_ratio(il);
-    if (hipMemset(s.window, 0, (size_t)DS41_N_SWA * kHeadDim * sizeof(float)) != hipSuccess) return 1;
-    if (s.pool_kv && (hipMemset(s.pool_kv, 0, (size_t)ratio * kHeadDim * sizeof(float)) != hipSuccess ||
-                      hipMemset(s.pool_score, 0, (size_t)ratio * kHeadDim * sizeof(float)) != hipSuccess))
+    const size_t pool = (size_t)ratio * kHeadDim * sizeof(float);
+    if (hipMemsetAsync(s.window, 0, (size_t)DS41_N_SWA * kHeadDim * sizeof(float), nullptr) != hipSuccess)
+      return 1;
+    if (s.pool_kv && (hipMemsetAsync(s.pool_kv, 0, pool, nullptr) != hipSuccess ||
+                      hipMemsetAsync(s.pool_score, 0, pool, nullptr) != hipSuccess))
       return 1;
   }
+  if (hipStreamSynchronize(nullptr) != hipSuccess)
+    return 1;
   d->pos = 0;
   d->spec_n = 0;
   d->feature_rows = 0;

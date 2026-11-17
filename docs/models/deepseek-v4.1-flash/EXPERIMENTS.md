@@ -154,6 +154,7 @@ Measurements first recorded in the backlog, without an E-number, are in
 | [E118](#e118--json-constraint-masks-computed-ahead-of-the-selection-rejected) | sampling, tools | rejected | Tool-call cycles spend ~4% of agent decode on the host (mask misses 3-10 ms, constrained draws ~0.8 ms per row). Walking the proposals' grammar states during the evaluation: 162.2 against 161.6 s per replay; a 1,024-entry mask cache: 158.7 against 157.1 s. |
 | [E119](#e119--a-64-row-demand-stage-misses-past-it-read-into-cache-slots-retained) | expert cache | retained | The whole-layer demand stage (3.7 GiB) becomes 64 rows; a batch with more misses reads the experts it admits into their slots and lends slots to the rest. Expert cache 97.2 → 101.0 GiB: replies at server defaults decode −1.6%, prefill −2.4%; agent replay decode −1.1% (base runs 1.9% apart), prefill −2.7%, 16% fewer MiB read per token. Outputs identical. |
 | [E120](#e120--every-admitted-miss-read-straight-into-its-slot-rejected) | expert cache | rejected | Reading every admitted miss into its slot, not only a batch's misses past the 64 stage rows, removes the stage-to-slot copy but slows decode: replies +1.2%, agent replay +1.8%, prefill unchanged. Outputs identical. |
+| [E121](#e121--wait-for-the-decoder-reset-before-a-prompt-cache-restore-retained) | prompt cache | retained | Before a restore into a used session, the decoder reset zeroes its windows on the null stream without waiting, and the restore writes them on non-blocking transfer streams, so a late fill could zero restored rows. The reset now waits for the null stream. Greedy cache hits that part from the uncached reply at their second token: 16 / 70 before, 0 / 70 after. Restores 2.1-2.5 → 0.4-0.9 ms, decode unchanged. |
 
 ## Milestones
 
@@ -4536,6 +4537,49 @@ Not profiled: a slot read is three per-expert reads, without the stage's
 merging of experts adjacent in the file, and lands in the cache's managed
 chunks instead of the stage's device allocation (zero-copy reads lost the
 same way, item 29). Not retained.
+
+## E121 — wait for the decoder reset before a prompt-cache restore (retained)
+
+A greedy reply restored from the prompt cache could part from the uncached
+reply at its second token: "Every. I will write a story of about 250…"
+instead of "Every evening, Silas climbed the 114 steps…". The first token
+comes from the restored logits and was always right. A restore into a
+session that holds another prompt resets the decoder first
+(`ContinuationAdapter::Invalidate`, `ds41_decoder_reset`). The reset fills
+each layer's window and compressor pools with `hipMemset` on the null
+stream, and the call returns before the fill runs. The restore then writes
+the same buffers on Gufo's transfer streams, which are non-blocking, so
+nothing orders a fill before the copy, and a late fill zeroes restored
+rows. The reset now ends with `hipStreamSynchronize(nullptr)`. Every caller
+already expected a finished reset. The wait also drains the window and pool
+copies that `ds41_decoder_commit` leaves queued from the previous request.
+
+Streamed `UD-IQ2_XXS` with the unsloth `Q5_K` Engram, 76 GiB expert cache,
+one session, a 4 GiB RAM prompt cache, fresh server per arm. A round is a
+15,019-token prompt, then one 24-token greedy prompt, which hits the cache
+from the second round on. Each arm runs eleven rounds, so ten hits. The
+table counts the hits whose reply parts from the uncached reply:
+
+| Server | Before | After |
+| --- | ---: | ---: |
+| `--speculative off` | 7 / 40 (6, 1, 0, 0) | 0 / 40 |
+| DSpark | 2 / 10 | 0 / 10 |
+| `--speculative off`, `GPU_MAX_HW_QUEUES=16` | 7 / 20 (5, 2) | 0 / 10 |
+| `--speculative off`, `--cache-ram-bytes off --cache-disk` | not run | 0 / 10 |
+| DSpark, `AMD_SERIALIZE_COPY=3 AMD_SERIALIZE_KERNEL=3` | 0 / 10 | not run |
+
+The rate differs from server to server. Sixteen hardware queues make it
+frequent, which suggests that the race needs the null stream and the
+transfer stream on different queues. ROCm spreads streams over four queues
+per device by default (`GPU_MAX_HW_QUEUES`). A temporary check that read
+the windows back after each restore found every row in place, and none of
+its 10 hits went wrong. Its device sync before the first decode probably
+hides the race.
+
+On one boot, with the arms in the order before, after, before, after,
+`cache_restore_ms` falls from 2.1-2.5 to 0.4-0.9, probably because the
+fills now finish in the reset, before the timer starts. Decode on the hits
+is unchanged: 15.99 and 16.05 tok/s before, 16.04 and 16.01 after.
 
 ## Backlog measurements without an E-number
 
