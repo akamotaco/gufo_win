@@ -80,6 +80,19 @@ again.
 
 ## Functional checks
 
+Release 0.3.0, November 17, 2026, on streamed `UD-IQ2_XXS` with the `MXFP8` Engram,
+DSpark and the vision projector, built at Gufo `a27bbf98` and run with Gufo's runner at
+the same revision:
+
+- With two sessions, the `conversation`, `tools`, `long-context`, `cache` (disk restart
+  included), `prefill-scheduling` and `image-inputs` suites passed. After them,
+  `tool-images` fails its text-array replay: the replay lands on the other session and
+  restores 83 of its 86 tokens instead of all of them. The previous pin, `0e2de43e`,
+  fails the same way after the same suites; `tool-images` alone passes with one or two
+  sessions on both.
+- With one session, `reasoning-budget` with thinking on passed.
+- The Pi coding-agent replay passed its 8 tasks and `image-read`.
+
 Release 0.2.0, November 11, 2026, on streamed `UD-IQ2_XXS` with the `MXFP8` Engram and
 DSpark, built at Gufo `0e2de43e` and run with Gufo's runner at the same revision:
 

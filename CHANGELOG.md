@@ -5,6 +5,11 @@ Notable user-facing changes are recorded here. Versions follow `version` in
 
 ## Unreleased
 
+## 0.3.0 (2026-11-17)
+
+Built on upstream Gufo `a27bbf98` (0.34.0 and later commits, included in 0.35.0);
+needs extension API 0.3.3 or later.
+
 ### Dependencies
 
 * **Gufo:** pinned to `a27bbf98`. The extension now needs Gufo's extension
