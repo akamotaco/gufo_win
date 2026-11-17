@@ -208,6 +208,9 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
         item.session->mtp_.position + n > item.session->max_context_) {
       return Fail(error, "invalid MTP body request");
     }
+    if (!EnsureKv(*item.session, item.session->position_,
+                  item.session->mtp_.position + n, error))
+      return false;
     for (std::size_t j = 0; j < i; ++j) {
       if (items[j].session == item.session)
         return Fail(error, "MTP body requests must be independent");
@@ -399,10 +402,16 @@ bool Executor::MtpForwardBatch(std::span<const MtpBatchItem> items,
     if (compact_tail) {
       tail.mtp_res = base.res;
       tail.ctx = base.qg;
-      tail.inject = base.mtp_h;
+      // Inject rows move down within their own buffer (rows only move to
+      // lower indices, so the in-order copies never overwrite a pending
+      // source). base.mtp_h aliases s_.xn, which the FFN combine writes
+      // while its blocks still read the inject partials.
+      tail.inject = base.inject;
       for (std::size_t i = 0; i < items.size(); ++i) {
         const auto r = final_rows[i];
         const auto copy = [&](float* dst, const float* src, std::size_t width) {
+          if (dst + i * width == src + r * width)
+            return true;  // the row is already in place
           return Check(hipMemcpyAsync(dst + i * width, src + r * width,
                                       width * sizeof(float),
                                       hipMemcpyDeviceToDevice, stream_),
@@ -868,6 +877,15 @@ bool Executor::ForwardBatchImpl(std::span<const BatchItem> items, bool wide,
             item.session->max_context_) {
       return Fail(error, "invalid session or chain in decode batch");
     }
+    if (!EnsureKv(*item.session,
+                  item.session->position_ +
+                      static_cast<std::uint32_t>(item.tokens.size()),
+                  item.session->mtp_enabled_
+                      ? item.session->mtp_.position +
+                            static_cast<std::uint32_t>(item.tokens.size())
+                      : 0,
+                  error))
+      return false;
     for (std::size_t j = 0; j < i; ++j) {
       if (items[j].session == item.session) {
         return Fail(error, "decode batch contains a duplicate session");

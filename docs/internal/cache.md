@@ -512,6 +512,15 @@ count under 128; only larger explicit budgets can reach the record limit. The st
 `disk_capacity_bytes` and `slot_pinned_bytes` (host memory the sessions pinned
 at startup, charged on top of `capacity_bytes`).
 
+The post-slot host recheck counts initialized recovered manifest storage once
+inside the total RAM allowance. It credits those bytes when comparing remaining
+allocations with remaining host headroom, and half of them when reconstructing
+the automatic half-available budget. Pinned execution slots remain outside the
+cache allowance; staging remains a separate pending allocation. The grant never
+credits unused vector capacity, ledger reservations or estimated overhead as
+resident storage. `event=ram_admission` reports `owned_manifest_bytes` and the
+remaining `additional_bytes`; this is allocation accounting, not an RSS measure.
+
 Flash-Next prepares a bounded two-segment reserve before readiness and can
 prepare the next segment before a prefill with at least 512 tokens remaining
 or when assigning backing to completed append rows. Private-state and partial-tail copies do not request speculative
@@ -553,6 +562,22 @@ later. Until the cache fills, the host keeps the remaining memory, including the
 page cache that holds recent disk checkpoints, so a restore soon after a
 restart reads them from memory. A cache that has filled keeps its footprint; the advice above on explicit budgets for co-resident servers
 still applies.
+
+### Native transfer resources
+
+Flash-Next preallocates `sessions + 1` native HIP streams and
+`18 * sessions + 1` independent event leases. Each exclusively leased session
+can hold a preservation lease, a foreground batch of up to 16 transfers and
+one submitted idle piece; the serialized disk staging transfer adds one lease.
+For four sessions this is five native streams and 73 event leases.
+
+Several leases may submit to one FIFO stream. Completion waits stop at the
+lease's system-visible event fence, retaining the stream and source owners
+until submitted work settles. Failures quarantine the affected native lane;
+exhaustion after quarantine terminates instead of waiting for lost capacity.
+All native handles exist before cache sizing, so acquisition cannot introduce
+an unaccounted later stream allocation. Other providers keep their existing
+exclusive-stream policy unless they opt into the session-aware factory.
 
 ## The disk tier
 
@@ -629,6 +654,29 @@ Adapters can provide fixed prefill and restore cost estimates. The
 `cost_estimate` event logs estimated milliseconds for the selected interval
 beside actual request metrics. The model benchmark pages hold the calibrations;
 these estimates do not change capture thresholds or enable cost-per-byte ranking.
+
+### Recovery metadata validation
+
+Cold recovery reads manifests and checks each distinct payload identity once
+per namespace. The temporary validation map stores actual file type and size,
+then reuses its nodes for canonical reference geometry. Borrowed manifest
+fields and fixed-size geometry avoid per-reference owner/geometry vectors;
+two bounded arrays track rejected owners and duplicate checkpoint IDs.
+
+Unavailable dependencies exclude their owners before conflict validation.
+Every complete owner involved in incompatible shared geometry, private aliasing
+or a duplicate checkpoint ID is rejected, regardless of enumeration order.
+Allocation failure aborts recovery and releases its charges and directory lock;
+it is not treated as evidence of corrupt data.
+
+`DiskStartupStats` separates decoded `dependency_references`,
+`distinct_dependency_files` and actual `dependency_stats`. These counters
+exclude the directory scans, which still inspect every managed file to account
+for referenced, temporary and orphaned bytes. Reusing dependency observations
+reduces repeated work; it does not remove the distinct-file filesystem metadata
+working set or establish a reduction in system memory use. Observations expire
+at the end of recovery. Restore still checks the opened file, identity and
+payload checksum before making state executable.
 
 ## What invalidates reuse
 

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -19,10 +20,14 @@
 #include "src/cli/serve/text_model_runner.hpp"
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/platform/os_info.hpp"
+#include "src/mem/ledger.hpp"
 
 namespace gufo::server {
 namespace {
 using Clock = std::chrono::steady_clock;
+std::size_t SaturatingAdd(std::size_t a, std::size_t b) {
+  return a + std::min(b, std::numeric_limits<std::size_t>::max() - a);
+}
 class SettledSignal final : public cache::CompletionSignal {
 public:
   bool Ready() const noexcept override { return true; }
@@ -55,6 +60,24 @@ std::size_t PayloadBytes(const cache::DiskManifest& manifest) {
       bytes += component.private_state->bytes;
   }
   return bytes;
+}
+// Disk eviction during admission decides which conversations survive a
+// restart; name every retired entry so retention losses can be traced.
+bool LogDiskEviction(const cache::DiskEviction& eviction) {
+  if (!eviction)
+    return false;
+  const auto& manifest = eviction.description->Manifest();
+  Logger::Info(
+      "cache",
+      "schema=component-cache-v1 event=disk_entry_evicted reason=admission "
+      "tokens=" +
+          std::to_string(manifest.tokens.size()) + " checkpoint_id=" +
+          std::to_string(manifest.checkpoint.value) + " purpose=" +
+          std::to_string(static_cast<unsigned>(manifest.purpose)) +
+          " superseded=" + std::to_string(eviction.superseded) +
+          " reused=" + std::to_string(eviction.reused) +
+          " payload_bytes=" + std::to_string(PayloadBytes(manifest)));
+  return true;
 }
 class FrontierHeadroomRefused final : public std::runtime_error {
 public:
@@ -264,6 +287,10 @@ struct ComponentTextCache::Impl {
   // RAM backing committed only to copy captures on their way to disk.
   std::size_t disk_backing{};
   bool ram_enabled{true};
+  // This cache's own share of the state pages it may hold (see budget).
+  std::size_t lender_grant{};
+  // Checkpoints evicted so sessions could borrow their pages back.
+  std::atomic<std::size_t> state_sheds{};
   cache::ResourceCharge metadata;
 
   Impl(std::shared_ptr<TextModelRunner> runner, std::size_t count,
@@ -285,7 +312,8 @@ struct ComponentTextCache::Impl {
           const auto unlimited = std::numeric_limits<std::size_t>::max();
           return {unlimited, unlimited, staging, kDiskOnlyBackingBytes};
         }()),
-        resources(this->runner->CreateComponentCacheResources(ledger, ram)),
+        resources(this->runner->CreateComponentCacheResourcesForSessions(
+            ledger, ram, count)),
         identity(resources->adapter->CompatibilityIdentity()),
         index(ledger),
         retention(ledger, index, &events),
@@ -334,20 +362,30 @@ struct ComponentTextCache::Impl {
       entries.push_back(std::move(entry));
     }
     std::size_t automatic_bytes{}, max_bytes{}, slot_pinned_bytes{};
+    std::size_t owned_manifest_bytes{};
     // RAM cache limit for a runner that pins its slots; computed before the
     // branch below so a short host refuses the load before anything commits.
-    std::size_t pinned{}, limit{};
+    std::size_t pinned{}, limit{}, borrowable{}, own_grant{};
     if (ram_enabled && resources->commit_backing) {
       const auto claim = this->runner->ResourceClaim();
-      // The claim measures the host after the slots allocated, so bytes they
-      // pinned are missing from it. Add them back: in full to the ceiling,
-      // and half to the automatic budget, which is half the available RAM.
-      // The ledger charges them on top of the cache's own budget.
+      // This observation is after slots and disk recovery allocated. Pinned
+      // slots sit above the cache budget; recovered manifest vectors are
+      // already inside it. Compare only the budget's remaining obligations
+      // with remaining host headroom. Neither ledger reservations nor its
+      // converted overhead estimates establish materialized storage.
       pinned = resources->pinned_bytes ? resources->pinned_bytes() : 0;
+      owned_manifest_bytes = disk ? disk->OwnedManifestBytes() : 0;
       const auto measured = claim.retained_snapshot_capacity_bytes.value_or(0);
-      const auto automatic = measured + pinned / 2;
+      const auto owned = SaturatingAdd(pinned, owned_manifest_bytes);
+      // Promised but unwritten session state the cache may borrow; its
+      // pages go back to the sessions on demand. Zero without lending.
+      borrowable = mem::StateLedger::Process().BorrowableBytes();
+      const auto automatic =
+          SaturatingAdd(SaturatingAdd(measured, owned / 2), borrowable);
+      const auto host_ceiling =
+          claim.retained_snapshot_ceiling_bytes.value_or(measured);
       const auto ceiling =
-          claim.retained_snapshot_ceiling_bytes.value_or(measured) + pinned;
+          SaturatingAdd(SaturatingAdd(host_ceiling, owned), borrowable);
       automatic_bytes =
           std::min(TextRunnerRamCacheOptions::kAutomaticMaxBytes, automatic);
       // Staging is pinned host memory too, so the host keeps its reserve
@@ -360,9 +398,36 @@ struct ComponentTextCache::Impl {
         ram = std::min(ram, automatic);
       // Within the host ceiling and the limit the slots allocated under. Other
       // charges above the budget are refused here, as without pins.
-      limit = std::min({ram + pinned, max_bytes, ledger.Limits().ram_bytes});
+      limit = std::min(
+          {SaturatingAdd(ram, pinned), max_bytes, ledger.Limits().ram_bytes});
       const auto charged = ledger.Snapshot().ram_bytes;
       const auto granted = std::min(ram, limit > pinned ? limit - pinned : 0);
+      // The same grant without borrowing: the cache's own share.
+      if (borrowable) {
+        const auto own_max =
+            max_bytes > borrowable ? max_bytes - borrowable : 0;
+        auto own = std::min(requested, own_max);
+        if (automatic_ram)
+          own = std::min(own, automatic - borrowable);
+        const auto own_limit = std::min(
+            {SaturatingAdd(own, pinned), own_max, ledger.Limits().ram_bytes});
+        own_grant = std::min(own, own_limit > pinned ? own_limit - pinned : 0);
+      }
+      Logger::Info(
+          "cache",
+          "schema=component-cache-v1 event=ram_admission "
+          "requested_bytes=" +
+              std::to_string(requested) +
+              " host_ceiling_bytes=" + std::to_string(host_ceiling) +
+              " owned_manifest_bytes=" + std::to_string(owned_manifest_bytes) +
+              " slot_pinned_bytes=" + std::to_string(pinned) +
+              " staging_capacity_bytes=" + std::to_string(staging) +
+              " ledger_ram_bytes=" + std::to_string(charged) +
+              " borrowable_bytes=" + std::to_string(borrowable) +
+              " proposed_grant_bytes=" + std::to_string(granted) +
+              " additional_bytes=" +
+              std::to_string(SaturatingAdd(
+                  granted - std::min(granted, owned_manifest_bytes), staging)));
       // The ceiling is measured after the slots allocated. When they leave
       // no RAM for the cache above the host reserve, refuse the load with
       // the remedies instead of serving without the cache the user expects
@@ -402,6 +467,11 @@ struct ComponentTextCache::Impl {
       const auto staging = ledger.Limits().staging_bytes;
       ledger.ConstrainLimits({limit + staging, limit, staging, limit});
       ram = std::min(ram, limit > pinned ? limit - pinned : 0);
+      // Cache pages up to the grant it would have had without borrowing are
+      // its own; only those beyond it stand for promised session state. The
+      // backing reads it while committing.
+      lender_grant = borrowable ? std::min(own_grant, ram) : ram;
+      mem::StateLedger::Process().AddLenderGrant(lender_grant);
       resources->commit_backing(ram);
       slot_pinned_bytes = pinned;
     } else {
@@ -424,6 +494,8 @@ struct ComponentTextCache::Impl {
       streaming = std::make_unique<cache::StreamedStore>(
           ledger, *disk, ledger.Limits().staging_bytes, resources->staging,
           resources->stream);
+      streaming->SetStreamClasses(resources->background_stream,
+                                  resources->restore_stream);
       disk_capacity = options->capacity_bytes;
       disk_step = options->min_checkpoint_step_tokens;
       disk->ReclaimOrphans();
@@ -545,7 +617,7 @@ struct ComponentTextCache::Impl {
                                         error.what());
             }
             const std::lock_guard lock(mutex);
-            return catalog->EvictOne();
+            return LogDiskEviction(catalog->EvictOne());
           });
     }
     if (queue && ram_enabled)
@@ -556,20 +628,47 @@ struct ComponentTextCache::Impl {
           demotion = std::move(checkpoint);
         }
       });
-    Logger::Info("cache",
-                 "schema=component-cache-v1 event=configured sessions=" +
-                     std::to_string(count) +
-                     " snapshot_entries=128 capacity_bytes=" +
-                     std::to_string(budget) + " staging_capacity_bytes=" +
-                     std::to_string(ledger.Limits().staging_bytes) +
-                     " automatic_bytes=" + std::to_string(automatic_bytes) +
-                     " max_bytes=" + std::to_string(max_bytes) +
-                     " disk_capacity_bytes=" + std::to_string(disk_capacity) +
-                     " slot_pinned_bytes=" + std::to_string(slot_pinned_bytes) +
-                     " ram_cache=" + (ram_enabled ? "on" : "off") +
-                     " disk_backing_bytes=" + std::to_string(disk_backing));
+    Logger::Info(
+        "cache",
+        "schema=component-cache-v1 event=configured sessions=" +
+            std::to_string(count) + " snapshot_entries=128 capacity_bytes=" +
+            std::to_string(budget) + " staging_capacity_bytes=" +
+            std::to_string(ledger.Limits().staging_bytes) +
+            " automatic_bytes=" + std::to_string(automatic_bytes) +
+            " max_bytes=" + std::to_string(max_bytes) +
+            " disk_capacity_bytes=" + std::to_string(disk_capacity) +
+            " slot_pinned_bytes=" + std::to_string(slot_pinned_bytes) +
+            " owned_manifest_bytes=" + std::to_string(owned_manifest_bytes) +
+            " ram_cache=" + (ram_enabled ? "on" : "off") +
+            " disk_backing_bytes=" + std::to_string(disk_backing) +
+            " borrowable_bytes=" + std::to_string(borrowable) +
+            " own_grant_bytes=" + std::to_string(lender_grant));
+    // Sessions that need pages back while the host is at its floor evict
+    // checkpoints here, as capture pressure does: the state pool's thread
+    // then maps the freed pages into the session (no new memory).
+    if (ram_enabled && resources->set_shed)
+      resources->set_shed([this] {
+        DiscardUnusedFrontierWrites();
+        bool reclaimed;
+        {
+          const std::lock_guard lock(mutex);
+          reclaimed = retention.Reclaim(cache::RetentionRequest{});
+        }
+        DrainDemotion();
+        if (reclaimed)
+          ++state_sheds;
+        return reclaimed;
+      });
   }
   ~Impl() {
+    if (resources->set_shed) {
+      resources->set_shed(nullptr);
+      Logger::Info("cache",
+                   "schema=component-cache-v1 event=state_lending sheds=" +
+                       std::to_string(state_sheds.load()));
+    }
+    if (lender_grant)
+      mem::StateLedger::Process().RemoveLenderGrant(lender_grant);
     for (auto& entry : entries)
       if (entry->frontier_worker.joinable())
         entry->frontier_worker.join();
@@ -1420,7 +1519,15 @@ std::unique_ptr<ComponentTextCache::Lease> ComponentTextCache::Acquire(
               const std::span<const std::byte> buffer(pin.Bytes().data(),
                                                       bytes);
               transfers.Add(
-                  [&] { return impl_->resources->stream(); },
+                  [&] {
+                    // Restores take their own streams; a busy class falls
+                    // back to the shared pool rather than wait.
+                    std::unique_ptr<cache::Stream> stream;
+                    if (impl_->resources->restore_stream)
+                      stream = impl_->resources->restore_stream();
+                    return stream ? std::move(stream)
+                                  : impl_->resources->stream();
+                  },
                   [&](cache::Stream& stream) {
                     return c.descriptor.kind ==
                                    cache::ComponentKind::kPrivateState

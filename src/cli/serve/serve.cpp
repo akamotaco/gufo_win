@@ -32,13 +32,14 @@
 #include "src/cli/serve/decision_service.hpp"
 #include "src/cli/serve/embedding_service.hpp"
 #include "src/cli/serve/http_server.hpp"
-#include "src/cli/serve/image_api.hpp"
+#include "src/cli/serve/image_service.hpp"
 #include "src/cli/serve/inference_backend.hpp"
 #include "src/cli/serve/logging.hpp"
 #include "src/cli/serve/sampling_request.hpp"
 #include "src/cli/speculative_settings.hpp"
 #include "src/core/diagnostics/gpu_queues.h"
 #include "src/core/platform/shutdown_signal.hpp"
+#include "src/mem/ledger.hpp"
 
 #if defined(ENGINE_ENABLE_HIP)
 #include <hip/hip_runtime_api.h>
@@ -88,6 +89,14 @@ public:
       out << " gpu_device_used_mib=" << (total - free) / (1024 * 1024)
           << " gpu_device_total_mib=" << total / (1024 * 1024);
     }
+    // State promised to sessions at full context but mapped only as written.
+    if (const auto state = mem::StateLedger::Process().Totals();
+        state.reserved_bytes != 0)
+      out << " state_reserved_mib=" << state.reserved_bytes / (1024 * 1024)
+          << " state_mapped_mib=" << state.mapped_bytes / (1024 * 1024)
+          << " state_pooled_mib=" << state.pooled_bytes / (1024 * 1024)
+          << " state_outstanding_mib="
+          << state.outstanding_bytes / (1024 * 1024);
 #else
     (void)gpu_loaded;
 #endif
@@ -663,6 +672,11 @@ void PrintServeHelp(std::string_view program_name,
     AddEmbeddingOptions(parser, &model, &names, &default_prompt_name);
     ServerOptionHelpTargets server_help;
     AddServerOptionsForHelp(parser, &server_help, false);
+    ext::Registry registry;
+    ext::RegisterBuiltExtensions(registry);
+    ProviderOptions provider_options(registry, "serve embedding",
+                                     ext::Capability::kEmbeddings);
+    provider_options.Register(parser);
     parser.PrintHelp();
     return;
   }
@@ -1153,6 +1167,9 @@ int RunServe(std::span<const char* const> args) {
         "Serve EmbeddingGemma 2 text, image and audio embeddings.");
     AddEmbeddingOptions(parser, &model, &names, &default_prompt_name);
     add_server_options(parser, false);
+    ProviderOptions declared_options(registry, "serve embedding",
+                                     ext::Capability::kEmbeddings);
+    declared_options.Register(parser);
     if (!parser.Parse(sub_args, &parse_err)) {
       std::cerr << "Error: " << parse_err << '\n';
       return 2;
@@ -1160,6 +1177,13 @@ int RunServe(std::span<const char* const> args) {
     if (parser.IsHelpRequested()) {
       PrintServeHelp("gufo", "embedding");
       return 0;
+    }
+    ext::ParsedOptions provider_options;
+    try {
+      provider_options = declared_options.Parse();
+    } catch (const std::invalid_argument& error) {
+      std::cerr << "Error: " << error.what() << '\n';
+      return 2;
     }
     if (!prepare_server_options())
       return 2;
@@ -1179,6 +1203,7 @@ int RunServe(std::span<const char* const> args) {
       embeddings = std::make_shared<server::EmbeddingService>(
           server::EmbeddingServiceOptions{
               .model_root = model,
+              .provider_options = std::move(provider_options),
               .validate_model = true,
               .model_id = names.empty() ? "embeddinggemma-2" : names.front(),
               .model_aliases = ModelAliases(names),
@@ -1824,25 +1849,24 @@ int RunServe(std::span<const char* const> args) {
     default_request.reasoning = *reasoning_defaults;
     const auto initial_output = backend->initial_output_state(default_request);
     std::ostringstream sampling_log;
-    sampling_log
-        << "event=defaults thinking="
-        << (initial_output == server::TextGenerationBackend::
-                                  InitialOutputState::kReasoning
-                ? "on"
-            : initial_output ==
-                    server::TextGenerationBackend::InitialOutputState::kContent
-                ? "off"
-                : "auto")
-        << " temperature=" << effective_sampling.temperature
-        << " top_k=" << effective_sampling.top_k
-        << " top_p=" << effective_sampling.top_p
-        << " min_p=" << effective_sampling.min_p
-        << " min_keep=" << effective_sampling.min_keep
-        << " seed=" << effective_sampling.seed
-        << " repeat_penalty=" << effective_sampling.repeat_penalty
-        << " repeat_last_n=" << effective_sampling.repeat_last_n
-        << " frequency_penalty=" << effective_sampling.frequency_penalty
-        << " presence_penalty=" << effective_sampling.presence_penalty;
+    sampling_log << "event=defaults thinking="
+                 << (initial_output == server::TextGenerationBackend::
+                                           InitialOutputState::kReasoning
+                         ? "on"
+                     : server::TextGenerationBackend::IsContent(initial_output)
+                         ? "off"
+                         : "auto")
+                 << " temperature=" << effective_sampling.temperature
+                 << " top_k=" << effective_sampling.top_k
+                 << " top_p=" << effective_sampling.top_p
+                 << " min_p=" << effective_sampling.min_p
+                 << " min_keep=" << effective_sampling.min_keep
+                 << " seed=" << effective_sampling.seed
+                 << " repeat_penalty=" << effective_sampling.repeat_penalty
+                 << " repeat_last_n=" << effective_sampling.repeat_last_n
+                 << " frequency_penalty="
+                 << effective_sampling.frequency_penalty
+                 << " presence_penalty=" << effective_sampling.presence_penalty;
     server::Logger::Info("sampling", sampling_log.str());
     const char* speculation =
         speculative_config.backend == server::TextSpeculativeBackend::kDFlash

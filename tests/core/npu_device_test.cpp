@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <random>
 #include <vector>
 
@@ -49,7 +50,7 @@ double Check(const Matrix& m, const std::vector<float>& x, int rows,
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int Run(int argc, char** argv) {
   if (argc < 2)
     return 2;
   namespace npu = gufo::npu;
@@ -64,13 +65,17 @@ int main(int argc, char** argv) {
     std::printf("SKIP: %s\n", e.what());
     return 77;
   }
-  auto gemm = npu::Q8Gemm::Open(device, argv[1], std::size_t(64) << 20);
+  auto gemm = npu::Q8Gemm::Open(device, argv[1], std::size_t(160) << 20);
   std::mt19937 rng(7);
   std::normal_distribution<float> nd;
   struct Shape {
     int n, k, rows;
   };
-  const Shape shapes[] = {{1024, 1024, 12}, {300, 2816, 5}, {5000, 512, 40}};
+  // Also K split over the streams (7680, 6144), several output parts in one
+  // job (15360), K over several groups (40960), one row, and 9 to 16 rows.
+  const Shape shapes[] = {{1024, 1024, 12}, {300, 2816, 5},   {5000, 512, 40},
+                          {2048, 7680, 1},  {1000, 6144, 13}, {15360, 2048, 1},
+                          {72, 40960, 2}};
   std::vector<Matrix> ms;
   std::vector<int> ids;
   std::vector<std::vector<float>> xs, ys;
@@ -103,4 +108,13 @@ int main(int argc, char** argv) {
     }
   }
   return failures ? 1 : 0;
+}
+
+int main(int argc, char** argv) {
+  try {
+    return Run(argc, argv);
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "npu_device_test: %s\n", e.what());
+    return 1;
+  }
 }
