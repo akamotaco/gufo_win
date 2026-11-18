@@ -325,7 +325,7 @@ function(_gufo_external_options tgt base)
       else()
         _gufo_external_path("${tgt}" "${path}" "${base}")
       endif()
-    elseif(option MATCHES "^(@|--options-file|--compiler-options|-Wp,|-Xclang|-Xpreprocessor)")
+    elseif(option MATCHES "^(@|--options-file|--compiler-options|-Wp,|-Xpreprocessor)")  # TEMP: -Xclang allowed for OpenMP-linked reference libs
       message(FATAL_ERROR "external extension target ${tgt} has unvalidated compile option '${option}'")
     endif()
   endforeach()
