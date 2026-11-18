@@ -97,28 +97,39 @@ FIELDS = re.compile(r"(\w+)=(\S+)")
 
 
 def recent_requests(port, count=8):
-    """The last completed chat requests in the newest log of this port."""
+    """The last completed chat requests of this server.
+
+    Which stream the http event lines land on changed with the v0.30 logging rework: the pre-v0.30
+    servers wrote them to stdout (the .log file), current builds write them to stderr (.log.err).
+    Read the newest of each, merge, and drop duplicates by request id, so one monitor works
+    against any server build.
+    """
     if LOGS is None:
         return []
-    logs = sorted(LOGS.glob("gufo-%d-*.log" % port))
-    if not logs:
-        return []
-    with logs[-1].open("rb") as f:
-        f.seek(0, 2)
-        f.seek(max(0, f.tell() - 400_000))
-        lines = f.read().decode("utf-8", "replace").splitlines()
-    rows = []
-    for line in reversed(lines):
-        if "event=completed method=POST" not in line or "prompt_tokens=" not in line:
+    rows, seen = [], set()
+    for pattern in ("gufo-%d-*.log", "gufo-%d-*.log.err"):
+        logs = sorted(LOGS.glob(pattern % port))
+        if not logs:
             continue
-        r = dict(FIELDS.findall(line))
-        rows.append({k: r.get(k) for k in (
-            "request", "prompt_tokens", "prefill_tokens", "cached_tokens", "generated_tokens", "cache",
-            "cache_miss_reason", "queue_ms", "ttft_ms", "duration_ms", "prefill_tps", "decode_tps",
-            "acceptance_pct", "plan", "finish")} | {"time": line[11:19]})
-        if len(rows) == count:
-            break
-    return rows
+        with logs[-1].open("rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 400_000))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+        for line in reversed(lines):
+            if "event=completed method=POST" not in line or "prompt_tokens=" not in line:
+                continue
+            r = dict(FIELDS.findall(line))
+            key = r.get("request")
+            if key and key in seen:
+                continue  # the other stream already carried this request
+            if key:
+                seen.add(key)
+            rows.append({k: r.get(k) for k in (
+                "request", "prompt_tokens", "prefill_tokens", "cached_tokens", "generated_tokens", "cache",
+                "cache_miss_reason", "queue_ms", "ttft_ms", "duration_ms", "prefill_tps", "decode_tps",
+                "acceptance_pct", "plan", "finish")} | {"time": line[11:19]})
+    rows.sort(key=lambda row: row["time"], reverse=True)
+    return rows[:count]
 
 
 TDR_KEY = r"System\CurrentControlSet\Control\GraphicsDrivers"
