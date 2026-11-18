@@ -5978,10 +5978,16 @@ __launch_bounds__(256) __global__
   }
 }
 
-// Wide routed down projection (Q5_1 / Q8_0 weights, F16 rows in
+// Wide routed down projection (Q5_1, Q8_0 or IQ4_NL weights, F16 rows in
 // and out) over 128-token tiles: RoutedF16GEMMKernel's arithmetic, laid out
 // like the paired gate/up waves. Each wave owns sixteen rows and keeps their
 // codes in registers; activations are the only LDS stage.
+//
+// IQ4_NL arrives in the repacked 18-byte form the general kernel reads: one
+// F16 scale per 32 weights plus sixteen nibble bytes. A lane extracts its
+// K16 half with Q5_1's shift-and-mask, runs the codes through Iq4Lookup - the
+// nonlinear value table - and continues on Q8_0's path, so the F16 weights
+// match the general kernel's byte for byte.
 //
 // A gfx1151 WMMA reads the A operand of row r from one lane only: lane r for
 // even rows, lane r + 16 for odd ones (the other copy is ignored). So each
@@ -6011,7 +6017,8 @@ __launch_bounds__(256) __global__
   constexpr int BK = 2;  // K32 blocks per stage
   constexpr int kTokTiles = BN / 16;
   constexpr bool kQ5 = kType == WeightType::kQ5_1;
-  constexpr int kBlockBytes = kQ5 ? 24 : 34;
+  constexpr bool kIQ4 = kType == WeightType::kIQ4_NL;
+  constexpr int kBlockBytes = kQ5 ? 24 : kIQ4 ? 18 : 34;
   // Activation stage: [kb][16-element quarter][token][16 B], as in
   // RoutedF16GEMMKernel, one padding slot per quarter plane.
   constexpr int kActStride = BN + 1;
@@ -6093,8 +6100,11 @@ __launch_bounds__(256) __global__
         w_high[S][b] = head.y;
         w_codes[S][b] = *reinterpret_cast<const uint4*>(blk + 8);
       } else {
+        // Q8_0: each lane reads its own 16-byte code half. IQ4_NL: sixteen
+        // nibble bytes cover the whole K32 block, so both lanes read the same
+        // 16 bytes and split them by nibble at compute.
         w_head[S][b] = *reinterpret_cast<const std::uint16_t*>(blk);
-        __builtin_memcpy(&w_codes[S][b], blk + 2 + (16 * f_c), 16);
+        __builtin_memcpy(&w_codes[S][b], blk + 2 + (kIQ4 ? 0 : 16 * f_c), 16);
       }
     }
 #pragma unroll
@@ -6130,6 +6140,11 @@ __launch_bounds__(256) __global__
         if constexpr (kQ5) {
           nib = ((words[i] >> (4U * f_c)) & 0x0F0F0F0FU) |
                 SpreadHighBits((w_high[S][kb] >> (16 * f_c + 4 * i)) & 0xFU);
+        } else if constexpr (kIQ4) {
+          // This lane's K16 half, then the nonlinear IQ4 value table: the
+          // bytes the general kernel's Q8 stage would have staged.
+          nib = (words[i] >> (4U * f_c)) & 0x0F0F0F0FU;
+          nib = Iq4Lookup(nib) ^ 0x80808080U;
         } else {
           nib = words[i] ^ 0x80808080U;
         }
@@ -7639,7 +7654,9 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
       const auto kernel =
           type == WeightType::kQ5_1   ? RoutedDownF16Kernel<WeightType::kQ5_1>
           : type == WeightType::kQ8_0 ? RoutedDownF16Kernel<WeightType::kQ8_0>
-                                      : nullptr;
+          : type == WeightType::kIQ4_NL
+              ? RoutedDownF16Kernel<WeightType::kIQ4_NL>
+              : nullptr;
       if (kernel == nullptr)
         return false;
       hipLaunchKernelGGL(kernel, grid, dim3(kThreads), 0, stream, w, x, tiles,

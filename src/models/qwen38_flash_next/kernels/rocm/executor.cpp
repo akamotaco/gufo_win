@@ -3409,10 +3409,10 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
         : l.ffn_down_exps.type == GgmlType::kIQ4_NL ? WeightType::kIQ4_NL
                                                     : WeightType::kQ5_1;
     // Prefill takes the gate/up map's 128-token tiles: each wave decodes its
-    // rows' weights once for up to 128 tokens. The 128-row down kernel
-    // covers Q5_1 and Q8_0 only, so IQ4_NL down goes to the split map with
-    // the gate/up formats the pair kernel cannot read.
-    const bool wide_down = routed_wide_tiles_ != 0 && down_type != WeightType::kIQ4_NL;
+    // rows' weights once for up to 128 tokens. The 128-row down kernel covers
+    // Q5_1, Q8_0 and IQ4_NL, which is every format WmmaExperts admits, so
+    // down rides the wide map too.
+    const bool wide_down = routed_wide_tiles_ != 0;
     // The down projection's rows are F16 too: the epilogue reads half the
     // bytes of the largest routed intermediate.
     if (!RoutedF16Gemm(l.ffn_down_exps.data, down_type, up_half,

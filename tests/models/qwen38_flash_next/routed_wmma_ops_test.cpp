@@ -1002,7 +1002,10 @@ void CheckGatedDecodeShape() {
     for (int t = 0; t < tokens; ++t)
       if (qfn_mmq_moe_gated_vec(static_cast<int>(type), wa, wb, dx + t * cols,
                                 di + t * used,
-                                single + std::size_t{t} * used * rows, rows,
+                                single + static_cast<std::size_t>(t) *
+                                             static_cast<std::size_t>(used) *
+                                             static_cast<std::size_t>(rows),
+                                rows,
                                 cols, 1, experts, used, nullptr))
         throw std::runtime_error("single-token gated launch failed");
     const auto reference = Download(single, count);
@@ -1012,7 +1015,8 @@ void CheckGatedDecodeShape() {
         throw std::runtime_error("multi-token gated launch failed");
       const auto out = Download(batch, count);
       if (std::memcmp(reference.data(), out.data(),
-                      std::size_t{n} * used * rows * sizeof(float)) != 0) {
+                      static_cast<std::size_t>(n) * static_cast<std::size_t>(used) *
+                          static_cast<std::size_t>(rows) * sizeof(float)) != 0) {
         std::size_t i = 0;
         while (std::memcmp(&reference[i], &out[i], sizeof(float)) == 0)
           ++i;
@@ -1357,20 +1361,25 @@ int main() {
                 16)) &&
          ok;
     // IQ4 formats (AtomicChat): IQ4_XS gate/up view, IQ4_NL down view, on
-    // the 48/64-row and the 16-row tiles.
+    // the 48-row, the 16-row and (down only) the 128-row wide tiles.
     ok = Ok(Run(q::WeightType::kIQ4_XS, 300, 10, 64, 640, 2560, 0x1A4A0001U)) &&
          ok;
     ok = Ok(Run(q::WeightType::kIQ4_XS, 300, 10, 64, 640, 2560, 0x1A4A0002U,
                 16)) &&
          ok;
     ok = Ok(Run(q::WeightType::kIQ4_XS, 40, 4, 8, 201, 512, 0x1A4A0003U)) && ok;
-    ok = Ok(Run(q::WeightType::kIQ4_NL, 3000, 1, 64, 2560, 640, 0x1A4E0001U,
-                64)) &&
+    ok = Ok(Run(q::WeightType::kIQ4_NL, 3000, 1, 64, 2560, 640, 0x1A4E0001U)) &&
          ok;
     ok = Ok(Run(q::WeightType::kIQ4_NL, 3000, 1, 64, 2560, 640, 0x1A4E0002U,
                 16)) &&
          ok;
-    ok = Ok(Run(q::WeightType::kIQ4_NL, 97, 1, 8, 129, 640, 0x1A4E0003U, 64)) &&
+    ok = Ok(Run(q::WeightType::kIQ4_NL, 97, 1, 8, 129, 640, 0x1A4E0003U)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kIQ4_NL, 3000, 1, 64, 2560, 640, 0x1A4E0004U,
+                128)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kIQ4_NL, 97, 1, 8, 129, 640, 0x1A4E0005U,
+                128)) &&
          ok;
     return ok ? 0 : 1;
   } catch (const std::exception& error) {
