@@ -378,13 +378,15 @@ typedef struct {
 } block_iq4_nl;
 static_assert(sizeof(block_iq4_nl) == sizeof(ggml_half) + QK4_NL/2, "wrong iq4_nl block size/padding");
 
+// The device image of IQ4_XS is repacked at upload (device_model.cpp):
+// Q4_K's shape - eight folded F16 sub-block scales (d * (ls - 32)) in a
+// 16-byte header, then the nibble stream - so the paired WMMA kernel can
+// read gate/up like Q4_K. This struct describes that image, not the GGUF.
 typedef struct {
-    ggml_half d;
-    uint16_t scales_h;
-    uint8_t  scales_l[QK_K/64];
-    uint8_t  qs[QK_K/2];
+    ggml_half scales[QK_K/32];
+    uint8_t   qs[QK_K/2];
 } block_iq4_xs;
-static_assert(sizeof(block_iq4_xs) == sizeof(ggml_half) + sizeof(uint16_t) + QK_K/64 + QK_K/2, "wrong iq4_xs block size/padding");
+static_assert(sizeof(block_iq4_xs) == 144, "wrong iq4_xs paired block size");
 
 #endif // GGML_COMMON_DECL
 #endif // GGML_COMMON_DECL

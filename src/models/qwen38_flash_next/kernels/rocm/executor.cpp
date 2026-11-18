@@ -3368,14 +3368,13 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
         l.ffn_gate_exps.type == GgmlType::kQ5_K     ? WeightType::kQ5_K
         : l.ffn_gate_exps.type == GgmlType::kIQ4_XS ? WeightType::kIQ4_XS
                                                     : WeightType::kQ4_K;
-    // The paired kernel covers the K-quants only: without a paired launch
-    // the split GEMMs must use routed_tile_rows_ tiles. The 128-row wide map
-    // feeds only the paired kernel and the down projection; a narrower tile
-    // stride against its entries misreads the map and the gate GEMM fails.
-    // The n-tile map (routed_n_tiles_, routed_tile_rows_ rows) is built
-    // whenever wide is not, so non-paired prefill takes that one.
-    const bool paired =
-        routed_wide_tiles_ != 0 && gate_type != WeightType::kIQ4_XS;
+    // The paired kernel covers the K-quants and IQ4_XS, whose experts were
+    // repacked into Q4_K's shape on upload (device_model.cpp): every gate
+    // format WmmaExperts admits rides the 128-row wide map, one launch for
+    // gate and up. The n-tile map (routed_n_tiles_, routed_tile_rows_ rows)
+    // is built whenever wide is not, for the formats the pair still cannot
+    // read.
+    const bool paired = routed_wide_tiles_ != 0;
     // The split maps sit alone at the buffer head without a wide map, and
     // behind the wide map's routed_wide_tiles_ entries with one.
     const std::int32_t* split_map =

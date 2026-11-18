@@ -250,7 +250,7 @@ inline size_t ggml_type_size(enum ggml_type t) {
         case GGML_TYPE_IQ1_S:   return 50;
         case GGML_TYPE_IQ1_M:   return 56;
         case GGML_TYPE_IQ4_NL:  return 18;
-        case GGML_TYPE_IQ4_XS:  return 136;
+        case GGML_TYPE_IQ4_XS:  return 144;  // repacked device image
         case GGML_TYPE_MXFP4:   return 17;
         case GGML_TYPE_NVFP4:   return 18;
         case GGML_TYPE_Q1_0:    return 36;

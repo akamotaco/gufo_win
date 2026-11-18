@@ -1263,23 +1263,25 @@ static __device__ __forceinline__ float vec_dot_iq4_xs_q8_1(
 
     const block_iq4_xs * bq4 = (const block_iq4_xs *) vbq + kbx;
 
+    // Repacked image (device_model.cpp): iqs is the sub-block's dword index
+    // (4 * sub-block). A block's 32 codes are ONE nibble half - low for the
+    // even block of the pair, high for the odd one - of 32 consecutive
+    // bytes, with the block's element order following byte order.
+    const int ib = iqs >> 2;
+    const int shift = (ib & 1) ? 4 : 0;
+    const int * codes = (const int *) bq4->qs + 8 * (ib >> 1);
+    const int * q8 = (const int *) bq8_1[ib].qs;
+
     int sumi = 0;
 #pragma unroll
-    for (int j = 0; j < 4; ++j) {
-        const int aux_q4 = get_int_b4(bq4->qs, iqs + j);
+    for (int j = 0; j < 8; ++j) {
+        const int aux_q4 = (codes[j] >> shift) & 0x0F0F0F0F;
         const int2 v = get_int_from_table_16(aux_q4, kvalues_iq4nl);
-
-        const int u0 = get_int_b4(bq8_1[iqs/4].qs, j + 0);
-        const int u1 = get_int_b4(bq8_1[iqs/4].qs, j + 4);
-
-        sumi = ggml_hip_dp4a(v.x, u0, sumi);
-        sumi = ggml_hip_dp4a(v.y, u1, sumi);
+        sumi = ggml_hip_dp4a(v.x, q8[j], sumi);
     }
 
-    const int ls = ((bq4->scales_l[iqs/8] >> (iqs & 0x04)) & 0x0F) | (((bq4->scales_h >> (iqs/2)) & 0x03) << 4);
-    sumi *= ls - 32;
-
-    const float d = __half2float(bq4->d) * __low2float(bq8_1[iqs/4].ds);
+    // The sub-block's folded F16 scale, d * (ls - 32).
+    const float d = __half2float(bq4->scales[ib]) * __low2float(bq8_1[ib].ds);
     return d * sumi;
 }
 

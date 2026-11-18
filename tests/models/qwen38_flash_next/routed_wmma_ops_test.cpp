@@ -286,35 +286,44 @@ Experts MakeIQ4NL(std::size_t e, std::size_t m, std::size_t k,
   return w;
 }
 
-/// Random IQ4_XS superblocks with the real 6-bit sub-block scale packing.
+/// Random IQ4_XS superblocks in the repacked device layout
+/// (device_model.cpp): eight folded F16 scales d * (ls - 32), then the
+/// nibble stream. The reference values use the folded scale, like the device.
 Experts MakeIQ4XS(std::size_t e, std::size_t m, std::size_t k,
                   std::uint32_t seed) {
   Experts w;
   const std::size_t blocks = e * m * (k / 256);
-  w.packed.resize(blocks * 136);
+  w.packed.resize(blocks * 144);
   w.values.resize(e * m * k);
   for (std::size_t b = 0; b < blocks; ++b) {
-    std::uint8_t* blk = w.packed.data() + b * 136;
+    std::uint8_t* blk = w.packed.data() + b * 144;
     const __half d = __float2half(Uniform(&seed, 0.0005F) + 0.001F);
-    std::memcpy(blk, &d, 2);
     const float df = __half2float(d);
-    std::uint16_t scales_h = 0;
-    std::uint8_t scales_l[4] = {};
-    int ls[8];
+    __half folded[8];
     for (int ib = 0; ib < 8; ++ib) {
-      ls[ib] = static_cast<int>(NextRandom(&seed) % 64);
-      scales_l[ib / 2] |= static_cast<std::uint8_t>((ls[ib] & 15) << (4 * (ib % 2)));
-      scales_h |= static_cast<std::uint16_t>((ls[ib] >> 4) << (2 * ib));
+      const int ls = static_cast<int>(NextRandom(&seed) % 64);
+      folded[ib] = __float2half_rn(df * static_cast<float>(ls - 32));
+      std::memcpy(blk + 2 * ib, &folded[ib], 2);
     }
-    std::memcpy(blk + 2, &scales_h, 2);
-    std::memcpy(blk + 4, scales_l, 4);
-    for (int ib = 0; ib < 8; ++ib) {
-      const float dl = df * static_cast<float>(ls[ib] - 32);
-      for (int j = 0; j < 16; ++j) {
-        const auto q = static_cast<std::uint8_t>(NextRandom(&seed) & 0xFF);
-        blk[8 + 16 * ib + j] = q;
-        w.values[b * 256 + 32 * ib + j] = dl * kIq4Values[q & 15];
-        w.values[b * 256 + 32 * ib + j + 16] = dl * kIq4Values[q >> 4];
+    // Q4_K-shaped payload: each byte pairs one code of the even block of a
+    // sub-block pair (low nibble) with one of the odd block (high nibble).
+    for (int g = 0; g < 4; ++g) {
+      const float s0 = __half2float(folded[2 * g]);
+      const float s1 = __half2float(folded[2 * g + 1]);
+      for (int p = 0; p < 16; ++p) {
+        const std::uint32_t r = NextRandom(&seed);
+        const std::uint8_t c0 = (r >> 0) & 0xFU;   // block 2g,   element p
+        const std::uint8_t c1 = (r >> 4) & 0xFU;   // block 2g,   element 16+p
+        const std::uint8_t c2 = (r >> 8) & 0xFU;   // block 2g+1, element p
+        const std::uint8_t c3 = (r >> 12) & 0xFU;  // block 2g+1, element 16+p
+        blk[16 + 32 * g + p] =
+            static_cast<std::uint8_t>(c0 | (c2 << 4));
+        blk[16 + 32 * g + 16 + p] =
+            static_cast<std::uint8_t>(c1 | (c3 << 4));
+        w.values[b * 256 + 64 * g + p] = s0 * kIq4Values[c0];
+        w.values[b * 256 + 64 * g + 16 + p] = s0 * kIq4Values[c1];
+        w.values[b * 256 + 64 * g + 32 + p] = s1 * kIq4Values[c2];
+        w.values[b * 256 + 64 * g + 48 + p] = s1 * kIq4Values[c3];
       }
     }
   }
@@ -488,10 +497,25 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
   const auto mmq = Download(d_mmq, slots * m);
   const auto f16 = Download(d_f16, slots * m);
   const auto f16_half = Download(d_f16_half, slots * m);
+  std::size_t bad = 0, bad_zero = 0;
   for (std::size_t i = 0; i < slots * m; ++i) {
     const __half expected = __float2half(f16[i]);
     if (std::memcmp(&expected, &f16_half[i], sizeof(__half)) != 0) {
-      throw std::runtime_error("routed F16 output changed rounding");
+      ++bad;
+      if (f16[i] == 0.0F)
+        ++bad_zero;
+      if (bad == 1)
+        std::printf("[round-dbg] first %zu/%zu (row %zu): %f vs %f\n", i,
+                    slots * m, i % m, (double)f16[i],
+                    (double)__half2float(f16_half[i]));
+    }
+  }
+  if (bad != 0) {
+    {
+      throw std::runtime_error(
+          "routed F16 output changed rounding, " + std::to_string(bad) +
+          " values (" + std::to_string(bad_zero) + " with F32 zero) (" +
+          TypeName(type) + ")");
     }
   }
   const auto half_tail = Download(d_f16_half + slots * m, kHalfGuard);
@@ -502,13 +526,19 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
 
   // Prefill pairs gate/up for buckets the separate 16- and 48-row tiles take.
   if ((tile_rows == 16 || tile_rows == 48) &&
-      (type == q::WeightType::kQ4_K || type == q::WeightType::kQ5_K)) {
+      (type == q::WeightType::kQ4_K || type == q::WeightType::kQ5_K ||
+       type == q::WeightType::kIQ4_XS)) {
     // Different gate/up weights, with the up scale small enough that these
     // deliberately large synthetic weights do not overflow the F16 output.
     auto up = w.packed;
-    const std::size_t block_bytes = type == q::WeightType::kQ4_K ? 144 : 176;
+    const std::size_t block_bytes = type == q::WeightType::kQ5_K ? 176 : 144;
     for (std::size_t b = 0; b < up.size(); b += block_bytes) {
-      for (std::size_t offset : {0U, 2U}) {
+      // Q4_K/Q5_K keep d and dmin in the first four bytes; the repacked
+      // IQ4_XS header is eight folded scales.
+      const std::size_t scale_slots =
+          type == q::WeightType::kIQ4_XS ? 8 : 2;
+      for (std::size_t soff = 0; soff < scale_slots; ++soff) {
+        const std::size_t offset = 2 * soff;
         __half scale;
         std::memcpy(&scale, up.data() + b + offset, sizeof(scale));
         scale = __float2half(__half2float(scale) / 1024.0F);
@@ -1307,6 +1337,7 @@ bool CheckPassRoutes(q::WeightType gate_type, q::WeightType down_type,
 }  // namespace
 
 int main() {
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
   try {
     CheckGatedDecodeShape();
     bool routes = true;
@@ -1368,6 +1399,8 @@ int main() {
                 16)) &&
          ok;
     ok = Ok(Run(q::WeightType::kIQ4_XS, 40, 4, 8, 201, 512, 0x1A4A0003U)) && ok;
+    ok = Ok(Run(q::WeightType::kIQ4_XS, 300, 10, 64, 640, 2560, 0x1A4A0004U)) &&
+         ok;
     ok = Ok(Run(q::WeightType::kIQ4_NL, 3000, 1, 64, 2560, 640, 0x1A4E0001U)) &&
          ok;
     ok = Ok(Run(q::WeightType::kIQ4_NL, 3000, 1, 64, 2560, 640, 0x1A4E0002U,

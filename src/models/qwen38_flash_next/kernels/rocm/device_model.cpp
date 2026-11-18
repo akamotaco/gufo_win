@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/core/platform/fs.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/kernels.hpp"
 #include "src/models/qwen38_flash_next/kernels/rocm/mmq/qfn_mmq.h"
 
@@ -55,6 +56,7 @@ struct Uploader {
   std::size_t& max_half_cols;
   std::size_t& max_q8_cols;
   std::string* error;
+  std::span<const core::GgufMappedRegion> regions;
   bool ok{true};
   std::uint32_t shard_base{0};
   std::uint64_t requested{0};
@@ -74,6 +76,181 @@ struct Uploader {
       return hipSuccess;
     }
     return weights->Allocate(pointer, size);
+  }
+
+  static constexpr std::size_t kUploadAlign = 4096;
+
+  /// Reads one range with unbuffered intent; the pages of the mapped shard
+  /// are never touched. On systems that refuse unbuffered reads the buffered
+  /// descriptor re-reads the range and immediately marks it unneeded, as
+  /// hip::WeightUpload does.
+  bool ReadUnbuffered(platform::PlatformFile& direct, std::uint32_t shard,
+                      std::uint64_t offset, std::size_t len,
+                      std::size_t aligned_len, std::uint8_t* dst) {
+    std::error_code ec;
+    if (platform::FileValid(direct)) {
+      std::size_t got = 0;
+      bool failed = false;
+      while (got < len) {
+        const auto n = platform::ReadAt(direct, offset + got, dst + got,
+                                        aligned_len - got, ec);
+        if (n == 0 && ec == std::errc::interrupted) {
+          continue;
+        }
+        if (n == 0) {
+          failed = true;
+          break;
+        }
+        got += n;
+      }
+      if (!failed) {
+        return true;
+      }
+      // A failed unbuffered description is dropped once, not per chunk.
+      platform::CloseFile(direct);
+      direct = platform::kInvalidFile;
+    }
+    const auto buffered = platform::DuplicateFile(regions[shard].file_descriptor);
+    if (!platform::FileValid(buffered)) {
+      Fail("cannot reopen a shard for the weight stream");
+      return false;
+    }
+    struct Guard {
+      platform::PlatformFile fd;
+      ~Guard() {
+        if (platform::FileValid(fd)) {
+          platform::CloseFile(fd);
+        }
+      }
+    } guard{buffered};
+    ec = {};
+    std::size_t got = 0;
+    while (got < len) {
+      const auto n =
+          platform::ReadAt(buffered, offset + got, dst + got, len - got, ec);
+      if (n == 0 && ec == std::errc::interrupted) {
+        continue;
+      }
+      if (n == 0) {
+        Fail("disk read failed for the weight stream");
+        return false;
+      }
+      got += n;
+    }
+    platform::Advise(buffered, platform::AdviseHint::kDontNeed, offset, len);
+    return true;
+  }
+
+  /// Streams one tensor disk -> pinned staging -> device while rewriting its
+  /// blocks: the same contract hip::WeightUpload gives plain copies. Two
+  /// pinned slots pipeline the disk read and the transfer; host memory is
+  /// fixed at two slots, never the tensor size. `convert` rewrites the block
+  /// index range [begin, end) from src (in_block stride) to dst (out_block
+  /// stride), and may be called from several workers on one slot.
+  template <typename Convert>
+  bool StreamTransform(const TensorRef& t, std::size_t in_block,
+                       std::size_t out_block, std::size_t blocks, void* device,
+                       const char* label, Convert convert) {
+    const std::size_t slot_blocks =
+        std::max<std::size_t>(1, (32ULL << 20) / std::max(in_block, out_block));
+    void* raw[2] = {nullptr, nullptr};
+    const std::size_t slot_bytes =
+        slot_blocks * (in_block + out_block) + kUploadAlign;
+    (void)hipHostMalloc(&raw[0], slot_bytes, 0);
+    (void)hipHostMalloc(&raw[1], slot_bytes, 0);
+    if (raw[0] == nullptr || raw[1] == nullptr) {
+      for (auto* p : raw) {
+        if (p != nullptr) {
+          hipHostFree(p);
+        }
+      }
+      Fail(std::string("pinned staging allocation failed (") + label + ")");
+      return false;
+    }
+    const auto in_slot = [&](int i) {
+      return static_cast<std::uint8_t*>(raw[i]);
+    };
+    const auto out_slot = [&](int i) {
+      return static_cast<std::uint8_t*>(raw[i]) + slot_blocks * in_block +
+             kUploadAlign;
+    };
+    hipStream_t stream = nullptr;
+    hipEvent_t ev[2] = {nullptr, nullptr};
+    if (hipStreamCreateWithFlags(&stream, hipStreamNonBlocking) != hipSuccess ||
+        hipEventCreateWithFlags(&ev[0], hipEventDisableTiming) != hipSuccess ||
+        hipEventCreateWithFlags(&ev[1], hipEventDisableTiming) != hipSuccess) {
+      Fail(std::string("upload pipeline setup failed (") + label + ")");
+      for (auto* p : raw) {
+        hipHostFree(p);
+      }
+      return false;
+    }
+    auto direct = platform::ReopenUnbuffered(regions[t.shard].file_descriptor);
+    const auto& region = regions[t.shard];
+    const unsigned workers = std::max(
+        1u, std::min(8u, std::thread::hardware_concurrency() / 2));
+    bool run_ok = true;
+    for (std::size_t first = 0; first < blocks && run_ok; first += slot_blocks) {
+      const std::size_t n = std::min(slot_blocks, blocks - first);
+      const int i = static_cast<int>((first / slot_blocks) & 1U);
+      const std::uint64_t abs = t.file_offset + first * in_block;
+      const std::uint64_t begin = abs & ~(kUploadAlign - 1);
+      const std::size_t skip = static_cast<std::size_t>(abs - begin);
+      const std::size_t want = skip + n * in_block;
+      if (begin + want > region.size) {
+        Fail(std::string("tensor range runs past its shard (") + label + ")");
+        break;
+      }
+      if (hipEventSynchronize(ev[i]) != hipSuccess) {
+        Fail(std::string("upload pipeline sync failed (") + label + ")");
+        break;
+      }
+      const std::size_t aligned_len =
+          (want + kUploadAlign - 1) & ~(kUploadAlign - 1);
+      if (!ReadUnbuffered(direct, t.shard, begin, want,
+                          std::min(aligned_len, region.size - begin),
+                          in_slot(i))) {
+        run_ok = false;
+        break;
+      }
+      const auto convert_range = [&](std::size_t lo, std::size_t hi) {
+        convert(out_slot(i), in_slot(i) + skip, lo, hi);
+      };
+      std::vector<std::thread> pool;
+      const std::size_t per = (n + workers - 1) / workers;
+      for (unsigned w = 0; w < workers; ++w) {
+        const std::size_t lo = w * per;
+        if (lo < n) {
+          pool.emplace_back(convert_range, lo, std::min(n, lo + per));
+        }
+      }
+      for (auto& thread : pool) {
+        thread.join();
+      }
+      if (hipMemcpyAsync(static_cast<std::uint8_t*>(device) + first * out_block,
+                         out_slot(i), n * out_block, hipMemcpyHostToDevice,
+                         stream) != hipSuccess) {
+        Fail(std::string("upload failed (") + label + ")");
+        run_ok = false;
+        break;
+      }
+      hipEventRecord(ev[i], stream);
+    }
+    if (hipStreamSynchronize(stream) != hipSuccess && run_ok) {
+      Fail(std::string("upload pipeline drain failed (") + label + ")");
+      run_ok = false;
+    }
+    if (platform::FileValid(direct)) {
+      platform::CloseFile(direct);
+    }
+    for (auto* p : raw) {
+      hipHostFree(p);
+    }
+    (void)hipStreamDestroy(stream);
+    for (auto* e : ev) {
+      (void)hipEventDestroy(e);
+    }
+    return run_ok;
   }
 
   DeviceTensor Copy(const TensorRef& t) {
@@ -165,10 +342,13 @@ struct Uploader {
     }
     allocations.push_back(f32);
     bytes += count * sizeof(float) + kTailMargin;
-    std::vector<float> host(count);
-    WidenBF16(static_cast<const std::uint16_t*>(t.data), host.data(), count);
-    if (hipMemcpy(f32, host.data(), count * sizeof(float),
-                  hipMemcpyHostToDevice) != hipSuccess ||
+    if (!StreamTransform(
+            t, 2, 4, count, f32, "widened BF16",
+            [](std::uint8_t* out, const std::uint8_t* in, std::size_t begin,
+               std::size_t end) {
+              WidenBF16(reinterpret_cast<const std::uint16_t*>(in) + begin,
+                        reinterpret_cast<float*>(out) + begin, end - begin);
+            }) ||
         hipMemset(static_cast<std::uint8_t*>(f32) + count * sizeof(float), 0,
                   kTailMargin) != hipSuccess) {
       Fail("upload failed for " + std::string(t.name));
@@ -222,48 +402,108 @@ struct Uploader {
     }
     allocations.push_back(ptr);
     bytes += size + kTailMargin;
-    const auto* source = static_cast<const std::uint8_t*>(t.data);
-    constexpr std::size_t kChunk = std::size_t{1} << 20;  // blocks per upload
-    std::vector<std::uint8_t> staging(std::min(blocks, kChunk) * kOut);
-    const unsigned workers =
-        std::max(1u, std::min(16u, std::thread::hardware_concurrency() / 2));
-    for (std::size_t first = 0; first < blocks; first += kChunk) {
-      const std::size_t n = std::min(kChunk, blocks - first);
-      const auto convert = [&](std::size_t begin, std::size_t end) {
-        for (std::size_t i = begin; i < end; ++i) {
-          const std::uint8_t* in = source + (first + i) * kIn;
-          std::uint8_t* out = staging.data() + i * kOut;
-          _Float16 scale;
-          std::memcpy(&scale, in, 2);
-          const auto minimum =
-              static_cast<_Float16>(-16.0f * static_cast<float>(scale));
-          std::memcpy(out, in, 2);            // d
-          std::memcpy(out + 2, &minimum, 2);  // m = -16 d
-          std::memcpy(out + 4, in + 2, 20);   // qh (4 bytes) and qs (16 bytes)
-        }
-      };
-      std::vector<std::thread> pool;
-      const std::size_t per = (n + workers - 1) / workers;
-      for (unsigned w = 0; w < workers; ++w) {
-        const std::size_t begin = w * per;
-        if (begin < n) {
-          pool.emplace_back(convert, begin, std::min(n, begin + per));
-        }
-      }
-      for (auto& thread : pool) {
-        thread.join();
-      }
-      if (hipMemcpy(static_cast<std::uint8_t*>(ptr) + first * kOut,
-                    staging.data(), n * kOut,
-                    hipMemcpyHostToDevice) != hipSuccess) {
-        Fail("upload failed for " + std::string(t.name) + " (Q5_0 as Q5_1)");
-        return d;
-      }
+    if (!StreamTransform(
+            t, kIn, kOut, blocks, ptr, "Q5_0 as Q5_1",
+            [](std::uint8_t* out, const std::uint8_t* source,
+               std::size_t begin, std::size_t end) {
+              for (std::size_t i = begin; i < end; ++i) {
+                const std::uint8_t* in = source + i * kIn;
+                std::uint8_t* dst = out + i * kOut;
+                _Float16 scale;
+                std::memcpy(&scale, in, 2);
+                const auto minimum =
+                    static_cast<_Float16>(-16.0f * static_cast<float>(scale));
+                std::memcpy(dst, in, 2);            // d
+                std::memcpy(dst + 2, &minimum, 2);  // m = -16 d
+                std::memcpy(dst + 4, in + 2,
+                            20);  // qh (4 bytes) and qs (16 bytes)
+              }
+            })) {
+      return d;
     }
     (void)hipMemsetAsync(static_cast<std::uint8_t*>(ptr) + size, 0, kTailMargin,
                          nullptr);
     d.data = ptr;
     d.type = core::GgmlType::kQ5_1;
+    d.cols = static_cast<std::uint32_t>(t.cols);
+    d.rows = static_cast<std::uint32_t>(t.rows);
+    d.experts = static_cast<std::uint32_t>(t.experts);
+    return d;
+  }
+
+  /// IQ4_XS gate/up experts re-laid out as paired nibble blocks while
+  /// uploading: eight F16 scales d * (ls - 32) where the sub-block scales
+  /// were, then the nibble stream unchanged at byte 16. The layout is
+  /// Q4_K's shape - 144 bytes, codes from the second chunk - so the paired
+  /// wide-tile kernel reads it with only its header decode swapped, and the
+  /// F16 decode paths read the folded scale directly. Costs 144/136 of the
+  /// tensor's bytes; quality is untouched (the scales are the products the
+  /// F32 path computed on the fly).
+  DeviceTensor CopyIQ4XSPaired(const TensorRef& t) {
+    if (t.type != core::GgmlType::kIQ4_XS) {
+      return Copy(t);
+    }
+    DeviceTensor d;
+    if (t.empty() || !ok) {
+      return d;
+    }
+    constexpr std::size_t kIn = 136, kOut = 144;
+    const std::size_t blocks = t.SizeBytes() / kIn;
+    const std::size_t size = blocks * kOut;
+    void* ptr = nullptr;
+    if (Allocate(&ptr, size + kTailMargin) != hipSuccess) {
+      Fail("device allocation failed for " + std::string(t.name) +
+           " (IQ4_XS paired)");
+      return d;
+    }
+    if (Measuring()) {
+      return d;
+    }
+    allocations.push_back(ptr);
+    bytes += size + kTailMargin;
+    if (!StreamTransform(
+            t, kIn, kOut, blocks, ptr, "IQ4_XS paired",
+            [](std::uint8_t* out, const std::uint8_t* source,
+               std::size_t begin, std::size_t end) {
+              for (std::size_t i = begin; i < end; ++i) {
+                const std::uint8_t* in = source + i * kIn;
+                std::uint8_t* dst = out + i * kOut;
+                _Float16 scale;
+                std::memcpy(&scale, in, 2);
+                const std::uint32_t scales_h = in[2] | (in[3] << 8);
+                _Float16 folded[8];
+                for (int j = 0; j < 8; ++j) {
+                  const std::uint32_t low = in[4 + (j / 2)] >> (4 * (j & 1));
+                  const std::uint32_t high = (scales_h >> (2 * j)) & 3U;
+                  const int ls = static_cast<int>((low & 0xFU) | (high << 4U));
+                  folded[j] = __float2half_rn(static_cast<float>(scale) *
+                                              static_cast<float>(ls - 32));
+                }
+                std::memcpy(dst, folded, sizeof(folded));
+                // Re-order the nibble stream into Q4_K's shape: the two
+                // blocks of a 64-weight pair share every byte (low nibbles
+                // even block, high nibbles odd block), which is what the
+                // paired wide kernel's nibble extraction and the F16 decode
+                // paths assume.
+                const std::uint8_t* qs = in + 8;
+                for (int g = 0; g < 4; ++g) {
+                  for (int p = 0; p < 16; ++p) {
+                    const std::uint8_t a = qs[32 * g + p];    // block 2g
+                    const std::uint8_t b = qs[32 * g + 16 + p];  // block 2g+1
+                    dst[16 + 32 * g + p] = static_cast<std::uint8_t>(
+                        (a & 0x0FU) | ((b & 0x0FU) << 4));
+                    dst[16 + 32 * g + 16 + p] =
+                        static_cast<std::uint8_t>((a >> 4) | (b & 0xF0U));
+                  }
+                }
+              }
+            })) {
+      return d;
+    }
+    (void)hipMemsetAsync(static_cast<std::uint8_t*>(ptr) + size, 0, kTailMargin,
+                         nullptr);
+    d.data = ptr;
+    d.type = core::GgmlType::kIQ4_XS;  // the device layout changed, not the id
     d.cols = static_cast<std::uint32_t>(t.cols);
     d.rows = static_cast<std::uint32_t>(t.rows);
     d.experts = static_cast<std::uint32_t>(t.experts);
@@ -464,8 +704,8 @@ struct Uploader {
     d.ple_norm_conv = Copy(l.ple_norm_conv);
     d.ple_conv1d = CopyPleConv(l.ple_conv1d);
     d.router = Stack({&l.router, &l.shexp_gate_inp});
-    d.ffn_gate_exps = Copy(l.ffn_gate_exps);
-    d.ffn_up_exps = Copy(l.ffn_up_exps);
+    d.ffn_gate_exps = CopyIQ4XSPaired(l.ffn_gate_exps);
+    d.ffn_up_exps = CopyIQ4XSPaired(l.ffn_up_exps);
     d.ffn_down_exps = CopyQ5_0AsQ5_1(l.ffn_down_exps);
     d.shexp_gate = Copy(l.shexp_gate);
     d.shexp_up = Copy(l.shexp_up);
@@ -608,8 +848,9 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     std::size_t bytes = 0;
     std::size_t max_half_cols = 1;
     std::size_t max_q8_cols = 32;
-    Uploader measure{*stager, nullptr,       conversions, allocations,
-                     bytes,   max_half_cols, max_q8_cols, error_msg};
+    Uploader measure{*stager,   nullptr,       conversions, allocations,
+                     bytes,     max_half_cols, max_q8_cols, error_msg,
+                     shards};
     (void)measure.Model(w, mtp, shard_count);
     if (!measure.ok) {
       return nullptr;
@@ -619,7 +860,8 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
   const hip::WeightAllocator weights(measured);
   std::vector<Conversion> conversions;
   Uploader up{*stager,   &weights,          conversions,     m->allocations_,
-              m->bytes_, m->max_half_cols_, m->max_q8_cols_, error_msg};
+              m->bytes_, m->max_half_cols_, m->max_q8_cols_, error_msg,
+              shards};
   Uploaded uploaded = up.Model(w, mtp, shard_count);
   if (!up.ok || !stager->Finish(error_msg)) {
     return nullptr;

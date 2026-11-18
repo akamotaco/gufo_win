@@ -3050,16 +3050,27 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
 
         const block_iq4_xs * bxi = (const block_iq4_xs *) x + kbx0 + i*stride;
 
-        const int aux_q4 = get_int_b4(bxi->qs, kqsx);
-        const int2 v = get_int_from_table_16(aux_q4, kvalues_iq4nl);
-        const int k0 = 8 * (kqsx / 4) + kqsx % 4;
+        // Repacked image (device_model.cpp): a block's codes are ONE nibble
+        // half (low for the even block of the pair, high for the odd one) of
+        // 32 consecutive bytes, in element order. Each thread stages the
+        // same two int-wide tile slots as before, from two source dwords.
+        const int ib = kqsx / 4;
+        const int m  = kqsx % 4;
+        const int shift = (ib & 1) ? 4 : 0;
+        const int2 va = get_int_from_table_16(
+            (get_int_b4(bxi->qs, 8*(ib/2) + m) >> shift) & 0x0F0F0F0F,
+            kvalues_iq4nl);
+        const int2 vb = get_int_from_table_16(
+            (get_int_b4(bxi->qs, 8*(ib/2) + 4 + m) >> shift) & 0x0F0F0F0F,
+            kvalues_iq4nl);
+        const int k0 = 8 * ib + m;
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
-        x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + k0 + 0] = v.x;
-        x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + k0 + 4] = v.y;
+        x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + k0 + 0] = va.x;
+        x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + k0 + 4] = vb.x;
 #else
-        x_qs[i*(2*MMQ_TILE_NE_K + 1) + k0 + 0] = v.x;
-        x_qs[i*(2*MMQ_TILE_NE_K + 1) + k0 + 4] = v.y;
+        x_qs[i*(2*MMQ_TILE_NE_K + 1) + k0 + 0] = va.x;
+        x_qs[i*(2*MMQ_TILE_NE_K + 1) + k0 + 4] = vb.x;
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
     }
 
@@ -3074,15 +3085,14 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
 
         const block_iq4_xs * bxi = (const block_iq4_xs *) x + kbx0 + i*stride;
 
-        const float d = __half2float(bxi->d);
-
-        const int ls = ((bxi->scales_l[(threadIdx.x % 8)/2] >> (4*(threadIdx.x % 2))) & 0x0F)
-            | (((bxi->scales_h >> (2*(threadIdx.x % 8))) & 0x03) << 4);
+        // Repacked image (device_model.cpp): the sub-block scales are
+        // already d * (ls - 32) in F16.
+        const float d = __half2float(bxi->scales[threadIdx.x % 8]);
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
-        x_df[i*MMQ_MMA_TILE_X_K_Q8_0   + threadIdx.x % 8] = d * (ls - 32);
+        x_df[i*MMQ_MMA_TILE_X_K_Q8_0   + threadIdx.x % 8] = d;
 #else
-        x_df[i*(MMQ_TILE_NE_K/4) + i/4 + threadIdx.x % 8] = d * (ls - 32);
+        x_df[i*(MMQ_TILE_NE_K/4) + i/4 + threadIdx.x % 8] = d;
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
     }
 }

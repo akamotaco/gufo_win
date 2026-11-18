@@ -46,7 +46,35 @@ struct Format {
 };
 
 constexpr Format kIQ3_S{"IQ3_S", GgmlType::kIQ3_S, 256, 110};
-constexpr Format kIQ4_XS{"IQ4_XS", GgmlType::kIQ4_XS, 256, 136};
+// Repacked device layout (device_model.cpp): eight folded F16 scales + the
+// nibble stream. The oracle here mirrors that block directly; the core
+// dequantizer still reads the GGUF form.
+constexpr Format kIQ4_XS{"IQ4_XS", GgmlType::kIQ4_XS, 256, 144};
+
+constexpr float kIq4Table[16] = {-127.f, -104.f, -83.f, -65.f, -49.f, -35.f,
+                                 -22.f,  -10.f,  1.f,   13.f,  25.f,  38.f,
+                                 53.f,   69.f,   89.f,  113.f};
+
+void DequantizeIQ4XSPaired(const std::uint8_t* src, float* dst,
+                           std::size_t cols) {
+  for (std::size_t b = 0; b < cols / 256; ++b) {
+    const std::uint8_t* blk = src + b * 144;
+    // Q4_K-shaped payload: low nibbles are the even block of the pair in
+    // element order, high nibbles the odd block.
+    for (int g = 0; g < 4; ++g) {
+      __half s0, s1;
+      std::memcpy(&s0, blk + 4 * g, 2);
+      std::memcpy(&s1, blk + 4 * g + 2, 2);
+      const float f0 = __half2float(s0);
+      const float f1 = __half2float(s1);
+      for (int t = 0; t < 32; ++t) {
+        const std::uint8_t q = blk[16 + 32 * g + t];
+        dst[b * 256 + 64 * g + t] = f0 * kIq4Table[q & 15];
+        dst[b * 256 + 64 * g + 32 + t] = f1 * kIq4Table[q >> 4];
+      }
+    }
+  }
+}
 constexpr Format kIQ4_NL{"IQ4_NL", GgmlType::kIQ4_NL, 32, 18};
 
 /// Random but valid blocks: every IQ byte pattern decodes, so only the fp16
@@ -64,6 +92,18 @@ Weights MakeWeights(const Format& f, std::size_t matrices, std::size_t cols,
   for (auto& byte : w.blocks)
     byte = static_cast<std::uint8_t>(NextRandom(&seed));
   for (std::size_t b = 0; b < w.blocks.size() / f.bytes; ++b) {
+    if (f.type == GgmlType::kIQ4_XS) {
+      // Eight folded scales of either sign; random half bits would include
+      // inf and NaN patterns that no quantizer ever produces.
+      auto* hdr = w.blocks.data() + b * f.bytes;
+      for (int ib = 0; ib < 8; ++ib) {
+        const float s =
+            0.002F + 0.004F * static_cast<float>(NextRandom(&seed) % 1000) / 1000.F;
+        const __half h = __float2half_rn(((ib & 1) ? -1.0F : 1.0F) * s);
+        std::memcpy(hdr + 2 * ib, &h, sizeof(h));
+      }
+      continue;
+    }
     const float scale =
         0.002F + 0.004F * static_cast<float>(NextRandom(&seed) % 1000) / 1000.F;
     const __half d = __float2half(scale);
@@ -78,7 +118,7 @@ Weights MakeWeights(const Format& f, std::size_t matrices, std::size_t cols,
         gufo::quant::DequantizeIQ3_S(src, dst, cols);
         break;
       case GgmlType::kIQ4_XS:
-        gufo::quant::DequantizeIQ4_XS(src, dst, cols);
+        DequantizeIQ4XSPaired(src, dst, cols);
         break;
       default:
         gufo::quant::DequantizeIQ4_NL(src, dst, cols);

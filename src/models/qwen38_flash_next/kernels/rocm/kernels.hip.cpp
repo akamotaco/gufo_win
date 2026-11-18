@@ -5383,7 +5383,7 @@ __device__ __forceinline__ std::size_t RoutedF16RowBytes(std::size_t k) {
          : kType == WeightType::kQ5_K ? (k / 256) * kQ5KBlockBytes
          : kType == WeightType::kQ5_1 ? (k / 32) * sizeof(Q5_1Block)
          : kType == WeightType::kIQ4_NL ? (k / 32) * 18
-         : kType == WeightType::kIQ4_XS ? (k / 256) * 136
+         : kType == WeightType::kIQ4_XS ? (k / 256) * 144
                                       : (k / 32) * sizeof(Q8_0Block);
 }
 
@@ -5611,26 +5611,35 @@ __launch_bounds__(256) __global__
           f_dm[u] = *reinterpret_cast<const std::uint16_t*>(blk);
           qs = blk + 2;
         } else {
-          // block_iq4_xs is 136 bytes: d, scales_h, scales_l[4], then 16
-          // bytes of nibbles per 32-element sub-block.
-          const auto* sbk = f_ptr[u] + ((kb / 8) * 136);
+          // Repacked IQ4_XS (device_model.cpp): 144 bytes, eight folded F16
+          // scales, then the nibble stream in Q4_K's shape. A block's 32
+          // codes are ONE nibble half (low = even block, high = odd) of 32
+          // consecutive bytes; elements 0..15 are the region's first half.
+          const auto* sbk = f_ptr[u] + ((kb / 8) * 144);
           const int ib = kb % 8;
-          const std::uint32_t scales_h =
-              *reinterpret_cast<const std::uint16_t*>(sbk + 2);
-          const std::uint32_t scales_l = sbk[4 + (ib / 2)];
-          const int ls =
-              static_cast<int>(((scales_l >> (4 * (ib & 1))) & 0xFU) |
-                               (((scales_h >> (2 * ib)) & 3U) << 4U));
-          const float d = __half2float(__builtin_bit_cast(
-              __half, *reinterpret_cast<const std::uint16_t*>(sbk)));
-          f_dm[u] = __builtin_bit_cast(
-              std::uint16_t, __float2half_rn(d * static_cast<float>(ls - 32)));
-          qs = sbk + 8 + (16 * ib);
+          f_dm[u] = *reinterpret_cast<const std::uint16_t*>(sbk + (2 * ib));
+          const std::uint8_t* pair = sbk + 16 + (32 * (ib / 2));
+          uint4 lo16, hi16;
+          __builtin_memcpy(&lo16, pair, 16);
+          __builtin_memcpy(&hi16, pair + 16, 16);
+          const std::uint32_t shift = (ib & 1) ? 4U : 0U;
+          const auto pick = [shift](std::uint32_t v) {
+            return (v >> shift) & 0x0F0F0F0FU;
+          };
+          f_codes[u] = make_uint4(Iq4Lookup(pick(lo16.x)),
+                                  Iq4Lookup(pick(lo16.y)),
+                                  Iq4Lookup(pick(lo16.z)),
+                                  Iq4Lookup(pick(lo16.w)));
+          f_codes_hi[u] = make_uint4(Iq4Lookup(pick(hi16.x)),
+                                     Iq4Lookup(pick(hi16.y)),
+                                     Iq4Lookup(pick(hi16.z)),
+                                     Iq4Lookup(pick(hi16.w)));
+          continue;
         }
         uint4 packed;
         __builtin_memcpy(&packed, qs, 16);
-        // Low nibbles are elements 0..15, high nibbles 16..31, as Q8_0's
-        // first and second 16 codes.
+        // IQ4_NL: low nibbles are elements 0..15, high nibbles 16..31, as
+        // Q8_0's first and second 16 codes.
         f_codes[u] = make_uint4(Iq4Lookup(packed.x & 0x0F0F0F0FU),
                                 Iq4Lookup(packed.y & 0x0F0F0F0FU),
                                 Iq4Lookup(packed.z & 0x0F0F0F0FU),
@@ -6277,6 +6286,11 @@ __launch_bounds__(256) __global__
   constexpr int kTokTiles = BN / 16;
   constexpr int kRows = 64;  // output rows (gate/up pairs) per block
   constexpr bool kQ5K = kType == WeightType::kQ5_K;
+  // IQ4_XS arrives repacked (device_model.cpp): Q4_K's shape, with the
+  // header chunk holding eight folded F16 scales instead of d/dmin and the
+  // 6-bit scale pairs. Everything past the header - nibble chunks, magic,
+  // WMMAs - is Q4_K's.
+  constexpr bool kIQ4XS = kType == WeightType::kIQ4_XS;
   constexpr std::size_t kBlockBytes = kQ5K ? kQ5KBlockBytes : sizeof(Q4KBlock);
   constexpr int kActStride = BN + 1;
   constexpr int kActBytes = BK * 4 * kActStride * 16;
@@ -6382,28 +6396,37 @@ __launch_bounds__(256) __global__
       }
     }
     const int sb32 = (2 * G) + f_c;
-    // The first four scale/min bytes live in y/z; the others' low nibbles
-    // share w, their high two bits reuse those y/z bytes.
-    const unsigned shift = 8U * (static_cast<unsigned>(sb32) & 3U);
-    const std::uint32_t scale_byte = header.y >> shift;
-    const std::uint32_t min_byte = header.z >> shift;
-    std::uint32_t sc;
-    std::uint32_t mn;
-    if (sb32 < 4) {
-      sc = scale_byte & 0x3FU;
-      mn = min_byte & 0x3FU;
+    if constexpr (kIQ4XS) {
+      // The repacked header: scales 0-7 as F16 pairs in x..w. The pair is
+      // (scale, 0): the offset IQ4_XS sub-blocks carry is already folded in.
+      const std::uint32_t hw[4] = {header.x, header.y, header.z, header.w};
+      own_scale = row_live
+                      ? ((hw[sb32 >> 1] >> (16 * (sb32 & 1))) & 0xFFFFU)
+                      : 0U;
     } else {
-      const std::uint32_t packed = header.w >> shift;
-      sc = (packed & 0x0FU) | ((scale_byte & 0xC0U) >> 2U);
-      mn = ((packed >> 4U) & 0x0FU) | ((min_byte & 0xC0U) >> 2U);
+      // The first four scale/min bytes live in y/z; the others' low nibbles
+      // share w, their high two bits reuse those y/z bytes.
+      const unsigned shift = 8U * (static_cast<unsigned>(sb32) & 3U);
+      const std::uint32_t scale_byte = header.y >> shift;
+      const std::uint32_t min_byte = header.z >> shift;
+      std::uint32_t sc;
+      std::uint32_t mn;
+      if (sb32 < 4) {
+        sc = scale_byte & 0x3FU;
+        mn = min_byte & 0x3FU;
+      } else {
+        const std::uint32_t packed = header.w >> shift;
+        sc = (packed & 0x0FU) | ((scale_byte & 0xC0U) >> 2U);
+        mn = ((packed >> 4U) & 0x0FU) | ((min_byte & 0xC0U) >> 2U);
+      }
+      const __half2 dm = __builtin_bit_cast(__half2, header.x);
+      const float scale =
+          row_live ? __low2float(dm) * static_cast<float>(sc) : 0.0F;
+      const float offset =
+          row_live ? __high2float(dm) * static_cast<float>(mn) : 0.0F;
+      own_scale =
+          __builtin_bit_cast(std::uint32_t, __floats2half2_rn(scale, -offset));
     }
-    const __half2 dm = __builtin_bit_cast(__half2, header.x);
-    const float scale =
-        row_live ? __low2float(dm) * static_cast<float>(sc) : 0.0F;
-    const float offset =
-        row_live ? __high2float(dm) * static_cast<float>(mn) : 0.0F;
-    own_scale =
-        __builtin_bit_cast(std::uint32_t, __floats2half2_rn(scale, -offset));
     if constexpr (kQ5K) {
       // Bit sb32 of the 32 high-bit bytes, packed as the Q5_1 word.
       const std::uint32_t q[8] = {qh[0].x, qh[0].y, qh[0].z, qh[0].w,
@@ -6424,7 +6447,10 @@ __launch_bounds__(256) __global__
   for (int j = 0; j < kTokTiles; ++j)
     acc[j] = v8f{0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F};
 
-  const __half2 magic = __floats2half2_rn(-1024.0F, -1024.0F);
+  // IQ4_XS decodes through the value table into signed bytes, like Q8_0
+  // (magic -1152 undoes the +128); the K-quants use raw nibbles.
+  const __half2 magic = __floats2half2_rn(
+      kIQ4XS ? -1152.0F : -1024.0F, kIQ4XS ? -1152.0F : -1024.0F);
   const auto compute_stage = [&]<int G>() {
     const uint4 c = codes[G];
     const std::uint32_t words[4] = {c.x, c.y, c.z, c.w};
@@ -6442,6 +6468,10 @@ __launch_bounds__(256) __global__
 #pragma unroll
       for (int i = 0; i < 4; ++i) {
         std::uint32_t nib = (words[i] >> (4U * kb)) & 0x0F0F0F0FU;
+        if constexpr (kIQ4XS)
+          // Table value as a signed byte, then Q8_0's sign flip: the codes
+          // the staged Q8 form would have produced, byte for byte.
+          nib = Iq4Lookup(nib) ^ 0x80808080U;
         if constexpr (kQ5K)
           nib |= SpreadHighBits((high >> (4 * i)) & 0xFU);
         CodesToHalves(nib, magic, scale2, bias2, h[2 * i], h[2 * i + 1]);
@@ -7683,7 +7713,9 @@ bool RoutedGatedF16Gemm(const void* gate, const void* up, WeightType type,
   const auto kernel =
       type == WeightType::kQ4_K   ? RoutedPairF16Kernel<WeightType::kQ4_K>
       : type == WeightType::kQ5_K ? RoutedPairF16Kernel<WeightType::kQ5_K>
-                                  : nullptr;
+      : type == WeightType::kIQ4_XS
+          ? RoutedPairF16Kernel<WeightType::kIQ4_XS>
+          : nullptr;
   if (kernel == nullptr)
     return false;
   hipLaunchKernelGGL(kernel, grid, dim3(kThreads), 0, stream, gate, up, x,
