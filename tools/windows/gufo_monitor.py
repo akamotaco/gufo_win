@@ -96,13 +96,28 @@ def metrics(text):
 FIELDS = re.compile(r"(\w+)=(\S+)")
 
 
+def stamp(line):
+    """'2026-11-18 23:26:55' at the start of a log line, or None if the line is not a plain timestamp.
+
+    The whole stamp, not the clock time, is what rows are sorted by: a restarted server's older
+    .log.err can carry entries whose HH:MM:SS is later than the current session's, which used to
+    put yesterday's requests on top of the history.
+    """
+    ts = line[:19]
+    if len(line) < 20 or ts[4:5] != "-" or ts[7:8] != "-" or ts[10:11] != " " or not ts[:4].isdigit():
+        return None
+    return ts
+
+
 def recent_requests(port, count=8):
     """The last completed chat requests of this server.
 
     Which stream the http event lines land on changed with the v0.30 logging rework: the pre-v0.30
     servers wrote them to stdout (the .log file), current builds write them to stderr (.log.err).
-    Read the newest of each, merge, and drop duplicates by request id, so one monitor works
-    against any server build.
+    Read the newest of each, merge, and drop duplicates, so one monitor works against any server
+    build. The same request id (r1, r2, ...) is reused by every server session, so a row belongs
+    to the session its log file name carries (gufo-PORT-DATE-TIME) and only the two streams of
+    that one session are de-duplicated against each other.
     """
     if LOGS is None:
         return []
@@ -111,6 +126,8 @@ def recent_requests(port, count=8):
         logs = sorted(LOGS.glob(pattern % port))
         if not logs:
             continue
+        name = logs[-1].name
+        session = name[:name.index(".log")]  # gufo-PORT-DATE-TIME, shared by .log and .log.err
         with logs[-1].open("rb") as f:
             f.seek(0, 2)
             f.seek(max(0, f.tell() - 400_000))
@@ -118,17 +135,21 @@ def recent_requests(port, count=8):
         for line in reversed(lines):
             if "event=completed method=POST" not in line or "prompt_tokens=" not in line:
                 continue
+            ts = stamp(line)
+            if ts is None:
+                continue
             r = dict(FIELDS.findall(line))
             key = r.get("request")
-            if key and key in seen:
-                continue  # the other stream already carried this request
             if key:
+                key = (session, key)
+                if key in seen:
+                    continue  # the other stream of the same session already carried this request
                 seen.add(key)
             rows.append({k: r.get(k) for k in (
                 "request", "prompt_tokens", "prefill_tokens", "cached_tokens", "generated_tokens", "cache",
                 "cache_miss_reason", "queue_ms", "ttft_ms", "duration_ms", "prefill_tps", "decode_tps",
-                "acceptance_pct", "plan", "finish")} | {"time": line[11:19]})
-    rows.sort(key=lambda row: row["time"], reverse=True)
+                "acceptance_pct", "plan", "finish")} | {"time": ts[11:19], "ts": ts})
+    rows.sort(key=lambda row: row["ts"], reverse=True)
     return rows[:count]
 
 
