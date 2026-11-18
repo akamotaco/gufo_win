@@ -2191,10 +2191,14 @@ bool Executor::RouteHints(std::uint32_t n_tokens,
     }
   };
   if (WidePrefill(n_tokens)) {
-    // Prefill batches: one map of 128-token tiles serves the paired gate/up
-    // and the down projections.
+    // Prefill batches: the 128-token map serves the paired gate/up and the
+    // down projections. Gate/up formats the pair kernel does not cover
+    // (IQ4_XS) run the split GEMMs over a routed_tile_rows_ map appended
+    // behind it; both buffers reserve room for three maps.
     append(128);
     routed_wide_tiles_ = n_tiles;
+    append(routed_tile_rows_);
+    routed_n_tiles_ = n_tiles - routed_wide_tiles_;
   } else {
     append(routed_tile_rows_);
     routed_n_tiles_ = n_tiles;
@@ -3364,14 +3368,21 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
         l.ffn_gate_exps.type == GgmlType::kQ5_K     ? WeightType::kQ5_K
         : l.ffn_gate_exps.type == GgmlType::kIQ4_XS ? WeightType::kIQ4_XS
                                                     : WeightType::kQ4_K;
-    // The paired kernel covers the K-quants only, so IQ4_XS runs gate and up
-    // as two routed GEMMs over the wide (128-token) map.
+    // The paired kernel covers the K-quants only: without a paired launch
+    // the split GEMMs must use routed_tile_rows_ tiles. The 128-row wide map
+    // feeds only the paired kernel and the down projection; a narrower tile
+    // stride against its entries misreads the map and the gate GEMM fails.
+    // The n-tile map (routed_n_tiles_, routed_tile_rows_ rows) is built
+    // whenever wide is not, so non-paired prefill takes that one.
     const bool paired =
         routed_wide_tiles_ != 0 && gate_type != WeightType::kIQ4_XS;
-    const std::uint32_t split_tiles =
-        routed_wide_tiles_ != 0 ? routed_wide_tiles_ : routed_n_tiles_;
-    const std::uint32_t split_rows =
-        routed_wide_tiles_ != 0 ? 128 : routed_tile_rows_;
+    // The split maps sit alone at the buffer head without a wide map, and
+    // behind the wide map's routed_wide_tiles_ entries with one.
+    const std::int32_t* split_map =
+        routed_wide_tiles_ != 0 ? s_.routed_tiles + routed_wide_tiles_
+                                : s_.routed_tiles;
+    const std::uint32_t split_tiles = routed_n_tiles_;
+    const std::uint32_t split_rows = routed_tile_rows_;
     const bool gated_ok =
         paired
             ? RoutedGatedF16Gemm(l.ffn_gate_exps.data, l.ffn_up_exps.data,
@@ -3380,12 +3391,12 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
                                  s_.rows_token, s_.rows_slot, up_half,
                                  c.expert_ff, c.hidden_size, stream_)
             : (RoutedF16Gemm(l.ffn_gate_exps.data, gate_type, x_half,
-                             s_.routed_tiles, split_tiles, split_rows,
+                             split_map, split_tiles, split_rows,
                              s_.routed_bounds, s_.rows_token,
                              s_.rows_slot, nullptr, s_.gate_e, nullptr,
                              c.expert_ff, c.hidden_size, stream_) &&
                RoutedF16Gemm(l.ffn_up_exps.data, gate_type, x_half,
-                             s_.routed_tiles, split_tiles, split_rows,
+                             split_map, split_tiles, split_rows,
                              s_.routed_bounds, s_.rows_token,
                              s_.rows_slot, s_.gate_e, nullptr, up_half,
                              c.expert_ff, c.hidden_size, stream_));
