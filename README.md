@@ -50,6 +50,25 @@ Both are kept in history; the AtomicChat formats were not carried to v0.30's
 extension layout. The original Windows port (until October 27, 2026) is tag
 `win-old-port-20261027`.
 
+### AtomicChat on the current engine: branch `q5_k_m`
+
+Branch `q5_k_m` (from `win/gemma`, v0.35.0 + 2) carries the Flash-Next
+`AD-4.85bpw-Q5_K_M` expert mix again on the current engine: 36 layers run
+IQ4_XS gate/up with IQ4_NL down, 12 run Q5_K gate/up with Q5_0 down, and the
+Q4_1 n-gram table works. IQ4_XS blocks are repacked during upload into
+Q4_K-shaped 144-byte device blocks (eight folded F16 scales, Q4_K nibble
+order), so gate/up rides the paired 128-row WMMA kernel; IQ4_NL down tiles run
+on the wide kernel too. Every converted tensor (the repack, Q5_0 → Q5_1, BF16
+widening) streams disk → VRAM through `Uploader::StreamTransform`: unbuffered
+`ReadAt` into two pinned slots and asynchronous copies, so the mapped shard
+pages are never touched and host staging does not scale with the tensor.
+Measured on gfx1151: prefill 1,654 t/s at 12K and 1,615 t/s at 55K
+(+5.5-7.9% over the pre-optimization build); decode p50 ~50 t/s, dominated by
+draft acceptance rather than kernels. Rollback: tag `q5km-known-good-20261118`
+plus `tool\q5km_rollback.ps1`. The frozen pre-v0.30 build that served this
+model since November 5 (`gufo-atomicchat\`, tag `win-backup-20261105-pre030`)
+is retired and deleted as of November 19, 2026.
+
 > [!WARNING]
 > **Windows: raise the GPU timeout (TDR) before long runs.** Windows resets the GPU
 > when submitted work takes longer than 2 seconds (`TdrDelay`). Under long prefills
