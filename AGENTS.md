@@ -111,3 +111,20 @@ recordings before adding them.
 - PR descriptions, the changelog and the README state changes and results, not
   how the work was done.
 - Use `gh` for GitHub operations after checking `gh auth status`.
+
+## Releasing
+
+A release is one `chore(deepseek41): release X.Y.Z` commit on `main` and its tag:
+
+1. Set `version` in `extension.json`, and move `Unreleased` in `CHANGELOG.md` to
+   `## X.Y.Z (YYYY-MM-DD)`, naming the pinned Gufo revision and the extension API
+   it needs.
+2. Run the functional checks on the build at that pin and record them under
+   `Functional checks` in [docs/VALIDATION.md](docs/VALIDATION.md).
+3. After the commit merges, tag it and push the tag:
+   `git tag -a vX.Y.Z -m X.Y.Z <commit> && git push origin vX.Y.Z`.
+   `.github/workflows/release.yml` checks the tag against `extension.json` and
+   publishes the changelog section as the GitHub release.
+
+Raise the minor version when the Gufo pin or the extension API requirement
+changes, and the patch version for fixes on the same pin.

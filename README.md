@@ -82,6 +82,19 @@ cd ds41-gufo-extension
 nix build    # ./result/bin/gufo
 ```
 
+Each release is tagged `vX.Y.Z` with its notes on the
+[releases page](https://github.com/franzmoca/ds41-gufo-extension/releases). Its
+`flake.lock` pins the Gufo revision it was validated with, so a flake can pin a
+release, and Renovate can raise the tag:
+
+```nix
+inputs.ds41.url = "github:franzmoca/ds41-gufo-extension/v0.3.0";
+# packages: ds41.packages.x86_64-linux.default
+```
+
+Leave out `inputs.ds41.inputs.gufo.follows`: overriding Gufo builds a pair the
+release was not checked with.
+
 Without Nix, with [Gufo's prerequisites](https://github.com/gufo-org/gufo#build-from-source):
 
 ```sh

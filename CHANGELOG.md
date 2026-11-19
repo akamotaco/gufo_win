@@ -5,6 +5,11 @@ Notable user-facing changes are recorded here. Versions follow `version` in
 
 ## Unreleased
 
+### Build
+
+* **releases:** each release is tagged `vX.Y.Z` and published as a GitHub
+  release with its changelog section, so a flake can pin a validated release.
+
 ## 0.3.0 (2026-11-17)
 
 Built on upstream Gufo `a27bbf98` (0.34.0 and later commits, included in 0.35.0);
