@@ -80,6 +80,12 @@ again.
 
 ## Functional checks
 
+Release 0.3.1, November 21, 2026, on streamed `UD-IQ2_XXS` with the `MXFP8` Engram,
+DSpark and the vision projector, built at Gufo `a27bbf98` and run with Gufo's runner at
+the same revision: with two sessions, the `conversation`, `tools`, `long-context`,
+`cache` (disk restart included) and `image-inputs` suites passed. The unsloth Q8_0
+DSpark drafter loads with `--cache-disk` and answers a request (#11).
+
 Release 0.3.0, November 17, 2026, on streamed `UD-IQ2_XXS` with the `MXFP8` Engram,
 DSpark and the vision projector, built at Gufo `a27bbf98` and run with Gufo's runner at
 the same revision:

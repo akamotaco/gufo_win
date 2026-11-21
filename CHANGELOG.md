@@ -3,7 +3,10 @@
 Notable user-facing changes are recorded here. Versions follow `version` in
 [extension.json](extension.json).
 
-## Unreleased
+## 0.3.1 (2026-11-21)
+
+Built on upstream Gufo `a27bbf98`, the same pin as 0.3.0; needs extension API
+0.3.3 or later.
 
 ### Fixes
 
