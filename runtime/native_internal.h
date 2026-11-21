@@ -65,7 +65,9 @@ void ds41_vocab_destroy(ds41_vocab* vocab);
 void ds41_vocab_tokenize(const ds41_vocab* vocab, const char* text,
                          ds41_tokens* tokens);
 void ds41_vocab_tokenize_rendered_chat(const ds41_vocab* vocab,
-                                       const char* text, ds41_tokens* tokens);
+                                       const char* text, ds41_tokens* tokens,
+                                       const ds41_text_span* literal = nullptr,
+                                       size_t n_literal = 0);
 char* ds41_vocab_token_text(const ds41_vocab* vocab, int token, size_t* length);
 int ds41_vocab_size(const ds41_vocab* vocab);
 int ds41_vocab_eos(const ds41_vocab* vocab);

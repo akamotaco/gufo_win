@@ -49,6 +49,14 @@ struct ChatTool {
   std::string definition_json;
 };
 
+/// A byte range of a rendered prompt that holds request text: message
+/// content, reasoning, tool schemas, call names and arguments. Its
+/// control-token spellings are text, not control tokens.
+struct ContentSpan {
+  std::size_t offset = 0;
+  std::size_t size = 0;
+};
+
 struct ChatTemplateOptions {
   // Literal encoder options; user-facing defaults are resolved below.
   bool enable_thinking{false};
@@ -73,6 +81,12 @@ struct ChatTemplateOptions {
 [[nodiscard]] std::string RenderChat(std::span<const ChatMessage> messages,
                                      std::span<const ChatTool> tools,
                                      const ChatTemplateOptions& options = {});
+/// As above; `content_spans` receives the request text's ranges in the
+/// result, in order.
+[[nodiscard]] std::string RenderChat(std::span<const ChatMessage> messages,
+                                     std::span<const ChatTool> tools,
+                                     const ChatTemplateOptions& options,
+                                     std::vector<ContentSpan>* content_spans);
 
 /// Rejects artifacts of another architecture. Prompts always render with the
 /// compiled formatter, so an embedded template other than the pinned 1017

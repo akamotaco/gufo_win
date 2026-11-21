@@ -240,8 +240,16 @@ std::vector<int> Model::EncodeChat(std::span<const ChatMessage> messages,
 std::vector<int> Model::EncodeChat(std::span<const ChatMessage> messages,
                                    std::span<const ChatTool> tools,
                                    const ChatTemplateOptions& options) const {
-  const std::string rendered = RenderChat(messages, tools, options);
-  return Tokenize(rendered, true);
+  std::vector<ContentSpan> spans;
+  const std::string rendered = RenderChat(messages, tools, options, &spans);
+  std::vector<ds41_text_span> literal;
+  literal.reserve(spans.size());
+  for (const auto& span : spans)
+    literal.push_back({span.offset, span.size});
+  ds41_tokens tokens{};
+  ds41_tokenize_rendered_chat(engine_, rendered.c_str(), &tokens,
+                              literal.data(), literal.size());
+  return TakeTokens(&tokens);
 }
 
 std::string Model::DecodeToken(int token) const {

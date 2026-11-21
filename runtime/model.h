@@ -11,6 +11,12 @@ struct ds41_tokens {
   int cap;
 };
 
+/* A byte range of a rendered chat whose control-token spellings are text. */
+struct ds41_text_span {
+  size_t offset;
+  size_t size;
+};
+
 struct ds41_engine;
 struct ds41_session;
 
@@ -193,8 +199,12 @@ const char* ds41_engine_model_name(const ds41_engine* engine);
 void ds41_tokens_free(ds41_tokens* tokens);
 void ds41_tokenize_text(ds41_engine* engine, const char* text,
                         ds41_tokens* out);
+/* Control-token spellings become their tokens, except where they overlap
+ * one of `literal` (ordered byte ranges of `text`), which stays text. */
 void ds41_tokenize_rendered_chat(ds41_engine* engine, const char* text,
-                                 ds41_tokens* out);
+                                 ds41_tokens* out,
+                                 const ds41_text_span* literal = nullptr,
+                                 size_t n_literal = 0);
 char* ds41_token_text(ds41_engine* engine, int token, size_t* length);
 int ds41_token_eos(const ds41_engine* engine);
 bool ds41_token_is_stop(const ds41_engine* engine, int token);

@@ -5,6 +5,17 @@ Notable user-facing changes are recorded here. Versions follow `version` in
 
 ## Unreleased
 
+### Fixes
+
+* **tokenization:** control-token spellings in request text stay text.
+  Message content, reasoning, tool schemas, call names and arguments, and
+  tool results used to turn `</think>`, `<｜User｜>`, `<｜end▁of▁sentence｜>`
+  and the other control spellings into control tokens, so a leaked tag or a
+  file a tool returned could close a turn or a reasoning block. Prompts
+  without such spellings tokenize as before, as does `/completion` text. The
+  renderer records the request text's spans, as Gufo's `deepseek_v4_flash`
+  does.
+
 ### Build
 
 * **releases:** each release is tagged `vX.Y.Z` and published as a GitHub

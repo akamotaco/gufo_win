@@ -658,15 +658,27 @@ static void tokenize_span(const ds41_vocab *vocab,
 }
 
 static void tokenize_rendered_chat_vocab(const ds41_vocab *vocab, const char *text,
-                                         token_vec *out) {
+                                         token_vec *out,
+                                         const ds41_text_span *literal,
+                                         size_t n_literal) {
     if (!text) text = "";
 
     const char *span = text;
     const char *p = text;
+    size_t next = 0; /* first literal range that may reach past p */
     while (*p) {
         int token = -1;
         size_t len = 0;
         if (special_token_at(vocab, p, &token, &len)) {
+            /* Request text spells control tokens as characters. */
+            const size_t at = (size_t)(p - text);
+            while (next < n_literal &&
+                   literal[next].offset + literal[next].size <= at)
+                next++;
+            if (next < n_literal && literal[next].offset < at + len) {
+                p++;
+                continue;
+            }
             tokenize_span(vocab, span, (size_t)(p - span), out);
             token_vec_push(out, token);
             p += len;
@@ -680,8 +692,10 @@ static void tokenize_rendered_chat_vocab(const ds41_vocab *vocab, const char *te
 
 void ds41_vocab_tokenize_rendered_chat(const ds41_vocab *vocab,
                                       const char *text,
-                                      ds41_tokens *tokens) {
-    tokenize_rendered_chat_vocab(vocab, text, tokens);
+                                      ds41_tokens *tokens,
+                                      const ds41_text_span *literal,
+                                      size_t n_literal) {
+    tokenize_rendered_chat_vocab(vocab, text, tokens, literal, n_literal);
 }
 
 static uint32_t utf8_decode_one(const char *s, uint64_t len, uint64_t *pos) {
@@ -785,8 +799,11 @@ bool ds41_vocab_is_stop(const ds41_vocab *vocab, int token) {
 
 void ds41_tokenize_rendered_chat(ds41_engine *engine,
                                 const char *text,
-                                ds41_tokens *tokens) {
-    ds41_vocab_tokenize_rendered_chat(engine->vocab, text, tokens);
+                                ds41_tokens *tokens,
+                                const ds41_text_span *literal,
+                                size_t n_literal) {
+    ds41_vocab_tokenize_rendered_chat(engine->vocab, text, tokens, literal,
+                                      n_literal);
 }
 
 char *ds41_token_text(ds41_engine *engine, int token, size_t *length) {
