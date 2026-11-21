@@ -79,10 +79,29 @@ std::vector<uint8_t> RandomBlocks(const TypeCase& t, std::size_t blocks,
   return data;
 }
 
+// Device allocation that reports a failure where it happens: a case whose
+// buffers did not fit fails after this note, not as a kernel error.
+int g_failed_allocations = 0;
+
+template<typename T>
+hipError_t Alloc(T** p, std::size_t bytes) {
+  const hipError_t status = hipMalloc(p, bytes);
+  if (status != hipSuccess) {
+    *p = nullptr;
+    std::size_t free_bytes = 0, total_bytes = 0;
+    (void)hipMemGetInfo(&free_bytes, &total_bytes);
+    std::printf("device allocation of %.1f MiB failed (%s, %.2f GiB free)\n",
+                bytes / 1048576.0, hipGetErrorString(status),
+                free_bytes / 1073741824.0);
+    ++g_failed_allocations;
+  }
+  return status;
+}
+
 template<typename T>
 T* Device(const std::vector<T>& host) {
   void* p = nullptr;
-  if (hipMalloc(&p, host.size() * sizeof(T)) != hipSuccess)
+  if (Alloc(&p, host.size() * sizeof(T)) != hipSuccess)
     return nullptr;
   (void)hipMemcpy(p, host.data(), host.size() * sizeof(T),
                   hipMemcpyHostToDevice);
@@ -149,7 +168,7 @@ bool Iq2XsKnownCase() {
   auto* dids = Device(ids);
   float* dy = nullptr;
   bool ok = dw && dx && dids &&
-            hipMalloc(&dy, want.size() * sizeof(float)) == hipSuccess &&
+            Alloc(&dy, want.size() * sizeof(float)) == hipSuccess &&
             ds41_v41_gemv_experts(17, dw, kExpertBytes, dids, kSlots, dx, K, 1,
                                   dy, M, K) == 0;
   const double error =
@@ -185,8 +204,8 @@ bool DenseCase(const TypeCase& t, int M, int N, int K, std::mt19937& rng) {
   auto* dw = Device(w);
   auto* dx = Device(x);
   float *batched = nullptr, *vec = nullptr;
-  (void)hipMalloc(&batched, sizeof(float) * M * N);
-  (void)hipMalloc(&vec, sizeof(float) * M * N);
+  (void)Alloc(&batched, sizeof(float) * M * N);
+  (void)Alloc(&vec, sizeof(float) * M * N);
   bool ok = ds41_mmq_dense_typed(t.type, dw, dx, batched, M, N, K, 0) == 0;
   for (int col = 0; col < N && ok; ++col)
     ok = ds41_mmq_dense_vec_typed(
@@ -239,7 +258,7 @@ bool GemvCase(const TypeCase& t, int M, int K, int rows_per_x,
   auto* dw = Device(w);
   auto* dx = Device(x);
   float* dy = nullptr;
-  (void)hipMalloc(&dy, sizeof(float) * M);
+  (void)Alloc(&dy, sizeof(float) * M);
   bool ok = true;
   for (const int slices : {1, 2, 4, 8}) {
     double e = INFINITY;
@@ -283,10 +302,10 @@ bool GemvTokensCase(const TypeCase& t, int M, int K, int rows_per_x, int n,
   float *batched = nullptr, *single = nullptr, *batched2 = nullptr,
         *single2 = nullptr;
   const std::size_t out = static_cast<std::size_t>(M) * n;
-  (void)hipMalloc(&batched, sizeof(float) * out);
-  (void)hipMalloc(&single, sizeof(float) * out);
-  (void)hipMalloc(&batched2, sizeof(float) * out);
-  (void)hipMalloc(&single2, sizeof(float) * out);
+  (void)Alloc(&batched, sizeof(float) * out);
+  (void)Alloc(&single, sizeof(float) * out);
+  (void)Alloc(&batched2, sizeof(float) * out);
+  (void)Alloc(&single2, sizeof(float) * out);
   bool ok = true;
   const auto same = [&](const float* a, const float* b) {
     const auto ha = Host(a, out);
@@ -352,10 +371,10 @@ bool PairCase(const TypeCase& t, int M1, int M2, int N, int K,
   auto* dw2 = Device(w2);
   auto* dx = Device(x);
   float *a1 = nullptr, *a2 = nullptr, *b1 = nullptr, *b2 = nullptr;
-  (void)hipMalloc(&a1, sizeof(float) * N * M1);
-  (void)hipMalloc(&b1, sizeof(float) * N * M1);
-  (void)hipMalloc(&a2, sizeof(float) * N * M2);
-  (void)hipMalloc(&b2, sizeof(float) * N * M2);
+  (void)Alloc(&a1, sizeof(float) * N * M1);
+  (void)Alloc(&b1, sizeof(float) * N * M1);
+  (void)Alloc(&a2, sizeof(float) * N * M2);
+  (void)Alloc(&b2, sizeof(float) * N * M2);
   const bool ok = ds41_mmq_dense_pair_typed(t.type, dw1, a1, M1, dw2, a2, M2,
                                             dx, N, K, 0) == 0 &&
                   ds41_mmq_dense_typed(t.type, dw1, dx, b1, M1, N, K, 0) == 0 &&
@@ -388,8 +407,8 @@ bool GroupedCase(const TypeCase& t, int M, int N, int K, int groups,
   auto* dx = Device(x);
   const std::size_t n_out = static_cast<std::size_t>(N) * groups * M;
   float *grouped = nullptr, *single = nullptr;
-  (void)hipMalloc(&grouped, sizeof(float) * n_out);
-  (void)hipMalloc(&single, sizeof(float) * n_out);
+  (void)Alloc(&grouped, sizeof(float) * n_out);
+  (void)Alloc(&single, sizeof(float) * n_out);
   // Batches run every group as an MMQ channel and must match one batched
   // launch per group exactly; small N runs the grouped matvec.
   const bool batched = N > 8;
@@ -406,7 +425,7 @@ bool GroupedCase(const TypeCase& t, int M, int N, int K, int groups,
                   K, xg.begin() + static_cast<std::size_t>(col) * K);
     auto* dxg = Device(xg);
     float* yg = nullptr;
-    (void)hipMalloc(&yg, sizeof(float) * N * M);
+    (void)Alloc(&yg, sizeof(float) * N * M);
     ok = ds41_mmq_dense_typed(
              t.type, reinterpret_cast<const uint8_t*>(dw) + g * group_bytes,
              dxg, yg, M, N, K, 0) == 0;
@@ -458,8 +477,8 @@ bool MoeCase(const TypeCase& t, int M, int K, int n_tokens, int n_experts,
   auto* dids = Device(ids);
   const std::size_t n_out = static_cast<std::size_t>(M) * n_tokens * used;
   float *batched = nullptr, *vec = nullptr;
-  (void)hipMalloc(&batched, sizeof(float) * n_out);
-  (void)hipMalloc(&vec, sizeof(float) * n_out);
+  (void)Alloc(&batched, sizeof(float) * n_out);
+  (void)Alloc(&vec, sizeof(float) * n_out);
   bool ok = true;
   if (bounded) {
     // The decoder's launch bounds: the largest bucket and the tile width
@@ -530,7 +549,7 @@ bool MoeSwigluCase(const TypeCase& t, int M, int K, int n_tokens, int n_experts,
   float *g = nullptr, *u = nullptr, *want = nullptr, *g2 = nullptr,
         *got = nullptr;
   for (float** p : {&g, &u, &want, &g2, &got})
-    (void)hipMalloc(p, sizeof(float) * n_out);
+    (void)Alloc(p, sizeof(float) * n_out);
   ds41_mmq_set_routed_max_expert_rows(static_cast<int>(most));
   ds41_mmq_set_routed_tile_cols(
       ds41_mmq_routed_tile_cols_for_counts(counts.data(), n_experts));
@@ -591,8 +610,8 @@ bool MoeClassCase(const TypeCase& t, int M, int K, int n_tokens, int n_experts,
   auto* dids = Device(ids);
   const std::size_t n_out = static_cast<std::size_t>(M) * n_tokens * used;
   float *one = nullptr, *split = nullptr;
-  (void)hipMalloc(&one, sizeof(float) * n_out);
-  (void)hipMalloc(&split, sizeof(float) * n_out);
+  (void)Alloc(&one, sizeof(float) * n_out);
+  (void)Alloc(&split, sizeof(float) * n_out);
   (void)hipMemset(split, 0xff, sizeof(float) * n_out);
   std::vector<uint8_t> classes(n_experts);
   int widths[3], rows[3];
@@ -659,8 +678,8 @@ bool ExpertTokensCase(const TypeCase& t, int M, int K, int n,
   auto* droute = Device(route);
   const std::size_t n_out = static_cast<std::size_t>(M) * ids.size();
   float *batched = nullptr, *single = nullptr;
-  (void)hipMalloc(&batched, sizeof(float) * n_out);
-  (void)hipMalloc(&single, sizeof(float) * n_out);
+  (void)Alloc(&batched, sizeof(float) * n_out);
+  (void)Alloc(&single, sizeof(float) * n_out);
   const auto same = [&] {
     const auto a = Host(batched, n_out);
     const auto b = Host(single, n_out);
@@ -698,8 +717,8 @@ bool ExpertTokensCase(const TypeCase& t, int M, int K, int n,
   ids[1] = -1;
   auto* dgids = Device(ids);
   int32_t* dplan = nullptr;
-  (void)hipMalloc(&dplan, sizeof(int32_t) * DS41_V41_EXPERT_PLAN_INTS(
-                                                DS41_V41_EXPERT_PLAN_SLOTS));
+  (void)Alloc(&dplan, sizeof(int32_t) * DS41_V41_EXPERT_PLAN_INTS(
+                                            DS41_V41_EXPERT_PLAN_SLOTS));
   const uint32_t slots = (uint32_t)ids.size();
   ok = ds41_v41_expert_plan(dgids, slots, dplan) == 0 &&
        ds41_v41_gemv_experts_grouped(t.type, dg, nullptr, nullptr, 0.0f,
@@ -770,8 +789,8 @@ bool ExpertGemvCase(const TypeCase& t, int M, int K, bool per_slot,
   auto* dlive = Device(live);
   const std::size_t n_out = static_cast<std::size_t>(M) * kSlots;
   float *got = nullptr, *want = nullptr;
-  (void)hipMalloc(&got, sizeof(float) * n_out);
-  (void)hipMalloc(&want, sizeof(float) * n_out);
+  (void)Alloc(&got, sizeof(float) * n_out);
+  (void)Alloc(&want, sizeof(float) * n_out);
   bool ok = ds41_v41_gemv_experts(t.type, dw, expert_bytes, dids, kSlots, dx,
                                   per_slot ? K : 0, 1, got, M, K) == 0;
   ok =
@@ -828,9 +847,9 @@ bool SwigluCase(const TypeCase& t, int M, int K, std::mt19937& rng) {
   auto* droute = Device(route);
   const std::size_t n_out = static_cast<std::size_t>(M) * slots;
   float *g = nullptr, *u = nullptr, *y = nullptr;
-  (void)hipMalloc(&g, sizeof(float) * n_out);
-  (void)hipMalloc(&u, sizeof(float) * n_out);
-  (void)hipMalloc(&y, sizeof(float) * n_out);
+  (void)Alloc(&g, sizeof(float) * n_out);
+  (void)Alloc(&u, sizeof(float) * n_out);
+  (void)Alloc(&y, sizeof(float) * n_out);
   bool ok;
   if (experts) {
     ok = ds41_v41_gemv_experts(t.type, dg, expert_bytes, dids, slots, dx, 0, 1,
@@ -881,8 +900,8 @@ bool DenseF16Case(const TypeCase& t, int M, int N, int K, int groups,
   auto* dx = Device(x);
   const std::size_t n_out = static_cast<std::size_t>(N) * groups * M;
   float *got = nullptr, *want = nullptr;
-  (void)hipMalloc(&got, sizeof(float) * n_out);
-  (void)hipMalloc(&want, sizeof(float) * n_out);
+  (void)Alloc(&got, sizeof(float) * n_out);
+  (void)Alloc(&want, sizeof(float) * n_out);
   const std::size_t matrix_bytes =
       static_cast<std::size_t>(M) * K / t.block_values * t.block_bytes;
   bool ok = ds41_v41_dense_f16(t.type, dw, dx, got, M, N, K, groups, 0) == 0;
@@ -892,9 +911,9 @@ bool DenseF16Case(const TypeCase& t, int M, int N, int K, int groups,
   if (ok) {
     uint16_t *x16 = nullptr, *y16 = nullptr;
     float* y = nullptr;
-    (void)hipMalloc(&x16, sizeof(uint16_t) * x.size());
-    (void)hipMalloc(&y16, sizeof(uint16_t) * n_out);
-    (void)hipMalloc(&y, sizeof(float) * n_out);
+    (void)Alloc(&x16, sizeof(uint16_t) * x.size());
+    (void)Alloc(&y16, sizeof(uint16_t) * n_out);
+    (void)Alloc(&y, sizeof(float) * n_out);
     const auto ref = Host(got, n_out);
     std::vector<uint16_t> ref16(n_out);
     for (std::size_t i = 0; i < n_out; ++i)
@@ -925,8 +944,8 @@ bool DenseF16Case(const TypeCase& t, int M, int N, int K, int groups,
   if (same && groups == 1 && M >= 512) {
     const int m1 = M - 256, m2 = 256;
     float *y1 = nullptr, *y2 = nullptr;
-    (void)hipMalloc(&y1, sizeof(float) * N * m1);
-    (void)hipMalloc(&y2, sizeof(float) * N * m2);
+    (void)Alloc(&y1, sizeof(float) * N * m1);
+    (void)Alloc(&y2, sizeof(float) * N * m2);
     const auto* w2 =
         static_cast<const uint8_t*>(static_cast<void*>(dw)) +
         static_cast<std::size_t>(m1) * K / t.block_values * t.block_bytes;
@@ -1065,11 +1084,11 @@ bool RoutedF16Case(const TypeCase& t, int M, int K, int n_tokens, int n_experts,
   const std::size_t n_out = static_cast<std::size_t>(M) * rows;
   float *g = nullptr, *u = nullptr, *y = nullptr;
   uint16_t *x16 = nullptr, *y16 = nullptr;
-  (void)hipMalloc(&g, sizeof(float) * n_out);
-  (void)hipMalloc(&u, sizeof(float) * n_out);
-  (void)hipMalloc(&y, sizeof(float) * n_out);
-  (void)hipMalloc(&y16, sizeof(uint16_t) * n_out);
-  (void)hipMalloc(&x16, sizeof(uint16_t) * x.size());
+  (void)Alloc(&g, sizeof(float) * n_out);
+  (void)Alloc(&u, sizeof(float) * n_out);
+  (void)Alloc(&y, sizeof(float) * n_out);
+  (void)Alloc(&y16, sizeof(uint16_t) * n_out);
+  (void)Alloc(&x16, sizeof(uint16_t) * x.size());
   const int32_t* dbounds = dplan + rows;
   const bool planned =
       ds41_v41_routed_plan_device(dids, rows, n_experts, dplan, dplan + rows,
@@ -1226,6 +1245,12 @@ int main(int argc, char** argv) {
     ok = RoutedF16Case(t, 33, 256, 33, 16, 6, false, rng) && ok;
   }
   ds41_mmq_cleanup();
+  if (g_failed_allocations > 0)
+    std::printf(
+        "%d device allocations failed: the cases after those notes "
+        "ran out of memory (another process may hold it) and did not "
+        "measure the kernels\n",
+        g_failed_allocations);
   std::printf("%s\n", ok ? "PASS" : "FAIL");
   return ok ? 0 : 1;
 }
