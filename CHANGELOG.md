@@ -7,6 +7,11 @@ Notable user-facing changes are recorded here. Versions follow `version` in
 
 ### Fixes
 
+* **dspark:** a DSpark drafter whose tensors include types Gufo's GGUF
+  reader cannot size, such as the MXFP4 routed experts of unsloth's
+  `dspark-DeepSeek-V4.1-Flash-1017-Q8_0.gguf`, loads with `--cache-disk`.
+  It failed with "Invalid GGUF tensor shape or unsupported storage type"
+  when the disk cache fingerprinted it (#11).
 * **tokenization:** control-token spellings in request text stay text.
   Message content, reasoning, tool schemas, call names and arguments, and
   tool results used to turn `</think>`, `<｜User｜>`, `<｜end▁of▁sentence｜>`

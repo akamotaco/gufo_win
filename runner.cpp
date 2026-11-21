@@ -1127,7 +1127,8 @@ std::shared_ptr<ext::TextModelRunner> CreateDeepSeekTextRunner(
     if (disk_cache && use_dspark && support_fingerprint.empty()) {
       std::string dspark_error;
       auto dspark_reader = core::GgufReader::OpenFile(
-          options.speculative.draft_model_path, &dspark_error);
+          options.speculative.draft_model_path, &dspark_error,
+          {.allow_unsized_tensors = true});
       if (!dspark_reader) {
         set_error("Failed to open DSpark model: " + dspark_error);
         return nullptr;
