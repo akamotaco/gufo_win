@@ -95,6 +95,12 @@ public:
   [[nodiscard]] std::vector<int> EncodeChat(
       std::span<const ChatMessage> messages, std::span<const ChatTool> tools,
       const ChatTemplateOptions& options = {}) const;
+  /// As above; `stable_prefix_tokens` receives how many of the tokens a
+  /// following user turn keeps.
+  [[nodiscard]] std::vector<int> EncodeChat(
+      std::span<const ChatMessage> messages, std::span<const ChatTool> tools,
+      const ChatTemplateOptions& options,
+      std::size_t* stable_prefix_tokens) const;
   [[nodiscard]] std::string DecodeToken(int token) const;
   [[nodiscard]] bool IsStopToken(int token) const;
   [[nodiscard]] int VocabSize() const;

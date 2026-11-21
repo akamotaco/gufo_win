@@ -130,10 +130,11 @@ int CheckArtifactTemplates() {
 
 using gufo::models::deepseek_v41_flash::ContentSpan;
 
-// The control tokens the rendered-chat tokenizer reads from `text`, as its
-// scan does: a spelling that overlaps request text stays text.
-std::vector<std::string_view> Controls(std::string_view text,
-                                       std::span<const ContentSpan> spans) {
+// The control tokens the rendered-chat tokenizer reads from `text`, with
+// their offsets, as its scan does: a spelling that overlaps request text
+// stays text.
+std::vector<std::pair<std::size_t, std::string_view>> ControlsAt(
+    std::string_view text, std::span<const ContentSpan> spans) {
   static constexpr std::string_view kSpellings[] = {"<｜begin▁of▁sentence｜>",
                                                     "<｜end▁of▁sentence｜>",
                                                     "<｜User｜>",
@@ -142,7 +143,7 @@ std::vector<std::string_view> Controls(std::string_view text,
                                                     "</think>",
                                                     "｜DSML｜",
                                                     "<｜deepseek_image｜>"};
-  std::vector<std::string_view> out;
+  std::vector<std::pair<std::size_t, std::string_view>> out;
   std::size_t at = 0;
   while (at < text.size()) {
     std::string_view hit;
@@ -161,10 +162,72 @@ std::vector<std::string_view> Controls(std::string_view text,
       ++at;
       continue;
     }
-    out.push_back(hit);
+    out.emplace_back(at, hit);
     at += hit.size();
   }
   return out;
+}
+
+std::vector<std::string_view> Controls(std::string_view text,
+                                       std::span<const ContentSpan> spans) {
+  std::vector<std::string_view> out;
+  for (const auto& [at, spelling] : ControlsAt(text, spans))
+    out.push_back(spelling);
+  return out;
+}
+
+// What the renderer reports a following user turn keeps, against that turn's
+// prompt. Without a join the stable bytes are the last control-token boundary
+// at or before the first changed byte; with one, the changed byte itself, and
+// the joined text starts after the last control token before it.
+int CheckStablePrefix(std::span<const ChatMessage> messages,
+                      std::span<const ChatTool> tools,
+                      const ChatTemplateOptions& options,
+                      const std::string& name) {
+  namespace ds41 = gufo::models::deepseek_v41_flash;
+  std::vector<ContentSpan> spans;
+  ds41::StablePrefix stable;
+  const std::string text =
+      ds41::RenderChat(messages, tools, options, &spans, &stable);
+  std::vector<ChatMessage> next(messages.begin(), messages.end());
+  next.emplace_back().role = "user";
+  const std::string continued = ds41::RenderChat(next, tools, options);
+  std::size_t diverge = 0;
+  while (diverge < text.size() && diverge < continued.size() &&
+         text[diverge] == continued[diverge])
+    ++diverge;
+  // Control-token boundaries both prompts share: around the tokens before
+  // `diverge`, and `diverge` itself when both continue with a control token
+  // (or this prompt ends) there.
+  std::size_t cut = 0;    // the last one
+  std::size_t after = 0;  // the last control-token end
+  for (const auto& [at, spelling] : ControlsAt(text, spans)) {
+    if (at + spelling.size() <= diverge) {
+      cut = at + spelling.size();
+      after = cut;
+    } else if (at < diverge) {
+      cut = std::max(cut, at);
+    }
+  }
+  const auto control_at = [](const std::string& prompt, std::size_t at) {
+    return std::ranges::any_of(
+        ControlsAt(prompt, {}),
+        [&](const auto& control) { return control.first == at; });
+  };
+  if ((diverge == text.size() || control_at(text, diverge)) &&
+      control_at(continued, diverge))
+    cut = diverge;
+  const bool joined = stable.joined_from != std::string::npos;
+  const bool ok = joined
+                      ? stable.bytes == diverge && stable.joined_from == after
+                      : stable.bytes == cut;
+  if (ok)
+    return 0;
+  std::cerr << name << ": stable prefix " << stable.bytes << " joined from "
+            << (joined ? std::to_string(stable.joined_from) : "-")
+            << ", continuation diverges at " << diverge << ", control cut "
+            << cut << ", after " << after << '\n';
+  return 1;
 }
 
 bool Ordered(std::span<const ContentSpan> spans, std::size_t size) {
@@ -279,6 +342,12 @@ int main() {
                 << ": content spans cover template control tokens\n";
       ++failures;
     }
+    for (const bool preserve : {false, true}) {
+      auto variant = options;
+      variant.preserve_thinking = preserve;
+      failures += CheckStablePrefix(messages, tools, variant,
+                                    golden.member_str("name"));
+    }
     if (rendered == expected)
       continue;
     ++failures;
@@ -309,6 +378,17 @@ int main() {
       ++failures;
     } catch (const std::invalid_argument&) {
     }
+  }
+  // A final user block that ends in an image, or holds one before its text.
+  for (const std::size_t offset : {std::size_t{0}, std::size_t{5}}) {
+    std::vector<ChatMessage> messages(2);
+    messages[0].role = "user";
+    messages[0].content = "first";
+    messages[1].role = "tool";
+    messages[1].content = "seen.";
+    messages[1].image_offsets = {offset};
+    failures += CheckStablePrefix(messages, {}, ChatTemplateOptions{},
+                                  "image at " + std::to_string(offset));
   }
   std::cout << cases - failures << "/" << cases << " cases match\n";
   failures += CheckArtifactTemplates();

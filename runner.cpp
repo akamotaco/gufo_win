@@ -430,25 +430,15 @@ public:
     if (HasImages(request)) {
       return PrepareImagePrompt(request);
     }
-    auto prepared = TextModelRunner::PreparePrompt(request);
-    if (prepared) {
-      // DeepSeek joins adjacent user/tool messages into one user block.
-      // A new user turn after a discarded assistant can therefore also change
-      // the final BPE token before the generation suffix (e.g. ">\n\n").
-      // Find the exact stable frontier using the renderer/tokenizer instead
-      // of assuming the suffix alone is the only changed part of the prompt.
-      auto continuation = request;
-      continuation.messages.emplace_back(ext::ChatRole::kUser, "");
-      const auto continued = RenderAndTokenize(continuation);
-      if (continued) {
-        prepared->cache_prefix_tokens = static_cast<std::size_t>(
-            std::mismatch(prepared->tokens.begin(), prepared->tokens.end(),
-                          continued->begin(), continued->end())
-                .first -
-            prepared->tokens.begin());
-      }
+    // One tokenization, with the stable frontier: what a following user turn
+    // keeps. DeepSeek joins adjacent user/tool messages into one user block,
+    // so that turn can also change the block's final BPE token (">\n\n").
+    std::size_t stable = 0;
+    auto tokens = EncodeWithStablePrefix(request, &stable);
+    if (tokens.empty()) {
+      return std::nullopt;
     }
-    return prepared;
+    return TextPreparedPrompt{DeepSeekRunnerTokens(tokens), nullptr, stable};
   }
 
   [[nodiscard]] std::optional<std::size_t> CountPromptTokens(
@@ -939,15 +929,28 @@ private:
   }
 
   // The rendered prompt with each image placeholder expanded into its span.
+  [[nodiscard]] std::vector<int> EncodeWithStablePrefix(
+      const ChatRequest& request, std::size_t* stable) const {
+    const auto input = ConvertChat(request);
+    return model_->EncodeChat(input.messages, input.tools, input.options,
+                              stable);
+  }
+
+  // `stable` receives the rendered tokens' stable frontier.
   [[nodiscard]] std::optional<vision::Prompt> ExpandImages(
-      const ChatRequest& request, std::uint32_t max_context) const {
+      const ChatRequest& request, std::uint32_t max_context,
+      std::size_t* stable = nullptr) const {
     if (!vision_) {
       throw std::invalid_argument(
           "image input requires DeepSeek V4.1's --mmproj vision sidecar");
     }
-    const auto rendered = RenderAndTokenize(request);
-    if (!rendered) {
+    std::size_t frontier = 0;
+    const auto rendered = EncodeWithStablePrefix(request, &frontier);
+    if (rendered.empty()) {
       return std::nullopt;
+    }
+    if (stable != nullptr) {
+      *stable = frontier;
     }
     std::vector<std::shared_ptr<const std::vector<std::uint8_t>>> images;
     for (const auto& message : request.messages) {
@@ -955,31 +958,20 @@ private:
         images.push_back(image.bytes);
       }
     }
-    return vision::Expand(DeepSeekEngineTokens(*rendered), images,
-                          vision_->identity(), max_context);
+    return vision::Expand(rendered, images, vision_->identity(), max_context);
   }
 
   [[nodiscard]] std::optional<TextPreparedPrompt> PrepareImagePrompt(
       const ChatRequest& request) const {
-    auto expanded = ExpandImages(request, max_context_);
+    std::size_t stable = 0;
+    auto expanded = ExpandImages(request, max_context_, &stable);
     if (!expanded) {
       return std::nullopt;
     }
     auto prompt = std::make_shared<const vision::Prompt>(std::move(*expanded));
-    // The stable frontier as for text prompts, found among the rendered
-    // tokens and moved past the images expanded before it.
-    std::size_t cache_prefix = 0;
-    auto continuation = request;
-    continuation.messages.emplace_back(ext::ChatRole::kUser, "");
-    const auto rendered = RenderAndTokenize(request);
-    const auto continued = RenderAndTokenize(continuation);
-    if (rendered && continued) {
-      cache_prefix = prompt->Expanded(static_cast<std::size_t>(
-          std::mismatch(rendered->begin(), rendered->end(), continued->begin(),
-                        continued->end())
-              .first -
-          rendered->begin()));
-    }
+    // The stable frontier as for text prompts, moved past the images
+    // expanded before it.
+    const std::size_t cache_prefix = prompt->Expanded(stable);
     auto context = std::make_shared<DeepSeekImageContext>();
     context->cache_identity = prompt->cache_identity;
     // A prefix ending at or before an image holds only the earlier images.

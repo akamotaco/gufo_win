@@ -57,6 +57,21 @@ struct ContentSpan {
   std::size_t size = 0;
 };
 
+/// What a following user turn keeps of a rendered prompt.
+struct StablePrefix {
+  /// The prompt's bytes before the generation prompt (all of them without
+  /// one).
+  std::size_t bytes = 0;
+  /// When that turn joins the prompt's final user block, which writes
+  /// kUserJoin after the block's text: where the text before `bytes` starts,
+  /// after the last control token. Its final pretokenizer piece can change.
+  /// npos otherwise: a control token follows `bytes` either way.
+  std::size_t joined_from = std::string::npos;
+};
+
+/// Between the messages joined into one user block.
+inline constexpr std::string_view kUserJoin = "\n\n";
+
 struct ChatTemplateOptions {
   // Literal encoder options; user-facing defaults are resolved below.
   bool enable_thinking{false};
@@ -82,11 +97,12 @@ struct ChatTemplateOptions {
                                      std::span<const ChatTool> tools,
                                      const ChatTemplateOptions& options = {});
 /// As above; `content_spans` receives the request text's ranges in the
-/// result, in order.
+/// result, in order, and `stable` what a following user turn keeps.
 [[nodiscard]] std::string RenderChat(std::span<const ChatMessage> messages,
                                      std::span<const ChatTool> tools,
                                      const ChatTemplateOptions& options,
-                                     std::vector<ContentSpan>* content_spans);
+                                     std::vector<ContentSpan>* content_spans,
+                                     StablePrefix* stable = nullptr);
 
 /// Rejects artifacts of another architecture. Prompts always render with the
 /// compiled formatter, so an embedded template other than the pinned 1017

@@ -329,7 +329,8 @@ std::string RenderChat(std::span<const ChatMessage> messages,
 std::string RenderChat(std::span<const ChatMessage> messages,
                        std::span<const ChatTool> tools,
                        const ChatTemplateOptions& options,
-                       std::vector<ContentSpan>* content_spans) {
+                       std::vector<ContentSpan>* content_spans,
+                       StablePrefix* stable) {
   if (content_spans != nullptr)
     content_spans->clear();
   const auto is_system = [](std::string_view role) {
@@ -356,6 +357,7 @@ std::string RenderChat(std::span<const ChatMessage> messages,
   }
 
   std::unordered_map<std::string_view, std::size_t> tool_call_order;
+  std::size_t user_text = 0;  // after the last user block's control token
   for (std::size_t index = 0; index < messages.size(); ++index) {
     const auto& message = messages[index];
     const std::string_view role = message.role;
@@ -392,9 +394,10 @@ std::string RenderChat(std::span<const ChatMessage> messages,
                        });
       std::size_t result_index = 0;
       output.append(kUser);
+      user_text = output.size();
       for (std::size_t part = index; part < end; ++part) {
         if (part != index)
-          output.append("\n\n");
+          output.append(kUserJoin);
         if (messages[part].role == "user") {
           AppendMessageContent(output, messages[part], content_spans);
         } else {
@@ -427,6 +430,16 @@ std::string RenderChat(std::span<const ChatMessage> messages,
     }
   }
 
+  if (stable != nullptr) {
+    *stable = {.bytes = output.size()};
+    if (!messages.empty() && is_user_turn(messages.back().role)) {
+      // Image placeholders are the block's only other control tokens.
+      const auto image = output.rfind(kImagePlaceholder);
+      stable->joined_from = image != std::string::npos && image >= user_text
+                                ? image + kImagePlaceholder.size()
+                                : user_text;
+    }
+  }
   if (!messages.empty() && messages.back().role != "assistant")
     output.append(GenerationPrompt(thinking));
   return output;

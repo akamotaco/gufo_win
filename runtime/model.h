@@ -205,6 +205,9 @@ void ds41_tokenize_rendered_chat(ds41_engine* engine, const char* text,
                                  ds41_tokens* out,
                                  const ds41_text_span* literal = nullptr,
                                  size_t n_literal = 0);
+/* Where the last pretokenizer piece of plain `text` starts: appending to
+ * `text` can change only that piece. */
+size_t ds41_last_piece_start(const char* text, size_t len);
 char* ds41_token_text(ds41_engine* engine, int token, size_t* length);
 int ds41_token_eos(const ds41_engine* engine);
 bool ds41_token_is_stop(const ds41_engine* engine, int token);

@@ -240,16 +240,53 @@ std::vector<int> Model::EncodeChat(std::span<const ChatMessage> messages,
 std::vector<int> Model::EncodeChat(std::span<const ChatMessage> messages,
                                    std::span<const ChatTool> tools,
                                    const ChatTemplateOptions& options) const {
+  return EncodeChat(messages, tools, options, nullptr);
+}
+
+std::vector<int> Model::EncodeChat(std::span<const ChatMessage> messages,
+                                   std::span<const ChatTool> tools,
+                                   const ChatTemplateOptions& options,
+                                   std::size_t* stable_prefix_tokens) const {
   std::vector<ContentSpan> spans;
-  const std::string rendered = RenderChat(messages, tools, options, &spans);
-  std::vector<ds41_text_span> literal;
-  literal.reserve(spans.size());
-  for (const auto& span : spans)
-    literal.push_back({span.offset, span.size});
-  ds41_tokens tokens{};
-  ds41_tokenize_rendered_chat(engine_, rendered.c_str(), &tokens,
-                              literal.data(), literal.size());
-  return TakeTokens(&tokens);
+  StablePrefix stable;
+  const std::string rendered =
+      RenderChat(messages, tools, options, &spans, &stable);
+  // The request text's ranges from byte `from` on, counted from there.
+  const auto encode = [&](std::size_t from) {
+    std::vector<ds41_text_span> literal;
+    for (const auto& span : spans) {
+      if (span.offset >= from)
+        literal.push_back({span.offset - from, span.size});
+    }
+    ds41_tokens tokens{};
+    ds41_tokenize_rendered_chat(engine_, rendered.c_str() + from, &tokens,
+                                literal.data(), literal.size());
+    return TakeTokens(&tokens);
+  };
+  auto tokens = encode(0);
+  if (stable_prefix_tokens == nullptr)
+    return tokens;
+  // A control token follows the stable bytes, so their tokens are the
+  // prompt's less those of the generation prompt.
+  std::size_t kept =
+      tokens.size() - std::min(tokens.size(), encode(stable.bytes).size());
+  if (stable.joined_from != std::string::npos) {
+    // A joined turn appends kUserJoin to the block's text, which can change
+    // only its last piece: keep that piece's tokens up to the first change.
+    const std::string_view text = std::string_view(rendered).substr(
+        stable.joined_from, stable.bytes - stable.joined_from);
+    const auto piece =
+        text.substr(ds41_last_piece_start(text.data(), text.size()));
+    const auto alone = Tokenize(piece);
+    const auto joined = Tokenize(std::string(piece) + std::string(kUserJoin));
+    const auto same = static_cast<std::size_t>(
+        std::mismatch(alone.begin(), alone.end(), joined.begin(), joined.end())
+            .first -
+        alone.begin());
+    kept -= std::min(kept, alone.size() - same);
+  }
+  *stable_prefix_tokens = kept;
+  return tokens;
 }
 
 std::string Model::DecodeToken(int token) const {

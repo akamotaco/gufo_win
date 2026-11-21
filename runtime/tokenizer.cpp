@@ -453,6 +453,71 @@ static bool joyai_cjk_at(const char *s, uint64_t len, uint64_t pos) {
  */
 /* JoyAI/DeepSeek pre-tokenization.  The split shape matters: different pieces
  * lead to different BPE merges even when the final text bytes are identical. */
+/* The end of the piece starting at `pos`. */
+static uint64_t piece_end(const char *text, uint64_t len, uint64_t pos) {
+    const uint64_t start = pos;
+    uint8_t c = (uint8_t)text[pos];
+
+    if (ascii_digit(c)) {
+        int ndigits = 0;
+        while (pos < len && ascii_digit((uint8_t)text[pos]) && ndigits < 3) {
+            pos++;
+            ndigits++;
+        }
+    } else if (joyai_cjk_at(text, len, pos)) {
+        do {
+            pos = next_utf8_char(text, len, pos);
+        } while (pos < len && joyai_cjk_at(text, len, pos));
+    } else if (joyai_ascii_punct_symbol(c) &&
+               pos + 1 < len &&
+               ascii_alpha((uint8_t)text[pos + 1])) {
+        pos++;
+        while (pos < len && ascii_alpha((uint8_t)text[pos])) pos++;
+    } else if (joyai_letter_like_at(text, len, pos)) {
+        pos = joyai_consume_letters(text, len, pos);
+    } else if (!ascii_newline(c) &&
+               !joyai_ascii_punct_symbol(c) &&
+               pos + 1 < len &&
+               joyai_letter_like_at(text, len, pos + 1)) {
+        pos++;
+        pos = joyai_consume_letters(text, len, pos);
+    } else if (c == ' ' &&
+               pos + 1 < len &&
+               joyai_ascii_punct_symbol((uint8_t)text[pos + 1])) {
+        pos++;
+        while (pos < len && joyai_ascii_punct_symbol((uint8_t)text[pos])) pos++;
+        while (pos < len && ascii_newline((uint8_t)text[pos])) pos++;
+    } else if (joyai_ascii_punct_symbol(c)) {
+        while (pos < len && joyai_ascii_punct_symbol((uint8_t)text[pos])) pos++;
+        while (pos < len && ascii_newline((uint8_t)text[pos])) pos++;
+    } else if (ascii_space(c)) {
+        uint64_t p = pos;
+        uint64_t last_newline_end = 0;
+        while (p < len && ascii_space((uint8_t)text[p])) {
+            uint8_t sc = (uint8_t)text[p++];
+            if (ascii_newline(sc)) last_newline_end = p;
+        }
+        if (last_newline_end) {
+            pos = last_newline_end;
+        } else if (p < len && p > pos + 1 &&
+                   (joyai_letter_like_at(text, len, p) ||
+                    joyai_ascii_punct_symbol((uint8_t)text[p]))) {
+            /*
+             * JoyAI lets a single leading space join the following word or
+             * punctuation run.  For "    int", the pre-tokenizer therefore emits
+             * "   " then " int", not "    " then "int".
+             */
+            pos = p - 1;
+        } else {
+            pos = p;
+        }
+    } else {
+        pos = next_utf8_char(text, len, pos);
+    }
+    if (pos == start) pos = next_utf8_char(text, len, pos);
+    return pos;
+}
+
 static void bpe_tokenize_text(const ds41_vocab *vocab, const char *text, token_vec *out) {
     const uint64_t len = strlen(text);
     uint64_t pos = 0;
@@ -463,67 +528,8 @@ static void bpe_tokenize_text(const ds41_vocab *vocab, const char *text, token_v
     if (len >= 1024) pieces.reserve(kMemoPieces);
 
     while (pos < len) {
-        uint64_t start = pos;
-        uint8_t c = (uint8_t)text[pos];
-
-        if (ascii_digit(c)) {
-            int ndigits = 0;
-            while (pos < len && ascii_digit((uint8_t)text[pos]) && ndigits < 3) {
-                pos++;
-                ndigits++;
-            }
-        } else if (joyai_cjk_at(text, len, pos)) {
-            do {
-                pos = next_utf8_char(text, len, pos);
-            } while (pos < len && joyai_cjk_at(text, len, pos));
-        } else if (joyai_ascii_punct_symbol(c) &&
-                   pos + 1 < len &&
-                   ascii_alpha((uint8_t)text[pos + 1])) {
-            pos++;
-            while (pos < len && ascii_alpha((uint8_t)text[pos])) pos++;
-        } else if (joyai_letter_like_at(text, len, pos)) {
-            pos = joyai_consume_letters(text, len, pos);
-        } else if (!ascii_newline(c) &&
-                   !joyai_ascii_punct_symbol(c) &&
-                   pos + 1 < len &&
-                   joyai_letter_like_at(text, len, pos + 1)) {
-            pos++;
-            pos = joyai_consume_letters(text, len, pos);
-        } else if (c == ' ' &&
-                   pos + 1 < len &&
-                   joyai_ascii_punct_symbol((uint8_t)text[pos + 1])) {
-            pos++;
-            while (pos < len && joyai_ascii_punct_symbol((uint8_t)text[pos])) pos++;
-            while (pos < len && ascii_newline((uint8_t)text[pos])) pos++;
-        } else if (joyai_ascii_punct_symbol(c)) {
-            while (pos < len && joyai_ascii_punct_symbol((uint8_t)text[pos])) pos++;
-            while (pos < len && ascii_newline((uint8_t)text[pos])) pos++;
-        } else if (ascii_space(c)) {
-            uint64_t p = pos;
-            uint64_t last_newline_end = 0;
-            while (p < len && ascii_space((uint8_t)text[p])) {
-                uint8_t sc = (uint8_t)text[p++];
-                if (ascii_newline(sc)) last_newline_end = p;
-            }
-            if (last_newline_end) {
-                pos = last_newline_end;
-            } else if (p < len && p > pos + 1 &&
-                       (joyai_letter_like_at(text, len, p) ||
-                        joyai_ascii_punct_symbol((uint8_t)text[p]))) {
-                /*
-                 * JoyAI lets a single leading space join the following word or
-                 * punctuation run.  For "    int", the pre-tokenizer therefore emits
-                 * "   " then " int", not "    " then "int".
-                 */
-                pos = p - 1;
-            } else {
-                pos = p;
-            }
-        } else {
-            pos = next_utf8_char(text, len, pos);
-        }
-
-        if (pos == start) pos = next_utf8_char(text, len, pos);
+        const uint64_t start = pos;
+        pos = piece_end(text, len, pos);
         const std::string_view piece(text + start, pos - start);
         const bool memoize = len >= 1024 && piece.size() > 1 && piece.size() <= 64;
         if (memoize) {
@@ -610,6 +616,15 @@ void ds41_vocab_tokenize(const ds41_vocab *vocab,
                         const char *text,
                         ds41_tokens *tokens) {
     bpe_tokenize_text(vocab, text ? text : "", tokens);
+}
+
+size_t ds41_last_piece_start(const char *text, size_t len) {
+    uint64_t pos = 0, start = 0;
+    while (pos < len) {
+        start = pos;
+        pos = piece_end(text, len, pos);
+    }
+    return (size_t)start;
 }
 
 void ds41_tokenize_text(ds41_engine *engine,

@@ -16,6 +16,15 @@ Notable user-facing changes are recorded here. Versions follow `version` in
   renderer records the request text's spans, as Gufo's `deepseek_v4_flash`
   does.
 
+### Performance
+
+* **tokenization:** each request tokenizes its prompt once, not twice (three
+  times with images). The renderer reports the prefix a following user turn
+  keeps, as Gufo's Qwen renderer does, and only the final pretokenizer piece
+  of a user block that turn would join is tokenized again. Preparing a
+  74K-token conversation takes 14.2 ms instead of 29.8 ms (870K tokens: 164
+  instead of 340 ms), with the same tokens and cache prefix.
+
 ### Build
 
 * **releases:** each release is tagged `vX.Y.Z` and published as a GitHub
