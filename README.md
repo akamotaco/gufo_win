@@ -14,7 +14,7 @@ so `main` here is an upstream release plus what upstream does not carry:
 
 | Layer | Source | What it brings |
 | --- | --- | --- |
-| Engine and Windows build | [gufo-org/gufo](https://github.com/gufo-org/gufo) `main` (v0.35.0 + 2, November 17, 2026) | Gufo itself, the `windows-release` preset and its Windows platform code; since #1046/#1047 also every hook the Gemma 4 extension needs |
+| Engine and Windows build | [gufo-org/gufo](https://github.com/gufo-org/gufo) `main` (v0.35.0 + 46, November 22, 2026) | Gufo itself, the `windows-release` preset and its Windows platform code; since #1046/#1047 also every hook the Gemma 4 extension needs |
 | Gemma 4 engine | [franzmoca/gemma4-gufo-extension](https://github.com/franzmoca/gemma4-gufo-extension) with Windows fixes: branch [`gemma4-ext`](https://github.com/akamotaco/gufo_win/tree/gemma4-ext) of this repository, built with `-DGUFO_EXTENSION_DIRS` | Gemma 4 26B-A4B / 31B with MTP, vision and tool calls |
 | Fork-only fixes | this repository | See below |
 
@@ -47,12 +47,12 @@ Fork-only changes:
 Until v0.30 this repository merged the Gemma engine from franzmoca's `feat/gemma`
 branch and also served the AtomicChat Flash-Next mix (IQ4_XS/IQ4_NL/Q5_0 experts).
 Both are kept in history; the AtomicChat formats were not carried to v0.30's
-extension layout. The original Windows port (until October 27, 2026) is tag
+extension layout until branch `q5_k_m` (below) re-ported them in November 2026. The original Windows port (until October 27, 2026) is tag
 `win-old-port-20261027`.
 
 ### AtomicChat on the current engine: branch `q5_k_m`
 
-Branch `q5_k_m` (from `win/gemma`, v0.35.0 + 2) carries the Flash-Next
+Branch `q5_k_m` (from `win/gemma` at v0.35.0 + 2; upstream `main` v0.35.0 + 46 merged November 22) carries the Flash-Next
 `AD-4.85bpw-Q5_K_M` expert mix again on the current engine: 36 layers run
 IQ4_XS gate/up with IQ4_NL down, 12 run Q5_K gate/up with Q5_0 down, and the
 Q4_1 n-gram table works. IQ4_XS blocks are repacked during upload into
@@ -117,6 +117,18 @@ unrolling flags of the Flash-Next kernels on Windows): Gemma 4 26B 8/8 identical
 calls, images and copy test pass. Qwen3.8-Flash-Next Orca Q4Mix, 1 x 262,144: prefill
 1,651 (2.1K), 1,693 (8.5K), 1,700 (31.8K), 1,611 (160K) tok/s; decode 39.0-54.9 tok/s
 with MTP (41.0 short); tool calls, images and copy test pass.
+
+Re-checked on v0.35.0 + 46 (November 22-23; #1321 Flash-Next wave32 MoE and Q8_0 WMMA decode,
+#1265 14K-row lone prefill passes) with Gemma 4 extension 0.2.1, on branch `q5_k_m`:
+- Gemma 4 26B: 8/8 identical, tool calls, images, copy test at 439 and 75,648 tokens pass.
+  Prefill 2,824-2,976 (2.1K), 3,047-3,159 (8.5K), 2,610-2,647 (31.8K), 1,378-1,385 (160K)
+  tok/s, 5-10% below November 12 up to 31K, likely because extension 0.2 now ends each
+  prefill step at the engine's chunk so the host can schedule between chunks (not bisected).
+- Orca Q4Mix, 1 x 262,144: same draft acceptance as November 17 (identical outputs); prefill
+  1,618-1,629 / 1,652-1,657 / 1,674-1,680 / 1,590-1,594 tok/s (2.1K / 8.5K / 31.8K / 160K),
+  decode 38.5-55.3 tok/s, i.e. within about 2% of November 17: no visible gain on this setup.
+- AtomicChat Q5_K_M, 1 x 262,144: prefill 1,600-1,607 / 1,636-1,649 / 1,652-1,666 /
+  1,568-1,576 tok/s, decode 39.9-58.3 tok/s; tool calls, images and copy test pass.
 
 | Model | Sessions x context | Prompt | Prefill (tok/s) | Decode, MTP (tok/s) |
 | --- | --- | --- | ---: | ---: |
