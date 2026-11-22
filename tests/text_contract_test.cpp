@@ -95,6 +95,17 @@ void CheckBuffered() {
           "object argument as JSON");
   Require(scan.calls[1].name == "noop" && scan.calls[1].arguments.empty(),
           "call without arguments");
+  // Numbers keep the model's spelling, nested ones too.
+  const auto numbers = RunScan(
+      "<|tool_call>call:tag{id:9007199254740993,w:1.0,v:[2.50]}<tool_call|>",
+      false);
+  Require(numbers.calls.size() == 1, "number call");
+  const auto* id = Find(numbers.calls[0], "id");
+  const auto* weight = Find(numbers.calls[0], "w");
+  const auto* values = Find(numbers.calls[0], "v");
+  Require(id && id->value == "9007199254740993" && weight &&
+              weight->value == "1.0" && values && values->value == "[2.50]",
+          "number spelling");
   Require(
       scan.spans ==
           std::vector<std::pair<std::size_t, std::size_t>>{

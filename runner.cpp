@@ -209,11 +209,29 @@ public:
   [[nodiscard]] std::unique_ptr<ext::ComponentCacheResources>
   CreateComponentCacheResources(cache::ResourceLedger& ledger,
                                 std::size_t) const override {
+    return CreateCacheResources(ledger, CacheHooks());
+  }
+  // Sized from the serving slots: the cache's streams carry no copies (the
+  // adapter gathers on its own stream), so leases share sessions + 1 native
+  // streams instead of each owning one of 64.
+  [[nodiscard]] std::unique_ptr<ext::ComponentCacheResources>
+  CreateComponentCacheResourcesForSessions(cache::ResourceLedger& ledger,
+                                           std::size_t,
+                                           std::size_t sessions) const override {
+    auto hooks = CacheHooks();
+    const auto plan = hip::PlanComponentTransfers(sessions);
+    hooks.transfer_streams = plan.native_streams;
+    hooks.transfer_leases = plan.leases;
+    return CreateCacheResources(ledger, std::move(hooks));
+  }
+  [[nodiscard]] std::unique_ptr<ext::ComponentCacheResources>
+  CreateCacheResources(cache::ResourceLedger& ledger,
+                       hip::ComponentCacheHooks hooks) const {
     auto adapter = std::make_unique<ContinuationAdapter>(model_, max_context_,
                                                          component_identity_);
     auto* gemma = adapter.get();
     auto resources = hip::CreateHipComponentCacheResources(
-        std::move(adapter), ledger, CacheHooks());
+        std::move(adapter), ledger, std::move(hooks));
     // Durable captures require this hook, but the adapter lends no rows, so
     // persistence never reads a slot through it. A copy still waits for the
     // forwards that wrote its rows.
@@ -257,14 +275,15 @@ public:
                 .in_pass_checkpoint = true,
             },
         .sampling_defaults = SamplingDefaults(),
-        // Extension API 0.3 requires a profile. These are the values the host
-        // used for runners without one (512-token passes beside decoders,
-        // unsplit, one decoder per step), so scheduling is unchanged.
+        // Beside decoders, prompts keep the 512-token passes the host gave
+        // runners without a profile. The runner has no prefill yield, so a
+        // pass runs unsplit; between passes a decode step batches up to the
+        // eight sessions one forward serves.
         .scheduling =
             ext::TextSchedulingProfile{
-                .pass_tokens = 512,
+                .pass_tokens = std::min<std::size_t>(max_context_, 512),
                 .max_layer_groups = 1,
-                .max_yield_decode_width = 1,
+                .max_yield_decode_width = 8,
             },
     };
   }
@@ -292,6 +311,11 @@ public:
         .retained_snapshot_capacity_bytes = snapshot_capacity,
         .retained_snapshot_ceiling_bytes = snapshot_ceiling,
         .requires_device_runtime_lock = true,
+        // Sessions allocate their whole context up front
+        // (per_request_state_bytes), so prompts commit no further state.
+        .prompt_state_bytes_per_token = std::nullopt,
+        .prompt_admission_budget_bytes = std::nullopt,
+        .prompt_admission_available_bytes = {},
     };
   }
 
@@ -352,13 +376,19 @@ public:
     if (!rendered) {
       throw std::invalid_argument("Gemma 4 chat template: " + error);
     }
+    // Request text keeps its special-token spellings as text.
+    const auto tokenize = [&](std::size_t from) {
+      const auto tokens = model_->tokenizer().Encode(
+          std::string_view(rendered->text).substr(from), false, true,
+          rendered->content_spans, from);
+      return std::vector<TextRunnerToken>(tokens.begin(), tokens.end());
+    };
     ext::TextPreparedPrompt prepared;
-    prepared.tokens = Tokenize(rendered->text);
+    prepared.tokens = tokenize(0);
     // The stable prefix is shared by the next turn; the text after it starts
     // with a special token, so it tokenizes apart.
     if (rendered->stable_prefix_offset < rendered->text.size()) {
-      const auto suffix = Tokenize(std::string_view(rendered->text)
-                                       .substr(rendered->stable_prefix_offset));
+      const auto suffix = tokenize(rendered->stable_prefix_offset);
       if (suffix.size() < prepared.tokens.size() &&
           std::equal(suffix.begin(), suffix.end(),
                      prepared.tokens.end() -
@@ -717,14 +747,23 @@ private:
 
   // A step never ends inside an image or before its closing token: it stops
   // before the image, or takes the whole image when it starts there.
-  [[nodiscard]] static std::size_t StepEnd(
-      const State& gemma, std::span<const TextRunnerToken> prompt,
-      std::size_t offset, std::size_t max_input_tokens) {
+  [[nodiscard]] std::size_t StepEnd(const State& gemma,
+                                    std::span<const TextRunnerToken> prompt,
+                                    std::size_t offset,
+                                    std::size_t max_input_tokens) const {
     if (offset != gemma.session().Position() || offset >= prompt.size()) {
       throw std::logic_error("Gemma 4 prefill offset does not match state");
     }
-    std::size_t end =
-        offset + std::min(max_input_tokens, prompt.size() - offset);
+    // A step ends where Session::Extend ends its first chunk, so the host
+    // regains control (progress, cancellation, a new arrival) between
+    // chunks, as for a prompt alone it budgets the whole of. The forwards
+    // are those of one Extend over the prompt.
+    const std::size_t remaining = prompt.size() - offset;
+    const std::size_t chunk = model_->options().prefill_chunk;
+    if (remaining > chunk + rocm::kSplitRows) {
+      max_input_tokens = std::min(max_input_tokens, chunk);
+    }
+    std::size_t end = offset + std::min(max_input_tokens, remaining);
     if (const auto* images = gemma.images()) {
       for (const auto& image : images->images) {
         const std::size_t first = image.span.offset;

@@ -38,6 +38,16 @@ void CheckValues() {
   Require(ParseToJson("call:f{n:42,x:-1.5,e:1e-05,t:true,f:false,z:null}") ==
               R"({"n":42,"x":-1.5,"e":1e-05,"t":true,"f":false,"z":null})",
           "literals");
+  // Numbers keep the model's spelling where the host writes them as parsed.
+  {
+    std::string error;
+    const auto call = g4::ParseToolCall(
+        "call:f{id:9007199254740993,w:1.0,e:1E5,n:-0.0,l:01}", &error);
+    Require(call.has_value(), "rejected numbers: " + error);
+    Require(call->arguments.dump(gufo::json::Value::Numbers::kAsParsed) ==
+                R"({"id":9007199254740993,"w":1.0,"e":1E5,"n":-0.0,"l":1})",
+            "number spelling");
+  }
   Require(ParseToJson("call:f{a:[1,<|\"|>two<|\"|>,[]],o:{k:{deep:1}}}") ==
               R"({"a":[1,"two",[]],"o":{"k":{"deep":1}}})",
           "nested containers");

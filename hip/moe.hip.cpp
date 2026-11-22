@@ -9,6 +9,7 @@
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstdint>
 #include <stdexcept>
@@ -143,6 +144,17 @@ constexpr int kMaxExpertsPerLane = 8;  // 256 experts
 /// Row r's top `used` experts (larger logit, then lower expert) and their
 /// weights: `used` rounds of a wave argmax, then the softmax over the chosen
 /// logits. Every lane of the wave calls it.
+///
+/// A NaN logit (one NaN in the residual row makes the whole row NaN) selects
+/// as -INF, and a chosen expert drops out as NaN, which no comparison picks.
+/// Every round therefore picks an expert below `experts`, each at most once
+/// per row: an all-NaN row picks experts 0 .. used - 1 with NaN weights
+/// instead of an id past the expert table (the padding lane `experts`, or
+/// the initial 0x7FFFFFFF at 256 experts), which the routed products and
+/// `counts` would index. A +INF logit selects as the largest finite float,
+/// so the softmax splits the row's weight over its +INF experts instead of
+/// computing exp(+INF - +INF) = NaN for every weight. Rows of finite logits
+/// select as before.
 __device__ inline void TopKRow(const float* __restrict__ logits,
                                const float* __restrict__ expert_scale,
                                std::int32_t* __restrict__ ids,
@@ -156,6 +168,11 @@ __device__ inline void TopKRow(const float* __restrict__ logits,
     const std::uint32_t e = lane + kWave * i;
     v[i] = e < experts ? logits[std::size_t{r} * experts + e] * row_scale
                        : -INFINITY;
+    if (isnan(v[i])) {
+      v[i] = -INFINITY;
+    } else if (v[i] == INFINITY) {
+      v[i] = FLT_MAX;
+    }
   }
   float chosen[8];
   int chosen_id[8];
@@ -184,7 +201,7 @@ __device__ inline void TopKRow(const float* __restrict__ logits,
 #pragma unroll
     for (int i = 0; i < kMaxExpertsPerLane; ++i) {
       if (lane + kWave * i == best_id) {
-        v[i] = -INFINITY;
+        v[i] = NAN;
       }
     }
   }

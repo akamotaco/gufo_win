@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <gufo/ext/gguf_reader.hpp>
+#include <iterator>
 #include <queue>
 #include <utility>
 #include <variant>
@@ -347,7 +348,19 @@ Tokenizer::Merge Tokenizer::FindMerge(TokenId left,
 }
 
 std::vector<TokenId> Tokenizer::Encode(std::string_view text, bool add_bos,
-                                       bool parse_special) const {
+                                       bool parse_special,
+                                       std::span<const ContentSpan> literal,
+                                       std::size_t base) const {
+  // Whether `size` bytes at `at` of `text` overlap request text.
+  const auto in_literal = [&](std::size_t at, std::size_t size) {
+    at += base;
+    const auto after = std::ranges::upper_bound(
+        literal, at, {}, [](const ContentSpan& span) { return span.offset; });
+    if (after != literal.end() && after->offset < at + size)
+      return true;
+    return after != literal.begin() &&
+           std::prev(after)->offset + std::prev(after)->size > at;
+  };
   // Fragments are either raw text or an already matched special token.
   struct Fragment {
     std::string_view text;
@@ -371,17 +384,24 @@ std::vector<TokenId> Tokenizer::Encode(std::string_view text, bool add_bos,
         next.push_back(f);
         continue;
       }
+      const auto offset = static_cast<std::size_t>(f.text.data() - text.data());
       std::size_t start = 0;
+      std::size_t from = 0;
       while (true) {
-        const std::size_t match = f.text.find(needle, start);
+        const std::size_t match = f.text.find(needle, from);
         if (match == std::string_view::npos) {
           break;
+        }
+        from = match + 1;
+        if (in_literal(offset + match, needle.size())) {
+          continue;  // request text spells the token as characters
         }
         if (match > start) {
           next.push_back({f.text.substr(start, match - start), -1});
         }
         next.push_back({{}, special});
         start = match + needle.size();
+        from = start;
       }
       if (start < f.text.size()) {
         next.push_back({f.text.substr(start), -1});

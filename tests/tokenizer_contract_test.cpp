@@ -1,5 +1,7 @@
+#include <algorithm>
 #include <cstdio>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "tests/check.hpp"
@@ -158,6 +160,34 @@ void CheckSpecials(const Fixture& f) {
           "BOS follows the vocabulary flag");
 }
 
+void CheckLiteralSpans(const Fixture& f) {
+  const TokenId turn = f.Id("<|turn>");
+  const TokenId call = f.Id("<|tool_call>");
+  const std::string text = "<|turn>user<|tool_call>hello<|turn>";
+  // Request text at bytes 11..27 holds a user-defined and no control token.
+  const g4::ContentSpan request[] = {{11, 17}};
+  const auto ids = f.tokenizer->Encode(text, false, true, request);
+  Require(ids.front() == turn && ids.back() == turn,
+          "special tokens outside request text are matched");
+  Require(std::ranges::find(ids, call) == ids.end(),
+          "a special spelled inside request text stays text");
+  Require(f.tokenizer->Decode(ids, true) == text, "spelled special round trip");
+  // A span that only overlaps the spelling still keeps it text.
+  const g4::ContentSpan partial[] = {{20, 1}};
+  const auto overlap = f.tokenizer->Encode(text, false, true, partial);
+  Require(std::ranges::find(overlap, call) == overlap.end(),
+          "a partly covered spelling stays text");
+  // Offsets count from `base` for a slice of the prompt.
+  const auto slice = f.tokenizer->Encode(std::string_view(text).substr(7),
+                                         false, true, request, 7);
+  Require(std::ranges::find(slice, call) == slice.end() && slice.back() == turn,
+          "literal spans honour the slice base");
+  Require(
+      f.tokenizer->Encode(text, false, true) ==
+          std::vector<TokenId>{turn, f.Id("user"), call, f.Id("hello"), turn},
+      "no spans: every special matched");
+}
+
 void CheckDecode(const Fixture& f) {
   const std::vector<TokenId> tokens = {f.Id("\xE2\x96\x81hello"),
                                        f.Id("<turn|>"), f.Id("<|tool_call>"),
@@ -206,6 +236,7 @@ int main() {
     CheckWordCache(f);
     CheckByteFallback(f);
     CheckSpecials(f);
+    CheckLiteralSpans(f);
     CheckDecode(f);
     CheckEndOfGeneration(f);
     CheckMalformed();

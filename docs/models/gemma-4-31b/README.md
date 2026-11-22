@@ -34,9 +34,12 @@ MTP=models/gemma-4-31b/MTP/mtp-gemma-4-31B-it-Q8_0.gguf
   --mtp-model "$MTP" --context 131072
 ```
 
-Omit the speculative options for autoregressive decoding. `-d`/`--draft-tokens`
-caps the drafts per cycle (1–15, default 15), and `--draft-policy` decides how
-many a cycle verifies:
+Omit the speculative options for autoregressive decoding. A cycle drafts up
+to 15 tokens, and the draft policy decides how many it verifies. The provider
+declares 15 drafts and the calibrated policy; Gufo ignores `-d`/`--draft-tokens`,
+`--min-draft-tokens` and `--draft-policy` since
+[gufo-org/gufo#1124](https://github.com/gufo-org/gufo/pull/1124), so the other
+two policies remain for experiments in code (`ModelOptions::draft_policy`):
 
 - `calibrated` (default): a draft is verified while its estimated probability
   of acceptance is worth one more verification row and drafter step at the
@@ -46,9 +49,9 @@ many a cycle verifies:
 - `confidence`: drafting stops when the product of the drafter's raw
   confidences falls below a fixed floor (0.5 greedy; 0.3 sampled, at most four
   drafts); the previous default, tuned on the UD-Q4_K_XL drafter.
-- `fixed`: always draft up to `--draft-tokens`.
+- `fixed`: always draft up to the draft limit.
 
-`--min-draft-tokens` drafts that many before a policy may stop. The calibrated
+The calibrated
 policy learns across requests by default; `--draft-calibration request`
 restarts it with every request and prices a sampled cycle's drafts as if it
 ran alone, so a seeded sampled request replays exactly, batched or not.
@@ -58,7 +61,7 @@ emitted tokens, the policy's prices, expected tokens, per-draft signals and
 acceptance estimates, the declined proposal's gain and cost, and steady-clock
 times for drafting, verification and emission. Every verified row also gets
 its acceptance probability given the rows before it (0/1 greedy, min(1, p/q)
-sampled), so a `--draft-policy fixed --draft-tokens 15` trace labels complete
+sampled), so a trace of the `fixed` policy at 15 drafts labels complete
 chains; `gemma4_draft_replay` (tools/gemma4/draft_replay.cpp) replays them
 and live traces through the production policy. Tracing does not change
 decoding.

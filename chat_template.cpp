@@ -94,12 +94,22 @@ std::string PyFloat(double x) {
   return out + digits.substr(0, int_digits) + "." + digits.substr(int_digits);
 }
 
-std::string PyNumber(double x) {
-  // gufo::json keeps numbers as doubles; integral values print as ints.
-  if (std::isfinite(x) && std::floor(x) == x && std::fabs(x) < 9.0e15) {
-    return std::to_string(static_cast<long long>(x));
+std::string PyNumber(const Value& v) {
+  // Python reads a JSON integer token as an exact int and any other number
+  // as a float. A number Gufo parsed keeps its token; one built in C++ spells
+  // integral values up to 2^53 as integers.
+  const double x = v.as_double();
+  if (!std::isfinite(x)) {
+    return PyFloat(x);
   }
-  return PyFloat(x);
+  std::string token = v.dump(Value::Numbers::kAsParsed);
+  if (token.find_first_of(".eE") != std::string::npos) {
+    return PyFloat(x);
+  }
+  if (token.find_first_not_of("-0") == std::string::npos) {
+    return "0";
+  }
+  return token;
 }
 
 std::string PyStrRepr(const std::string& s) {
@@ -170,7 +180,7 @@ std::string PyStr(const Value& v) {
     return v.as_bool() ? "True" : "False";
   }
   if (v.is_number()) {
-    return PyNumber(v.as_double());
+    return PyNumber(v);
   }
   if (v.is_string()) {
     return v.str();
@@ -328,12 +338,28 @@ std::string StripThinking(std::string_view text) {
 // Template macros.
 // ---------------------------------------------------------------------------
 
-void FormatArgument(const Value& v, bool escape_keys, std::string* out) {
+// Appends request text and records its span; the template's own markup is
+// appended directly.
+void Lit(std::string* out, std::string_view text,
+         std::vector<ContentSpan>* spans) {
+  if (spans != nullptr && !text.empty()) {
+    if (!spans->empty() &&
+        spans->back().offset + spans->back().size == out->size()) {
+      spans->back().size += text.size();
+    } else {
+      spans->push_back({out->size(), text.size()});
+    }
+  }
+  *out += text;
+}
+
+void FormatArgument(const Value& v, bool escape_keys, std::string* out,
+                    std::vector<ContentSpan>* spans) {
   if (v.is_null()) {
     *out += "null";
   } else if (v.is_string()) {
     *out += kQ;
-    *out += v.str();
+    Lit(out, v.str(), spans);
     *out += kQ;
   } else if (v.is_bool()) {
     *out += v.as_bool() ? "true" : "false";
@@ -345,13 +371,13 @@ void FormatArgument(const Value& v, bool escape_keys, std::string* out) {
       first = false;
       if (escape_keys) {
         *out += kQ;
-        *out += *key;
+        Lit(out, *key, spans);
         *out += kQ;
       } else {
-        *out += *key;
+        Lit(out, *key, spans);
       }
       *out += ':';
-      FormatArgument(*value, escape_keys, out);
+      FormatArgument(*value, escape_keys, out, spans);
     }
     *out += '}';
   } else if (v.is_array()) {
@@ -360,21 +386,22 @@ void FormatArgument(const Value& v, bool escape_keys, std::string* out) {
     for (const auto& item : v.items()) {
       *out += first ? "" : ",";
       first = false;
-      FormatArgument(item, escape_keys, out);
+      FormatArgument(item, escape_keys, out, spans);
     }
     *out += ']';
   } else {
-    *out += PyStr(v);
+    Lit(out, PyStr(v), spans);
   }
 }
 
-void QuotedList(const Value& list, std::string* out) {
+void QuotedList(const Value& list, std::string* out,
+                std::vector<ContentSpan>* spans) {
   bool first = true;
   for (const auto& item : Iterate(list)) {
     *out += first ? "" : ",";
     first = false;
     *out += kQ;
-    *out += PyStr(item);
+    Lit(out, PyStr(item), spans);
     *out += kQ;
   }
 }
@@ -411,7 +438,7 @@ Value ShowConstants(const Value& schema) {
 }
 
 void FormatParameters(const Value& properties, bool filter_keys,
-                      std::string* out) {
+                      std::string* out, std::vector<ContentSpan>* spans) {
   static constexpr std::array<std::string_view, 5> kStandardKeys = {
       "description", "type", "properties", "required", "nullable"};
   bool found_first = false;
@@ -431,12 +458,13 @@ void FormatParameters(const Value& properties, bool filter_keys,
     };
     *out += found_first ? "," : "";
     found_first = true;
-    *out += key + ":{";
+    Lit(out, key, spans);
+    *out += ":{";
     if (const Value* description = Get(value, "description");
         Truthy(description)) {
       *out += "description:";
       *out += kQ;
-      *out += PyStr(*description);
+      Lit(out, PyStr(*description), spans);
       *out += kQ;
       add_comma = true;
     }
@@ -445,7 +473,7 @@ void FormatParameters(const Value& properties, bool filter_keys,
       if (const Value* values = Get(value, "enum"); Truthy(values)) {
         comma();
         *out += "enum:";
-        FormatArgument(*values, true, out);
+        FormatArgument(*values, true, out, spans);
       }
     } else if (type == "ARRAY") {
       const Value* items = Get(value, "items");
@@ -462,27 +490,29 @@ void FormatParameters(const Value& properties, bool filter_keys,
           if (*item_key == "properties") {
             *out += "properties:{";
             if (item_value->is_object()) {
-              FormatParameters(*item_value, false, out);
+              FormatParameters(*item_value, false, out, spans);
             }
             *out += '}';
           } else if (*item_key == "required") {
             *out += "required:[";
-            QuotedList(*item_value, out);
+            QuotedList(*item_value, out, spans);
             *out += ']';
           } else if (*item_key == "type") {
             *out += "type:";
             if (item_value->is_string()) {
-              FormatArgument(Value(ToUpper(item_value->str())), true, out);
+              FormatArgument(Value(ToUpper(item_value->str())), true, out,
+                             spans);
             } else {
               Value upper = Value::array();
               for (const auto& t : Iterate(*item_value)) {
                 upper.push_back(Value(ToUpper(PyStr(t))));
               }
-              FormatArgument(upper, true, out);
+              FormatArgument(upper, true, out, spans);
             }
           } else {
-            *out += *item_key + ":";
-            FormatArgument(*item_value, true, out);
+            Lit(out, *item_key, spans);
+            *out += ':';
+            FormatArgument(*item_value, true, out, spans);
           }
         }
         *out += '}';
@@ -497,87 +527,103 @@ void FormatParameters(const Value& properties, bool filter_keys,
       if (nested != nullptr && nested->is_object()) {
         comma();
         *out += "properties:{";
-        FormatParameters(*nested, false, out);
+        FormatParameters(*nested, false, out, spans);
         *out += '}';
       } else if (value->is_object()) {
         comma();
         *out += "properties:{";
-        FormatParameters(*value, true, out);
+        FormatParameters(*value, true, out, spans);
         *out += '}';
       }
       if (const Value* required = Get(value, "required"); Truthy(required)) {
         comma();
         *out += "required:[";
-        QuotedList(*required, out);
+        QuotedList(*required, out, spans);
         *out += ']';
       }
     }
     comma();
     *out += "type:";
     *out += kQ;
-    *out += type;
+    Lit(out, type, spans);
     *out += kQ;
     *out += '}';
   }
 }
 
-std::string FormatFunctionDeclaration(const Value& tool) {
+// The template's format_function_declaration. It starts with "declaration:"
+// and ends with '}', so the template's trim leaves it unchanged.
+void AppendFunctionDeclaration(const Value& tool, std::string* out,
+                               std::vector<ContentSpan>* spans) {
   const Value* function = Get(&tool, "function");
-  std::string out = "declaration:" + Text(Get(function, "name")) +
-                    "{description:" + std::string(kQ) +
-                    Text(Get(function, "description")) + std::string(kQ);
+  *out += "declaration:";
+  Lit(out, Text(Get(function, "name")), spans);
+  *out += "{description:";
+  *out += kQ;
+  Lit(out, Text(Get(function, "description")), spans);
+  *out += kQ;
   if (const Value* params = Get(function, "parameters"); Truthy(params)) {
-    out += ",parameters:{";
+    *out += ",parameters:{";
     if (const Value* properties = Get(params, "properties");
         Truthy(properties) && properties->is_object()) {
-      out += "properties:{";
-      FormatParameters(*properties, false, &out);
-      out += "},";
+      *out += "properties:{";
+      FormatParameters(*properties, false, out, spans);
+      *out += "},";
     }
     if (const Value* required = Get(params, "required"); Truthy(required)) {
-      out += "required:[";
-      QuotedList(*required, &out);
-      out += "],";
+      *out += "required:[";
+      QuotedList(*required, out, spans);
+      *out += "],";
     }
     if (const Value* type = Get(params, "type"); Truthy(type)) {
-      out += "type:" + std::string(kQ) + Upper(type) + std::string(kQ) + "}";
+      *out += "type:";
+      *out += kQ;
+      Lit(out, Upper(type), spans);
+      *out += kQ;
+      *out += '}';
     }
   }
   if (function != nullptr && function->is_object() &&
       function->contains("response")) {
     const Value* response = function->find("response");
-    out += ",response:{";
+    *out += ",response:{";
     if (const Value* description = Get(response, "description");
         Truthy(description)) {
-      out += "description:" + std::string(kQ) + PyStr(*description) +
-             std::string(kQ) + ",";
+      *out += "description:";
+      *out += kQ;
+      Lit(out, PyStr(*description), spans);
+      *out += kQ;
+      *out += ',';
     }
     if (Upper(Get(response, "type")) == "OBJECT") {
-      out += "type:" + std::string(kQ) + "OBJECT" + std::string(kQ) + "}";
+      *out += "type:" + std::string(kQ) + "OBJECT" + std::string(kQ) + "}";
     }
   }
-  out += '}';
-  return out;
+  *out += '}';
 }
 
-std::string ToolResponseBlock(const std::string& name, const Value& response) {
-  std::string out = "<|tool_response>";
+void AppendToolResponse(std::string_view name, const Value& response,
+                        std::string* out, std::vector<ContentSpan>* spans) {
+  *out += "<|tool_response>";
+  *out += "response:";
+  Lit(out, name, spans);
   if (response.is_object()) {
-    out += "response:" + name + "{";
+    *out += '{';
     bool first = true;
     for (const auto& [key, value] : DictSort(response)) {
-      out += first ? "" : ",";
+      *out += first ? "" : ",";
       first = false;
-      out += *key + ":";
-      FormatArgument(*value, false, &out);
+      Lit(out, *key, spans);
+      *out += ':';
+      FormatArgument(*value, false, out, spans);
     }
-    out += '}';
+    *out += '}';
   } else {
-    out += "response:" + name + "{value:";
-    FormatArgument(response, false, &out);
-    out += '}';
+    *out += "{value:";
+    FormatArgument(response, false, out, spans);
+    *out += '}';
   }
-  return out + "<tool_response|>";
+  *out += "<tool_response|>";
 }
 
 std::string_view RoleName(ChatRole role) {
@@ -728,6 +774,7 @@ std::optional<RenderedPrompt> ChatTemplate::Render(
   }
 
   std::string out = "<bos>";
+  std::vector<ContentSpan> spans;
   MessageType prev_type = MessageType::kNone;
   std::string_view prev_non_tool_role;
   std::span<const ChatMessage> loop = messages;
@@ -742,11 +789,14 @@ std::optional<RenderedPrompt> ChatTemplate::Render(
     }
     if (first_is_system) {
       // Server-authored instructions follow the client's system text.
-      out += PyTrim(messages[0].content + messages[0].framing_suffix);
+      Lit(&out, PyTrim(messages[0].content + messages[0].framing_suffix),
+          &spans);
       loop = messages.subspan(1);
     }
     for (const auto& tool : tool_data) {
-      out += "<|tool>" + PyTrim(FormatFunctionDeclaration(tool)) + "<tool|>";
+      out += "<|tool>";
+      AppendFunctionDeclaration(tool, &out, &spans);
+      out += "<tool|>";
       prev_type = MessageType::kTool;
     }
     out += "<turn|>\n";
@@ -800,20 +850,25 @@ std::optional<RenderedPrompt> ChatTemplate::Render(
         static_cast<std::ptrdiff_t>(index) > last_user ||
         (options.preserve_thinking && !message.tool_calls.empty());
     if (!message.thought.empty() && thinking_gate) {
-      out += std::string(kThoughtStart) + message.thought +
-             std::string(kThoughtEnd);
+      out += kThoughtStart;
+      Lit(&out, message.thought, &spans);
+      out += kThoughtEnd;
     }
 
     if (!message.tool_calls.empty()) {
       for (const auto& call : message.tool_calls) {
-        out += std::string(kToolCallStart) + "call:" + call.name + "{";
+        out += kToolCallStart;
+        out += "call:";
+        Lit(&out, call.name, &spans);
+        out += '{';
         const Value arguments = ArgumentsObject(call);
         bool first = true;
         for (const auto& [key, value] : DictSort(arguments)) {
           out += first ? "" : ",";
           first = false;
-          out += *key + ":";
-          FormatArgument(*value, false, &out);
+          Lit(&out, *key, &spans);
+          out += ':';
+          FormatArgument(*value, false, &out, &spans);
         }
         out += "}" + std::string(kToolCallEnd);
       }
@@ -832,7 +887,7 @@ std::optional<RenderedPrompt> ChatTemplate::Render(
           }
         }
         // The text parts form the response; its images follow it in order.
-        out += ToolResponseBlock(name, Value(follow.content));
+        AppendToolResponse(name, Value(follow.content), &out, &spans);
         for (std::size_t image = 0; image < follow.images.size(); ++image) {
           image_offsets->push_back(out.size());
           out += kImagePlaceholder;
@@ -842,27 +897,31 @@ std::optional<RenderedPrompt> ChatTemplate::Render(
       }
     }
 
-    std::string content;
+    const std::size_t content_start = out.size();
     if (!message.images.empty()) {
       // A content-part list: every text part is trimmed on its own and each
       // image renders as a placeholder. Adjacent flattened text parts form
       // one segment.
       std::size_t cursor = 0;
       for (const auto& image : message.images) {
-        content += PyTrim(std::string_view(message.content)
-                              .substr(cursor, image.offset - cursor));
-        image_offsets->push_back(out.size() + content.size());
-        content += kImagePlaceholder;
+        Lit(&out,
+            PyTrim(std::string_view(message.content)
+                       .substr(cursor, image.offset - cursor)),
+            &spans);
+        image_offsets->push_back(out.size());
+        out += kImagePlaceholder;
         cursor = image.offset;
       }
-      content += PyTrim(std::string_view(message.content).substr(cursor));
+      Lit(&out, PyTrim(std::string_view(message.content).substr(cursor)),
+          &spans);
     } else {
-      content = role == "model"
-                    ? StripThinking(message.content)
-                    : PyTrim(message.content + message.framing_suffix);
+      Lit(&out,
+          role == "model" ? StripThinking(message.content)
+                          : PyTrim(message.content + message.framing_suffix),
+          &spans);
     }
-    out += content;
-    const bool has_content = !PyTrim(content).empty();
+    const bool has_content =
+        !PyTrim(std::string_view(out).substr(content_start)).empty();
 
     std::string_view next_role;
     bool next_found = false;
@@ -905,6 +964,7 @@ std::optional<RenderedPrompt> ChatTemplate::Render(
     }
   }
   rendered.text = std::move(out);
+  rendered.content_spans = std::move(spans);
   return rendered;
 }
 

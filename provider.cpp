@@ -40,8 +40,6 @@ void gemma4_provider_register(gufo::ext::Registry& registry) {
       .speculative_defaults = {{.backend = "mtp",
                                 .max_draft_tokens = 15,
                                 .min_draft_tokens = 1,
-                                .draft_policy = "calibrated",
-                                .draft_policies = {"calibrated", "confidence",
-                                                   "fixed"}}},
+                                .draft_policy = "calibrated"}},
   });
 }

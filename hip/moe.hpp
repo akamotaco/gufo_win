@@ -49,8 +49,12 @@ void ScaleRouter(float* router, const float* scale, std::uint32_t experts,
 /// with the scale-folded router (ScaleRouter),
 /// the `used` largest logits (ties to the lower expert) in descending order
 /// in ids[r][j], and weights[r][j] = softmax over the chosen logits times
-/// expert_scale[ids[r][j]]. Every row's arithmetic is independent of the
-/// batch. Optional outputs: `counts` ([experts], zeroed by the caller)
+/// expert_scale[ids[r][j]]. A NaN logit selects as -INF, so every id is below
+/// `experts` and appears at most once per row (an all-NaN row selects experts
+/// 0 .. used - 1 with NaN weights). A +INF logit selects as the largest
+/// finite float, so its row's weight goes to its +INF experts in equal parts
+/// instead of every weight being NaN. Every row's arithmetic is independent
+/// of the batch. Optional outputs: `counts` ([experts], zeroed by the caller)
 /// accumulates assignments per expert; `groups` (rows <= kMaxGroupSlots)
 /// receives the group table the routed GEMV reads: every selected expert in
 /// increasing order with its slots (r * used + j) in increasing order.

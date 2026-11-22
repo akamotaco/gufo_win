@@ -24,6 +24,7 @@ gufo_extension_target(
   LINK_LIBRARIES
     gufo_ext_runtime
     gufo_ext_core
+    ICU::uc
     Threads::Threads
 )
 

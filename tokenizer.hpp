@@ -14,6 +14,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "chat_template.hpp"
+
 namespace gufo::core {
 class GgufReader;
 }
@@ -64,8 +66,12 @@ public:
   /// `parse_special` also matches control tokens in the text; user-defined
   /// tokens are always matched. `add_bos` follows the vocabulary flag only
   /// when requested: chat templates emit `<bos>` themselves.
-  [[nodiscard]] std::vector<TokenId> Encode(std::string_view text, bool add_bos,
-                                            bool parse_special) const;
+  /// A special token whose spelling overlaps one of `literal` stays text;
+  /// its offsets count from `base` (`text` begins at byte `base` of the
+  /// rendered prompt) and are in order.
+  [[nodiscard]] std::vector<TokenId> Encode(
+      std::string_view text, bool add_bos, bool parse_special,
+      std::span<const ContentSpan> literal = {}, std::size_t base = 0) const;
 
   /// Text of one token. Control and unknown tokens render only with
   /// `special`; user-defined tokens always render; byte tokens yield one raw

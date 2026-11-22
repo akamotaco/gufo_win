@@ -10,9 +10,13 @@ namespace {
 
 void AddArguments(const json::Value& arguments,
                   std::vector<ext::ScannedToolArgument>* out) {
+  // Non-string values keep the model's number spelling (Gufo writes tool-call
+  // numbers as parsed).
   for (const auto& [key, value] : arguments.members()) {
     out->push_back({.name = key,
-                    .value = value.is_string() ? value.str() : value.dump(),
+                    .value = value.is_string()
+                                 ? value.str()
+                                 : value.dump(json::Value::Numbers::kAsParsed),
                     .is_string = value.is_string()});
   }
 }

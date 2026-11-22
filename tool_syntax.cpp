@@ -5,6 +5,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstddef>
+#include <exception>
 #include <utility>
 
 namespace gufo::models::gemma4 {
@@ -95,6 +96,20 @@ struct Parser {
     }
     if (raw == "null") {
       return json::Value(nullptr);
+    }
+    // A JSON number keeps the model's spelling: Gufo writes tool-call numbers
+    // as parsed, so 9007199254740993 or 1.0 replays as the tokens it was.
+    if (!raw.empty() &&
+        (raw.front() == '-' ||
+         std::isdigit(static_cast<unsigned char>(raw.front())) != 0)) {
+      try {
+        json::Value parsed = json::parse(raw);
+        if (parsed.is_number()) {
+          return parsed;
+        }
+      } catch (const std::exception&) {
+        // Outside JSON's number grammar (such as 01 or 1.): read it below.
+      }
     }
     double number = 0.0;
     const auto [end, ec] =

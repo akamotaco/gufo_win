@@ -30,8 +30,18 @@ struct ChatOptions {
 /// enables thinking when it was not set explicitly.
 [[nodiscard]] ChatOptions ResolveChatOptions(const ReasoningOptions& reasoning);
 
+/// A byte range of a rendered prompt that holds request text: message
+/// content, thoughts, tool declarations, call names and arguments, and tool
+/// responses. Its special-token spellings are text, not special tokens.
+struct ContentSpan {
+  std::size_t offset{0};
+  std::size_t size{0};
+};
+
 struct RenderedPrompt {
   std::string text;
+  /// The request text's ranges in `text`, in order.
+  std::vector<ContentSpan> content_spans;
   /// Byte offset where the generation prompt starts; equals text.size()
   /// without one. Everything before it is the stable conversation prefix.
   std::size_t generation_prompt_offset{0};

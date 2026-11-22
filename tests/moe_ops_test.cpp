@@ -17,6 +17,7 @@
 #include <gufo/ext/experimental/ggml_dequant.hpp>
 #include <gufo/ext/experimental/hip_utils.hpp>
 #include <iostream>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <string>
@@ -313,6 +314,292 @@ void CheckRouting(std::mt19937& rng) {
   HIP_CHECK(hipFree(d_scale));
   HIP_CHECK(hipFree(d_es));
   HIP_CHECK(hipFree(d_x));
+}
+
+/// Whether the group table lists every slot of `ids` ([slots]) once, under
+/// its expert, with the experts below `experts` in increasing order.
+bool GroupsCoverSlots(const std::vector<std::int32_t>& groups,
+                      const std::vector<std::int32_t>& ids,
+                      std::uint32_t experts) {
+  std::vector<int> listed(ids.size(), 0);
+  std::int32_t previous = -1;
+  for (std::int32_t g = 0; g < groups[0]; ++g) {
+    const std::int32_t* group = &groups[1 + g * g4k::kGroupInts];
+    if (group[0] <= previous ||
+        group[0] >= static_cast<std::int32_t>(experts)) {
+      return false;
+    }
+    previous = group[0];
+    for (std::int32_t i = 0; i < group[1]; ++i) {
+      const std::int32_t slot = group[2 + i];
+      if (slot < 0 || static_cast<std::size_t>(slot) >= ids.size() ||
+          ids[slot] != group[0]) {
+        return false;
+      }
+      ++listed[slot];
+    }
+  }
+  return std::all_of(listed.begin(), listed.end(),
+                     [](int n) { return n == 1; });
+}
+
+/// Routing of rows with NaN logits (one NaN in a residual row makes all of
+/// its logits NaN): every id stays below the expert count and appears at
+/// most once per row, so the routed products, the counts and the group table
+/// index only real experts. A NaN logit selects as -INF: an all-NaN row
+/// takes experts 0 .. kUsed - 1 with NaN weights, a row with fewer finite
+/// logits than kUsed fills up with the lowest experts not chosen yet at
+/// weight 0, and the finite logits select as without the NaNs.
+void CheckNanRouting(std::mt19937& rng) {
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  // The selection on given logits (the prefill form, here without a row
+  // scale) at the model's 128 experts and the kernel's limit of 256.
+  for (const std::uint32_t experts : {kExperts, 256U}) {
+    constexpr std::uint32_t kRows = 4;
+    auto logits = Normal(std::size_t{kRows} * experts, 1.0F, rng);
+    auto expert_scale = Normal(experts, 0.01F, rng);
+    for (float& s : expert_scale) {
+      s += 1.0F;
+    }
+    // Row 0: every logit NaN. Row 1: three finite logits. Row 2: every
+    // other logit NaN. Row 3: none.
+    const std::vector<std::uint32_t> finite = {5, 77, experts - 1};
+    for (std::uint32_t e = 0; e < experts; ++e) {
+      logits[e] = nan;
+      if (std::find(finite.begin(), finite.end(), e) == finite.end()) {
+        logits[std::size_t{experts} + e] = nan;
+      }
+      if (e % 2 == 0) {
+        logits[std::size_t{2} * experts + e] = nan;
+      }
+    }
+    float* d_logits = Device(logits.data(), logits.size());
+    float* d_es = Device(expert_scale.data(), expert_scale.size());
+    // Counts with a guard past the experts that must stay zero.
+    constexpr std::uint32_t kGuard = 32;
+    const std::vector<std::uint32_t> zero(experts + kGuard, 0);
+    std::uint32_t* d_counts = Device(zero.data(), zero.size());
+    std::int32_t* ids = nullptr;
+    float* weights = nullptr;
+    std::int32_t* groups = nullptr;
+    const std::size_t group_ints = g4k::ExpertGroupInts(experts);
+    HIP_CHECK(hipMalloc(&ids, kRows * kUsed * sizeof(std::int32_t)));
+    HIP_CHECK(hipMalloc(&weights, kRows * kUsed * sizeof(float)));
+    HIP_CHECK(hipMalloc(&groups, group_ints * sizeof(std::int32_t)));
+    g4k::MoeRouteArgs a{};
+    a.expert_scale = d_es;
+    a.logits = d_logits;
+    a.raw_logits = true;
+    a.ids = ids;
+    a.weights = weights;
+    a.counts = d_counts;
+    a.groups = groups;
+    a.rows = kRows;
+    a.hidden = kHidden;
+    a.experts = experts;
+    a.used = kUsed;
+    a.eps = kEps;
+    g4k::MoeRoute(a, nullptr);
+    const auto got_ids = Host(ids, kRows * kUsed);
+    const auto got_w = Host(weights, kRows * kUsed);
+    const auto counts = Host(d_counts, zero.size());
+    const auto table = Host(groups, group_ints);
+    const std::string at = " (" + std::to_string(experts) + " experts)";
+    for (std::uint32_t r = 0; r < kRows; ++r) {
+      const float* row = &logits[std::size_t{r} * experts];
+      std::vector<std::uint32_t> order;
+      for (std::uint32_t e = 0; e < experts; ++e) {
+        if (!std::isnan(row[e])) {
+          order.push_back(e);
+        }
+      }
+      std::stable_sort(order.begin(), order.end(),
+                       [&](auto x, auto y) { return row[x] > row[y]; });
+      order.resize(std::min<std::size_t>(order.size(), kUsed));
+      const std::size_t chosen = order.size();
+      for (std::uint32_t e = 0; order.size() < kUsed; ++e) {
+        if (std::find(order.begin(), order.end(), e) == order.end()) {
+          order.push_back(e);
+        }
+      }
+      double total = 0.0;
+      for (std::size_t j = 0; j < chosen; ++j) {
+        total += std::exp(double{row[order[j]]} - row[order[0]]);
+      }
+      for (std::uint32_t j = 0; j < kUsed; ++j) {
+        const std::size_t slot = std::size_t{r} * kUsed + j;
+        Require(got_ids[slot] == static_cast<std::int32_t>(order[j]),
+                "NaN routing: row " + std::to_string(r) + " slot " +
+                    std::to_string(j) + " selects expert " +
+                    std::to_string(got_ids[slot]) + at);
+        if (chosen == 0) {
+          Require(std::isnan(got_w[slot]),
+                  "NaN routing: an all-NaN row has NaN weights" + at);
+          continue;
+        }
+        const double want =
+            j < chosen ? std::exp(double{row[order[j]]} - row[order[0]]) /
+                             total * expert_scale[order[j]]
+                       : 0.0;
+        Require(std::fabs(got_w[slot] - want) < 1e-5,
+                "NaN routing: mixture weight error" + at);
+      }
+    }
+    for (std::uint32_t e = 0; e < experts + kGuard; ++e) {
+      const auto n = static_cast<std::uint32_t>(std::count(
+          got_ids.begin(), got_ids.end(), static_cast<std::int32_t>(e)));
+      Require(counts[e] == (e < experts ? n : 0U), "NaN routing: counts" + at);
+    }
+    Require(GroupsCoverSlots(table, got_ids, experts),
+            "NaN routing: group table" + at);
+    HIP_CHECK(hipFree(d_logits));
+    HIP_CHECK(hipFree(d_es));
+    HIP_CHECK(hipFree(d_counts));
+    HIP_CHECK(hipFree(ids));
+    HIP_CHECK(hipFree(weights));
+    HIP_CHECK(hipFree(groups));
+  }
+
+  // The router paths (router and selection kernels, and the one-launch
+  // decode routing) with one NaN in a residual row: that row takes experts
+  // 0 .. kUsed - 1 with NaN weights, the others route as they do alone.
+  constexpr std::uint32_t kRows = 4;
+  constexpr std::uint32_t kNanRow = 1;
+  const auto router = Normal(std::size_t{kExperts} * kHidden, 0.05F, rng);
+  auto expert_scale = Normal(kExperts, 0.01F, rng);
+  for (float& s : expert_scale) {
+    s += 1.0F;
+  }
+  auto x = Normal(std::size_t{kRows} * kHidden, 3.0F, rng);
+  x[std::size_t{kNanRow} * kHidden + 7] = nan;
+  float* d_router = Device(router.data(), router.size());
+  float* d_es = Device(expert_scale.data(), expert_scale.size());
+  float* d_x = Device(x.data(), x.size());
+  std::uint32_t* sync = nullptr;
+  HIP_CHECK(hipMalloc(&sync, sizeof(std::uint32_t)));
+  HIP_CHECK(hipMemset(sync, 0, sizeof(std::uint32_t)));
+  const Routing split = Route(d_x, d_router, d_es, kRows);
+  const Routing fused = Route(d_x, d_router, d_es, kRows, sync);
+  for (const Routing* routing : {&split, &fused}) {
+    const std::string path =
+        routing == &split ? " (router and selection)" : " (one launch)";
+    for (std::uint32_t r = 0; r < kRows; ++r) {
+      const auto ids = routing->ids.begin() + r * kUsed;
+      const auto weights = routing->weights.begin() + r * kUsed;
+      if (r == kNanRow) {
+        for (std::uint32_t j = 0; j < kUsed; ++j) {
+          Require(
+              ids[j] == static_cast<std::int32_t>(j) && std::isnan(weights[j]),
+              "NaN routing: a NaN row selects experts 0 .. 7 with NaN "
+              "weights" +
+                  path);
+        }
+        continue;
+      }
+      const Routing one =
+          Route(d_x + std::size_t{r} * kHidden, d_router, d_es, 1);
+      Require(std::equal(one.ids.begin(), one.ids.end(), ids) &&
+                  std::memcmp(one.weights.data(), &*weights, kUsed * 4) == 0,
+              "NaN routing: a finite row routes as it does alone" + path);
+    }
+    Require(GroupsCoverSlots(routing->groups, routing->ids, kExperts),
+            "NaN routing: group table" + path);
+  }
+  HIP_CHECK(hipFree(sync));
+  HIP_CHECK(hipFree(d_router));
+  HIP_CHECK(hipFree(d_es));
+  HIP_CHECK(hipFree(d_x));
+  std::cout << "NaN routing: ids in range at 128 and 256 experts\n";
+}
+
+/// Routing of rows with +INF logits: a +INF logit selects as the largest
+/// finite float, so the row's weight goes to its +INF experts in equal parts
+/// (ties to the lower expert) and every other chosen expert gets weight 0,
+/// instead of exp(+INF - +INF) making every weight NaN.
+void CheckInfRouting(std::mt19937& rng) {
+  const float inf = std::numeric_limits<float>::infinity();
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  for (const std::uint32_t experts : {kExperts, 256U}) {
+    constexpr std::uint32_t kRows = 4;
+    auto logits = Normal(std::size_t{kRows} * experts, 1.0F, rng);
+    auto expert_scale = Normal(experts, 0.01F, rng);
+    for (float& s : expert_scale) {
+      s += 1.0F;
+    }
+    // Row 0: one +INF logit. Row 1: two. Row 2: one +INF among NaNs and
+    // finite logits. Row 3: none.
+    logits[9] = inf;
+    logits[std::size_t{experts} + 3] = inf;
+    logits[std::size_t{experts} + experts - 1] = inf;
+    for (std::uint32_t e = 0; e < experts; e += 3) {
+      logits[std::size_t{2} * experts + e] = nan;
+    }
+    logits[std::size_t{2} * experts + 40] = inf;
+    float* d_logits = Device(logits.data(), logits.size());
+    float* d_es = Device(expert_scale.data(), expert_scale.size());
+    std::int32_t* ids = nullptr;
+    float* weights = nullptr;
+    HIP_CHECK(hipMalloc(&ids, kRows * kUsed * sizeof(std::int32_t)));
+    HIP_CHECK(hipMalloc(&weights, kRows * kUsed * sizeof(float)));
+    g4k::MoeRouteArgs a{};
+    a.expert_scale = d_es;
+    a.logits = d_logits;
+    a.raw_logits = true;
+    a.ids = ids;
+    a.weights = weights;
+    a.rows = kRows;
+    a.hidden = kHidden;
+    a.experts = experts;
+    a.used = kUsed;
+    a.eps = kEps;
+    g4k::MoeRoute(a, nullptr);
+    const auto got_ids = Host(ids, kRows * kUsed);
+    const auto got_w = Host(weights, kRows * kUsed);
+    const std::string at = " (" + std::to_string(experts) + " experts)";
+    for (std::uint32_t r = 0; r < kRows; ++r) {
+      const float* row = &logits[std::size_t{r} * experts];
+      std::vector<std::uint32_t> order;
+      for (std::uint32_t e = 0; e < experts; ++e) {
+        if (!std::isnan(row[e])) {
+          order.push_back(e);
+        }
+      }
+      std::stable_sort(order.begin(), order.end(),
+                       [&](auto x, auto y) { return row[x] > row[y]; });
+      order.resize(kUsed);
+      const auto infinite = static_cast<std::size_t>(
+          std::count_if(order.begin(), order.end(),
+                        [&](auto e) { return std::isinf(row[e]); }));
+      double total = 0.0;
+      for (const std::uint32_t e : order) {
+        total += std::exp(double{row[e]} - row[order[0]]);
+      }
+      for (std::uint32_t j = 0; j < kUsed; ++j) {
+        const std::size_t slot = std::size_t{r} * kUsed + j;
+        Require(got_ids[slot] == static_cast<std::int32_t>(order[j]),
+                "+INF routing: row " + std::to_string(r) + " slot " +
+                    std::to_string(j) + " selects expert " +
+                    std::to_string(got_ids[slot]) + at);
+        double want = 0.0;
+        if (infinite == 0) {
+          want = std::exp(double{row[order[j]]} - row[order[0]]) / total;
+        } else if (j < infinite) {
+          want = 1.0 / static_cast<double>(infinite);
+        }
+        want *= expert_scale[order[j]];
+        Require(std::isfinite(got_w[slot]) &&
+                    std::fabs(got_w[slot] - want) < 1e-5,
+                "+INF routing: row " + std::to_string(r) + " slot " +
+                    std::to_string(j) + " weight " +
+                    std::to_string(got_w[slot]) + at);
+      }
+    }
+    HIP_CHECK(hipFree(d_logits));
+    HIP_CHECK(hipFree(d_es));
+    HIP_CHECK(hipFree(ids));
+    HIP_CHECK(hipFree(weights));
+  }
+  std::cout << "+INF routing: finite weights at 128 and 256 experts\n";
 }
 
 /// Group table for `rows` rows with the given expert ids ([rows][kUsed]).
@@ -1161,6 +1448,8 @@ int main() {
   return gemma4_test::Run([] {
     std::mt19937 rng(26);
     CheckRouting(rng);
+    CheckNanRouting(rng);
+    CheckInfRouting(rng);
     CheckFinish(rng);
     const Format q4k{
         g4k::ExpertFormat::kQ4_K, GgmlType::kQ4_K, 256, 144, {0, 2}, "Q4_K"};

@@ -114,7 +114,9 @@ Prompt Prepare(const Tokenizer& tokenizer,
   const std::string_view text = rendered->text;
   Prompt prompt;
   const auto append = [&](std::string_view piece) {
-    const auto tokens = tokenizer.Encode(piece, false, true);
+    const auto tokens =
+        tokenizer.Encode(piece, false, true, rendered->content_spans,
+                         static_cast<std::size_t>(piece.data() - text.data()));
     if (tokens.size() > max_context - prompt.tokens.size()) {
       throw std::length_error(
           "prompt exceeds the " + std::to_string(max_context) +
@@ -164,7 +166,8 @@ Prompt Prepare(const Tokenizer& tokenizer,
   // The stable prefix ends before a special token, after every image.
   if (rendered->stable_prefix_offset < text.size()) {
     const auto suffix = tokenizer.Encode(
-        text.substr(rendered->stable_prefix_offset), false, true);
+        text.substr(rendered->stable_prefix_offset), false, true,
+        rendered->content_spans, rendered->stable_prefix_offset);
     if (suffix.size() < prompt.tokens.size() &&
         std::ranges::equal(suffix,
                            std::span(prompt.tokens).last(suffix.size()))) {

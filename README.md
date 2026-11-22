@@ -49,8 +49,9 @@ with the GGUF file name when a model does not load.
   streamed), image input, batched sessions, and RAM and disk prompt caching.
 - `gufo prompt` and `gufo bench` through the extension's drivers.
 - Provider options: `--image-tokens`, `--draft-calibration`, `--draft-trace` and
-  `--prefill-weights`. MTP drafts up to 15 tokens with the calibrated policy
-  unless `--draft-tokens` or `--draft-policy` say otherwise.
+  `--prefill-weights`. MTP drafts up to 15 tokens with the calibrated policy;
+  Gufo ignores `--draft-tokens`, `--min-draft-tokens` and `--draft-policy`
+  since [#1124](https://github.com/gufo-org/gufo/pull/1124).
 
 Benchmarks and quality reports are in the model cards:
 [26B-A4B](docs/models/gemma-4-26b-a4b/README.md),
@@ -77,19 +78,58 @@ functional suites pass on both, apart from `image-count` below.
 
 Not repeated on this build: QAT, and the complete functional set.
 
+On Gufo `f01a4570` (extension API 0.3.0, November 11, 2026), with 26B-A4B
+Unsloth UD-Q4_K_M, the Q8_0 MTP drafter and the BF16 projector, ROCm 10.1:
+the CPU tests, the GPU operator tests and `gemma4.target`, `continuation`,
+`continuation_perturbed`, `vision_encoder` and `vision_session` pass, as do
+the `sampling-defaults` and `tool-native-schemas` functional suites (MTP).
+The 31B models, QAT and the remaining suites were not run on this revision.
+
+On Gufo v0.35.0 (extension API 0.3.20, November 17, 2026), with 26B-A4B
+Unsloth UD-Q4_K_XL, the MTP drafter and the BF16 projector, ROCm 10.1: all 19
+`gemma4` ctest tests pass, CPU and model-backed. Of the 63 functional suites
+in the `pr` tier (two sessions, 32,768 context), 61 pass; `image-detail`
+(below) and `reasoning-budget` fail. The full-tier `prefill-scheduling`,
+cache and metrics suites pass at a 65,536 context, apart from
+`cache-pressure` (below).
+
 ## Known limits
 
 - The functional suites `image-detail` (it assumes Qwen's image token counts)
   and `image-count` on 26B-A4B (thinking passes that test's 256-token limit)
   fail for those test reasons.
-- In-place same-slot restore and shared transfer streams (batches of 256 jobs
-  instead of 16) are not upstream.
-- The Python tools in `tools/` are untested here.
+- `reasoning-budget` assumes thinking is on by default and that the reasoning
+  and answer fit in 600 tokens; Gemma defaults to thinking off and, with
+  `--think on`, needs more. Budgets themselves are honored: 0, 1, 4, 16 and
+  64 give exactly that many reasoning tokens, each a prefix of the uncapped
+  reasoning.
+- With a reasoning budget, the answer can contain a raw `<channel|>`. When
+  the budget cuts the thought mid-sentence, Gemma keeps thinking in the
+  answer, then closes the thought itself, and that marker reaches the user
+  (6 of 48 budgeted replies on 26B-A4B, with and without MTP). The fix
+  belongs in Gufo's sampler: after the forced close, never emit `<channel|>`
+  or `<|channel>` again.
+- With a reasoning budget, `reasoning_tokens` can report one more than the
+  budget, though the model thought for exactly the budget. When Gemma writes
+  its `thought` header with a double-newline token, the host counts that
+  token as reasoning (3 of 6 prompts on 26B-A4B).
+- `cache-pressure` fails on `pressure_ui_title`: the side request embeds a
+  chat that ends in "Reply with only ALPHA", and Gemma follows it instead of
+  the request's own instruction.
+- In-place same-slot restore and batches of 256 cache transfers on one stream
+  lease (instead of 16 with a lease each) are not upstream. Gufo's shared
+  transfer-stream leases (v0.35.0) share native streams between leases; they
+  do not change the batch size.
+- The Python tools in `tools/` are untested here. `draft_policy_bench.py` and
+  `proposal_replay.py` select policies and draft counts with Gufo's draft
+  flags, which Gufo now ignores.
 
 ## Build with Gufo
 
-The extension needs extension API 0.2.14 (upstream `main` since
-[#1047](https://github.com/gufo-org/gufo/pull/1047)).
+The extension needs extension API 0.3.20 or later (Gufo v0.35.0, which
+requires every text runner to declare a scheduling profile,
+[#1175](https://github.com/gufo-org/gufo/pull/1175)); `flake.lock` pins the
+Gufo revision it was last built and tested with.
 
 ```sh
 git clone https://github.com/gufo-org/gufo
@@ -112,6 +152,31 @@ With Nix, `nix build` in this repository builds the Gufo revision pinned in
 
 The vision sidecar `mmproj-BF16.gguf` is found beside the model, or given with
 `--mmproj`.
+
+## Releases
+
+Each release is tagged `vX.Y.Z` with its notes from
+[CHANGELOG.md](CHANGELOG.md) on the
+[releases page](https://github.com/franzmoca/gemma4-gufo-extension/releases).
+Its `flake.lock` pins the Gufo revision it was validated with, so a flake can
+pin a release, and Renovate can raise the tag:
+
+```nix
+inputs.gemma4.url = "github:franzmoca/gemma4-gufo-extension/v0.2.1";
+# packages: gemma4.packages.x86_64-linux.default
+```
+
+Leave out `inputs.gemma4.inputs.gufo.follows`: overriding Gufo builds a pair
+the release was not checked with.
+
+A release is one `chore(gemma4): release X.Y.Z` commit on `main` that sets
+`version` in `extension.json` and moves `Unreleased` in the changelog to
+`## X.Y.Z (YYYY-MM-DD)`, naming the Gufo pin and the extension API it needs.
+After it merges, `git tag -a vX.Y.Z -m X.Y.Z <commit> && git push origin
+vX.Y.Z` publishes it: `.github/workflows/release.yml` checks the tag against
+`extension.json` and posts the changelog section. Raise the minor version
+when the Gufo pin or the extension API requirement changes, and the patch
+version for fixes on the same pin.
 
 ## Tests
 
