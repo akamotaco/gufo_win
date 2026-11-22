@@ -885,7 +885,7 @@ void PrintServeHelp(std::string_view program_name,
     parser.AddOption(
         "", "--cache-disk-staging-bytes", "N",
         "Flash-Next: pinned disk transfer buffer allocated at startup within "
-        "the RAM ceiling, not a checkpoint size limit (default: 0 = 1 MiB). "
+        "the RAM ceiling, not a checkpoint size limit (default: 0 = 8 MiB). "
         "Other models: RAM limit for queued snapshots and each disk read "
         "(default: 0 = auto, at most the disk budget and 1/8 available RAM)",
         "Cache", &cache_disk_staging_bytes);
@@ -1040,6 +1040,9 @@ int RunServe(std::span<const char* const> args) {
   // `queue_budget` line already obeys `--log-level`. Help output loads nothing
   // and returns before that point.
 
+  // Queue cap a speech provider declares in its metadata; zero keeps the
+  // modality default. Set by the speech branch before prepare_server_options.
+  std::uint32_t provider_hardware_queues = 0;
   const auto prepare_server_options = [&] {
     if (!gufo::server::IsListenAddress(host)) {
       std::cerr << "Error: --host must be an IPv4 or IPv6 address\n";
@@ -1077,9 +1080,9 @@ int RunServe(std::span<const char* const> args) {
                          : (subcommand == "tts" || subcommand == "asr")
                              ? diagnostics::QueueProfile::kAudio
                              : diagnostics::QueueProfile::kUnmeasured;
-    const auto plan =
-        diagnostics::PlanQueues(profile, diagnostics::QueryQueueCensus(),
-                                std::getenv("GPU_MAX_HW_QUEUES"));
+    const auto plan = diagnostics::PlanQueues(
+        profile, diagnostics::QueryQueueCensus(),
+        std::getenv("GPU_MAX_HW_QUEUES"), provider_hardware_queues);
     diagnostics::ApplyQueuePlan(plan);
     server::Logger::Info("gpu",
                          diagnostics::DescribeQueuePlan(subcommand, plan));
@@ -1406,6 +1409,23 @@ int RunServe(std::span<const char* const> args) {
       std::cerr << "Error: " << error.what() << '\n';
       return 2;
     }
+    // The queue cap is fixed by the first HIP dispatch, so the provider is
+    // found here from the model files alone, by the probe the service runs to
+    // select it.
+    if (!options.model.empty()) {
+      const std::string model_root = options.model.string();
+      std::string provider_id;
+      if (is_tts) {
+        if (const auto* found = ext::ProbeTtsProvider(model_root))
+          provider_id = found->id;
+      } else if (const auto* found = ext::ProbeAsrProvider(model_root)) {
+        provider_id = found->id;
+      }
+      for (const auto& info : registry.Providers()) {
+        if (!provider_id.empty() && info.id == provider_id)
+          provider_hardware_queues = info.hardware_queues;
+      }
+    }
     if (!prepare_server_options())
       return 2;
     if (options.model.empty()) {
@@ -1646,7 +1666,7 @@ int RunServe(std::span<const char* const> args) {
     llm_parser.AddOption(
         "", "--cache-disk-staging-bytes", "N",
         "Flash-Next: pinned disk transfer buffer allocated at startup within "
-        "the RAM ceiling, not a checkpoint size limit (default: 0 = 1 MiB). "
+        "the RAM ceiling, not a checkpoint size limit (default: 0 = 8 MiB). "
         "Other models: RAM limit for queued snapshots and each disk read "
         "(default: 0 = auto, at most the disk budget and 1/8 available RAM)",
         "Cache", &cache_disk_staging_bytes);
@@ -1816,7 +1836,7 @@ int RunServe(std::span<const char* const> args) {
             .model_artifact_fingerprint = {},
         },
         vision_model_path, cache_ram, enable_yarn,
-        [&](const ext::TextProvider& provider, const core::GgufReader&,
+        [&](const ext::TextProvider& provider, const core::GgufReader*,
             ext::TextRunnerOptions* options, std::string* error) {
           try {
             options->provider_options = provider_options.Select(provider.id);
@@ -1829,6 +1849,9 @@ int RunServe(std::span<const char* const> args) {
             *error = exception.what();
             return false;
           }
+        },
+        [&loading](double progress, std::string_view message) {
+          loading.SetProgress(progress, message);
         });
     loading.stop();
     if (!load_ok) {
@@ -1901,6 +1924,7 @@ int RunServe(std::span<const char* const> args) {
       server::HttpServerOptions{
           .max_request_body_bytes = max_request_body_bytes,
           .max_connections = max_connections,
+          .keep_alive = true,
           .on_device_lost =
               [&device_lost] {
                 device_lost.store(true);
