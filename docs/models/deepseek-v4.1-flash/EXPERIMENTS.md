@@ -165,6 +165,7 @@ Measurements first recorded in the backlog, without an E-number, are in
 | [E129](#e129--keep-the-expert-cache-above-gufos-host-reserve-retained) | expert cache, prompt cache | retained | Gufo past #1275 gives the RAM prompt cache's memory back whenever less than 4 GiB is available; a streamed expert cache that leaves 1-2 GiB lost the whole prompt cache at the first idle moment, and every later turn prefilled its whole prompt (agent session 1,924 s instead of 615 s). The cache now stops at 4.5 GiB free (5.5 GiB at startup), which lets `main` pin Gufo `e7e38411` with #1326 and #1327 (#13). Coding-agent replay A B B A: 97.0/97.3 GiB instead of 100.9/100.8, route hits 98.08/98.10% instead of 98.42/98.41%, decode 153.4/152.5 s against 152.6/156.1 s, prefill 36.5/36.0 s against 35.2/35.2 s. |
 | [E130](#e130--the-expert-store-as-merged-into-gufo-retained) | expert cache | retained | The store as merged into Gufo (`60c48924`, extension API 0.3.43), after a review that seeds exact uses, alternates prefetch halves per window and fixes its failure and pressure paths. Same replies and drafts as before review (P R R P) and at the pin, decode within noise; route hits 95.94% against 95.93% at an 80 GiB cache; 17/17 on the coding-agent benchmark, replies identical until a tool's output differed. |
 | [E131](#e131--masked-device-draws-under-a-grammar-retained) | sampling | retained | A selection under a JSON grammar (tool calls) draws on the device like a plain one, from the row with the excluded tokens at -inf through Gufo's cached packed mask (gufo-org/gufo#1321), instead of building the 129,280-entry distribution on the host. Coding-agent replay A B B A, identical replies and drafts: decode 163.4/164.1 → 162.5/161.1 s (−1.2%), all of it in the tool-call replies (110.4/111.0 → 109.1/108.1 s); text replies unchanged. |
+| [E132](#e132--swar-sign-helpers-and-the-llamacpp-kernel-fixes-retained) | vendored kernels | retained | Gufo #1295's SWAR `__vcmpne4`/`__vsub4` in the vendored helpers: bit-identical (exhaustive check), 8-14% fewer instructions in the IQ1_M, IQ2_XS and IQ2_S MMQ tiles and 29% in 60 mmvq kernels. Kernel traces of streamed `UD-IQ2_XXS` and resident `IQ1_M` with DSpark launch none of them, so served speed cannot change. llama.cpp's MMQ out-of-bounds and few-row fixes do not apply to the vendored code; its Q8_1 sum change alters rounding in paths production does not run, and is not taken. |
 
 ## Milestones
 
@@ -5224,6 +5225,51 @@ run). Gufo's `tools`, `conversation` and `structured` suites pass on the
 candidate (two sessions, 32K context, the model's default sampling, so tool
 calls and structured output take the masked draw). Retained.
 [Runs](artifacts/2026-11-23-masked-device-draw/runs.json).
+
+## E132 — SWAR sign helpers and the llama.cpp kernel fixes (retained)
+
+Gufo #1295 replaced the byte-loop `__vcmpne4` and the saturating `__vsub4`
+(an alias of `__vsubss4`) in DeepSeek V4 Flash's vendored HIP helpers with
+llama.cpp #27962's SWAR versions; this directory carries the same helpers.
+The IQ1/IQ2/IQ3 loaders and dot products apply weight signs with them.
+
+**Exactness.** The new `__vsub4` wraps per byte, as CUDA defines it, where
+the old one saturated. `ds41_mmq_check_sign_helpers` (run by
+`ds41.mmq_typed`) checks both helpers against CUDA's per-byte definitions
+over all 65,536 byte pairs, a different pair in each lane, and the new
+`__vsub4` against `__vsubss4` over every value its callers pass: every
+IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS and IQ3_S grid byte with all 16 sign-mask
+patterns, and every IQ1 grid nibble times 8 minus its 7 or 9 bias (a caller
+Gufo's check does not have). Both counts are 0; with the old helpers the
+definition check fails 44,311 times and the caller check still passes, so
+outputs cannot change.
+
+**Code.** gfx1151 code objects of the mmq library before and after
+(`llvm-objdump` per kernel): 157 of 1,405 kernels change, IQ1_M MMQ tiles
+157,219 → 144,613 instructions (−8%), IQ2_S 173,600 → 152,897 (−12%),
+IQ2_XS 173,044 → 148,786 (−14%) and 60 mmvq kernels (IQ2/IQ3 at every
+batch width) 46,904 → 33,363 (−29%). IQ2_XXS MMQ keeps its own gfx1151 sign
+path and does not change.
+
+**What runs.** `rocprofv3 --kernel-trace` over `gufo bench -p 2048 -n 128`,
+sampled, DSpark: streamed `UD-IQ2_XXS` (158 kernels, 148,591 launches) and
+resident `IQ1_M` (125 kernels, 49,265 launches) launch none of the changed
+kernels. Their routed experts run on this package's own GEMV and FP16
+kernels; the only vendored kernel either launches is the drafter's Q4_K
+`mul_mat_vec_q` (72 launches), which does not change. Served speed therefore
+cannot change and was not timed. The helpers stay as Gufo's, for the
+fallback paths (resident batches outside the FP16 kernels' types, and mmvq
+when the expert GEMV declines a shape).
+
+**llama.cpp since the vendored commit.** The MMQ out-of-bounds fix (#29953)
+is in its `J_best`/`J_max` tile selection, which the vendored code predates,
+and the zero-block fix (#32566) is in few-row MMQ, which is not vendored.
+#31247 builds the Q8_1 block sum from the quantized values (`d·Σq`) instead
+of the FP32 sum: a rounding change in the MMQ paths the traces show unused,
+so it is not taken.
+
+Per-kernel instruction counts and both traces' kernel lists are in
+[artifacts/2026-11-23-swar-sign-helpers/](artifacts/2026-11-23-swar-sign-helpers/isa-and-traces.json).
 
 ## Backlog measurements without an E-number
 

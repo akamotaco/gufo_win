@@ -1,0 +1,2370 @@
+{
+ "isa_gfx1151": {
+  "kernels": 1405,
+  "changed": [
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 16, false, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 2402,
+    "instructions_after": 2005
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 16, true, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 2455,
+    "instructions_after": 2072
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 16, false, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 2377,
+    "instructions_after": 1980
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 16, true, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 2430,
+    "instructions_after": 2046
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 32, false, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 2904,
+    "instructions_after": 2492
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 32, true, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 2987,
+    "instructions_after": 2582
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 32, false, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 2849,
+    "instructions_after": 2440
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 32, true, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 2936,
+    "instructions_after": 2531
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 48, false, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 3648,
+    "instructions_after": 3241
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 48, true, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 3754,
+    "instructions_after": 3355
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 48, false, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 3569,
+    "instructions_after": 3163
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 48, true, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 3676,
+    "instructions_after": 3278
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 64, false, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 4446,
+    "instructions_after": 4058
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 64, true, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 4593,
+    "instructions_after": 4196
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 64, false, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 4342,
+    "instructions_after": 3953
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 64, true, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 4491,
+    "instructions_after": 4092
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 80, false, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 5247,
+    "instructions_after": 4863
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 80, true, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 5422,
+    "instructions_after": 5033
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 80, false, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 5117,
+    "instructions_after": 4733
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 80, true, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 5292,
+    "instructions_after": 4904
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 96, false, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 6026,
+    "instructions_after": 5644
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 96, true, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 6194,
+    "instructions_after": 5839
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 96, false, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 5870,
+    "instructions_after": 5488
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 96, true, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 6039,
+    "instructions_after": 5683
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 112, false, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 6854,
+    "instructions_after": 6460
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 112, true, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 7087,
+    "instructions_after": 6666
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 112, false, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 6672,
+    "instructions_after": 6278
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 112, true, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 6905,
+    "instructions_after": 6485
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 128, false, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 7672,
+    "instructions_after": 7247
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 128, true, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 7852,
+    "instructions_after": 7486
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 128, false, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 7465,
+    "instructions_after": 7040
+   },
+   {
+    "object": "ds41_mmq_v41_IQ1_M.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)29, 128, true, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 7646,
+    "instructions_after": 7280
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 16, false, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 3149,
+    "instructions_after": 2292
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 16, true, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 3170,
+    "instructions_after": 2356
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 16, false, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 3124,
+    "instructions_after": 2267
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 16, true, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 3146,
+    "instructions_after": 2331
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 32, false, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 3376,
+    "instructions_after": 2755
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 32, true, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 3450,
+    "instructions_after": 2834
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 32, false, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 3324,
+    "instructions_after": 2703
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 32, true, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 3401,
+    "instructions_after": 2784
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 48, false, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 4124,
+    "instructions_after": 3499
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 48, true, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 4236,
+    "instructions_after": 3610
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 48, false, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 4046,
+    "instructions_after": 3421
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 48, true, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 4160,
+    "instructions_after": 3533
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 64, false, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 4952,
+    "instructions_after": 4313
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 64, true, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 5050,
+    "instructions_after": 4451
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 64, false, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 4848,
+    "instructions_after": 4209
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 64, true, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 4948,
+    "instructions_after": 4349
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 80, false, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 5745,
+    "instructions_after": 5123
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 80, true, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 5894,
+    "instructions_after": 5273
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 80, false, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 5615,
+    "instructions_after": 4993
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 80, true, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 5766,
+    "instructions_after": 5144
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 96, false, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 6525,
+    "instructions_after": 5896
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 96, true, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 6691,
+    "instructions_after": 6078
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 96, false, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 6369,
+    "instructions_after": 5740
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 96, true, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 6537,
+    "instructions_after": 5924
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 112, false, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 7345,
+    "instructions_after": 6721
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 112, true, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 7532,
+    "instructions_after": 6916
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 112, false, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 7163,
+    "instructions_after": 6539
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 112, true, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 7352,
+    "instructions_after": 6735
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 128, false, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 8113,
+    "instructions_after": 7514
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 128, true, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 8375,
+    "instructions_after": 7747
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 128, false, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 7906,
+    "instructions_after": 7307
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_S.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)22, 128, true, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 8168,
+    "instructions_after": 7540
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 16, false, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 2964,
+    "instructions_after": 2175
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 16, true, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 3025,
+    "instructions_after": 2218
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 16, false, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 2939,
+    "instructions_after": 2150
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 16, true, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 3000,
+    "instructions_after": 2193
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 32, false, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 3376,
+    "instructions_after": 2625
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 32, true, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 3466,
+    "instructions_after": 2704
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 32, false, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 3324,
+    "instructions_after": 2573
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 32, true, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 3416,
+    "instructions_after": 2654
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 48, false, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 4149,
+    "instructions_after": 3379
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 48, true, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 4233,
+    "instructions_after": 3480
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 48, false, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 4070,
+    "instructions_after": 3301
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 48, true, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 4157,
+    "instructions_after": 3403
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 64, false, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 4931,
+    "instructions_after": 4186
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 64, true, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 5071,
+    "instructions_after": 4324
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 64, false, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 4827,
+    "instructions_after": 4082
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 64, true, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 4969,
+    "instructions_after": 4222
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 80, false, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 5734,
+    "instructions_after": 4988
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 80, true, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 5862,
+    "instructions_after": 5141
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 80, false, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 5604,
+    "instructions_after": 4858
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 80, true, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 5734,
+    "instructions_after": 5012
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 96, false, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 6531,
+    "instructions_after": 5767
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 96, true, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 6707,
+    "instructions_after": 5946
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 96, false, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 6375,
+    "instructions_after": 5612
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 96, true, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 6553,
+    "instructions_after": 5792
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 112, false, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 7365,
+    "instructions_after": 6590
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 112, true, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 7559,
+    "instructions_after": 6795
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 112, false, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 7183,
+    "instructions_after": 6408
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 112, true, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 7379,
+    "instructions_after": 6614
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 128, false, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 8113,
+    "instructions_after": 7387
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 128, true, true, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 8364,
+    "instructions_after": 7617
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 128, false, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 7906,
+    "instructions_after": 7180
+   },
+   {
+    "object": "ds41_mmq_v41_IQ2_XS.hip.cpp",
+    "kernel": "void mul_mat_q<(ggml_type)17, 128, true, false, false>(char const*, int const*, int const*, int const*, float*, float*, HIP_vector_type<unsigned int, 3u>, int, int, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, HIP_vector_type<unsigned int, 3u>, int, int, int, HIP_vector_type<unsigned int, 3u>, char const*, long, float const*, float const*, float*, __half*, float, unsigned char const*, int)",
+    "instructions_before": 8158,
+    "instructions_after": 7410
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q_moe<(ggml_type)16, 2>(void const*, void const*, int const*, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 862,
+    "instructions_after": 476
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)16, 1, true, true>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 1123,
+    "instructions_after": 743
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)16, 1, false, true>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 537,
+    "instructions_after": 347
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)16, 1, true, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 1123,
+    "instructions_after": 743
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)16, 1, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 537,
+    "instructions_after": 347
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)16, 2, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 553,
+    "instructions_after": 366
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)16, 3, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 610,
+    "instructions_after": 419
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)16, 4, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 664,
+    "instructions_after": 461
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)16, 5, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 739,
+    "instructions_after": 519
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)16, 6, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 776,
+    "instructions_after": 563
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)16, 7, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 818,
+    "instructions_after": 616
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)16, 8, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 891,
+    "instructions_after": 695
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q_moe<(ggml_type)17, 2>(void const*, void const*, int const*, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 876,
+    "instructions_after": 494
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)17, 1, true, true>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 1134,
+    "instructions_after": 753
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)17, 1, false, true>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 542,
+    "instructions_after": 347
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)17, 1, true, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 1134,
+    "instructions_after": 753
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)17, 1, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 542,
+    "instructions_after": 347
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)17, 2, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 568,
+    "instructions_after": 375
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)17, 3, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 628,
+    "instructions_after": 437
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)17, 4, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 688,
+    "instructions_after": 486
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)17, 5, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 734,
+    "instructions_after": 529
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)17, 6, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 794,
+    "instructions_after": 590
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)17, 7, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 879,
+    "instructions_after": 661
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)17, 8, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 924,
+    "instructions_after": 719
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q_moe<(ggml_type)22, 2>(void const*, void const*, int const*, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 861,
+    "instructions_after": 543
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)22, 1, true, true>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 1111,
+    "instructions_after": 805
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)22, 1, false, true>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 527,
+    "instructions_after": 378
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)22, 1, true, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 1111,
+    "instructions_after": 805
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)22, 1, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 527,
+    "instructions_after": 378
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)22, 2, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 553,
+    "instructions_after": 398
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)22, 3, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 616,
+    "instructions_after": 463
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)22, 4, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 678,
+    "instructions_after": 518
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)22, 5, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 721,
+    "instructions_after": 559
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)22, 6, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 784,
+    "instructions_after": 621
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)22, 7, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 875,
+    "instructions_after": 695
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)22, 8, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 918,
+    "instructions_after": 747
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q_moe<(ggml_type)18, 2>(void const*, void const*, int const*, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 913,
+    "instructions_after": 522
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)18, 1, true, true>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 1169,
+    "instructions_after": 788
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)18, 1, false, true>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 560,
+    "instructions_after": 369
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)18, 1, true, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 1169,
+    "instructions_after": 788
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)18, 1, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 560,
+    "instructions_after": 369
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)18, 2, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 583,
+    "instructions_after": 392
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)18, 3, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 641,
+    "instructions_after": 445
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)18, 4, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 702,
+    "instructions_after": 490
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)18, 5, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 752,
+    "instructions_after": 533
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)18, 6, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 790,
+    "instructions_after": 596
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)18, 7, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 850,
+    "instructions_after": 666
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)18, 8, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 914,
+    "instructions_after": 727
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q_moe<(ggml_type)21, 2>(void const*, void const*, int const*, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 900,
+    "instructions_after": 586
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)21, 1, true, true>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 1158,
+    "instructions_after": 843
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)21, 1, false, true>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 551,
+    "instructions_after": 395
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)21, 1, true, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 1158,
+    "instructions_after": 843
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)21, 1, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 551,
+    "instructions_after": 395
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)21, 2, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 569,
+    "instructions_after": 411
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)21, 3, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 616,
+    "instructions_after": 460
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)21, 4, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 669,
+    "instructions_after": 499
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)21, 5, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 719,
+    "instructions_after": 542
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)21, 6, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 778,
+    "instructions_after": 607
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)21, 7, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 811,
+    "instructions_after": 666
+   },
+   {
+    "object": "mmvq.hip.cpp",
+    "kernel": "void mul_mat_vec_q<(ggml_type)21, 8, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+    "instructions_before": 863,
+    "instructions_after": 735
+   }
+  ]
+ },
+ "traces": {
+  "ud": {
+   "config": "streamed UD-IQ2_XXS, DSpark, gufo bench -p 2048 -n 128 --temperature 1",
+   "kernels": [
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<8, 8, false, 1>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 3942,
+     "total_ns": 742680178
+    },
+    {
+     "name": "__amd_rocclr_copyBuffer",
+     "calls": 25461,
+     "total_ns": 658305947
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<14, 8, false, 1>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 2119,
+     "total_ns": 529427548
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<8, 4, false, 1>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 3942,
+     "total_ns": 495669749
+    },
+    {
+     "name": "void (anonymous namespace)::hc_mix_small_kernel<4u>(float const*, float const*, float const*, float const*, float*, float*, float*, float*, unsigned int, float, unsigned int, float)",
+     "calls": 9282,
+     "total_ns": 307204675
+    },
+    {
+     "name": "void (anonymous namespace)::dense_f16_kernel<(anonymous namespace)::Q8, true, _Float16, float>(unsigned char const*, _Float16 const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 108,
+     "total_ns": 294285049
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<14, 8, false, 6>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 163,
+     "total_ns": 286369765
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<8, 8, false, 2>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 1296,
+     "total_ns": 257113513
+    },
+    {
+     "name": "void (anonymous namespace)::routed_f16_kernel<16, true, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, unsigned long, unsigned short const*, unsigned int, int const*, int const*, int const*, float const*, float, void*, unsigned int, unsigned int)",
+     "calls": 60,
+     "total_ns": 239306859
+    },
+    {
+     "name": "void (anonymous namespace)::expert_gemv_kernel<22, 2, true, true, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int)",
+     "calls": 1285,
+     "total_ns": 232509511
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<8, 4, true, 1>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 1971,
+     "total_ns": 228601842
+    },
+    {
+     "name": "void (anonymous namespace)::routed_f16_kernel<19, true, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, unsigned long, unsigned short const*, unsigned int, int const*, int const*, int const*, float const*, float, void*, unsigned int, unsigned int)",
+     "calls": 40,
+     "total_ns": 215644645
+    },
+    {
+     "name": "void (anonymous namespace)::expert_gemv_kernel<16, 2, true, true, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int)",
+     "calls": 1253,
+     "total_ns": 190569160
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<14, 8, false, 2>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 697,
+     "total_ns": 186982256
+    },
+    {
+     "name": "(anonymous namespace)::matmul_bf16_vec8_kernel(unsigned short const*, float const*, float*, unsigned int, unsigned int)",
+     "calls": 7995,
+     "total_ns": 174643226
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<8, 4, false, 2>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 1296,
+     "total_ns": 168898802
+    },
+    {
+     "name": "void (anonymous namespace)::expert_gemv_kernel<19, 2, true, true, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int)",
+     "calls": 1301,
+     "total_ns": 168598627
+    },
+    {
+     "name": "void (anonymous namespace)::markov_select_kernel<8u>(_Float16 const*, float const*, float const*, unsigned int, float*, int*)",
+     "calls": 530,
+     "total_ns": 162019732
+    },
+    {
+     "name": "(anonymous namespace)::attention_f16_kernel(float const*, float const*, float const*, unsigned int, unsigned int, ds41_fp4_rows, unsigned int const*, unsigned int, unsigned int, float const*, float*, _Float16*, unsigned int, unsigned int, float, HIP_vector_type<float, 2u> const*)",
+     "calls": 80,
+     "total_ns": 160534429
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<22, 2, true, 2, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 502,
+     "total_ns": 153176360
+    },
+    {
+     "name": "void (anonymous namespace)::expert_gemv_kernel<18, 2, false, true, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int)",
+     "calls": 1095,
+     "total_ns": 145286040
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<14, 2, false, 1>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 949,
+     "total_ns": 142216368
+    },
+    {
+     "name": "void (anonymous namespace)::hc_state_pass_kernel<true, false>(float const*, float const*, unsigned int, float const*, float const*, float const*, float*, float const*, float const*, float*, float const*, float*, unsigned int, unsigned int, float, ds41_v41_steer)",
+     "calls": 153,
+     "total_ns": 135504405
+    },
+    {
+     "name": "void (anonymous namespace)::routed_f16_kernel<22, false, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, unsigned long, unsigned short const*, unsigned int, int const*, int const*, int const*, float const*, float, void*, unsigned int, unsigned int)",
+     "calls": 60,
+     "total_ns": 133996759
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<16, 2, true, 2, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 487,
+     "total_ns": 127364042
+    },
+    {
+     "name": "void (anonymous namespace)::expert_gemv_kernel<22, 2, false, true, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int)",
+     "calls": 1095,
+     "total_ns": 125554325
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<8, 2, false, 1>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 1971,
+     "total_ns": 119174235
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<8, 8, false, 4>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 486,
+     "total_ns": 105978225
+    },
+    {
+     "name": "void (anonymous namespace)::routed_f16_kernel<22, true, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, unsigned long, unsigned short const*, unsigned int, int const*, int const*, int const*, float const*, float, void*, unsigned int, unsigned int)",
+     "calls": 60,
+     "total_ns": 105029970
+    },
+    {
+     "name": "void (anonymous namespace)::dense_f16_kernel<(anonymous namespace)::Q8, true, _Float16, _Float16>(unsigned char const*, _Float16 const*, _Float16*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, _Float16*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 27,
+     "total_ns": 99377231
+    },
+    {
+     "name": "void (anonymous namespace)::hc_collapse_norm_kernel<4u>(float const*, float const*, float const*, float*, unsigned int, float)",
+     "calls": 9499,
+     "total_ns": 98104959
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<18, 2, false, 2, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 390,
+     "total_ns": 93608577
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<22, 2, false, 2, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 390,
+     "total_ns": 83357306
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<14, 8, false, 4>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 262,
+     "total_ns": 77533223
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<8, 4, true, 2>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 648,
+     "total_ns": 76386535
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<10, 1, true, 2, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 321,
+     "total_ns": 73674568
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<22, 2, true, 4, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 182,
+     "total_ns": 71455628
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<13, 4, true, 1>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 949,
+     "total_ns": 70752949
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<12, 8, false, 6>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 642,
+     "total_ns": 67068550
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<8, 4, false, 4>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 486,
+     "total_ns": 64737171
+    },
+    {
+     "name": "void (anonymous namespace)::routed_f16_kernel<17, false, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, unsigned long, unsigned short const*, unsigned int, int const*, int const*, int const*, float const*, float, void*, unsigned int, unsigned int)",
+     "calls": 24,
+     "total_ns": 63577001
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<16, 2, true, 4, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 181,
+     "total_ns": 60498797
+    },
+    {
+     "name": "void (anonymous namespace)::matmul_bf16_wmma_narrow_kernel<32u, 4u, 2u>(unsigned short const*, float const*, float*, unsigned int, unsigned int, unsigned int)",
+     "calls": 93,
+     "total_ns": 59968837
+    },
+    {
+     "name": "__amd_rocclr_fillBufferUnAligned",
+     "calls": 292,
+     "total_ns": 58820472
+    },
+    {
+     "name": "void (anonymous namespace)::routed_f16_kernel<18, false, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, unsigned long, unsigned short const*, unsigned int, int const*, int const*, int const*, float const*, float, void*, unsigned int, unsigned int)",
+     "calls": 60,
+     "total_ns": 57536802
+    },
+    {
+     "name": "(anonymous namespace)::attention_split_kernel(float const*, float const*, float const*, unsigned int, unsigned int, ds41_fp4_rows, unsigned int const*, unsigned int, unsigned int, float*, unsigned int, unsigned int, float)",
+     "calls": 4320,
+     "total_ns": 57300514
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<14, 2, false, 2>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 312,
+     "total_ns": 49963889
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<12, 2, false, 6>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 642,
+     "total_ns": 47044226
+    },
+    {
+     "name": "void (anonymous namespace)::expert_gemv_kernel<17, 2, false, true, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int)",
+     "calls": 438,
+     "total_ns": 44557251
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<18, 2, false, 4, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 135,
+     "total_ns": 42485061
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<10, 1, true, 16, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 321,
+     "total_ns": 41137055
+    },
+    {
+     "name": "void (anonymous namespace)::dense_f16_kernel<(anonymous namespace)::Q6K, true, float, float>(unsigned char const*, float const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 2,
+     "total_ns": 40980182
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<8, 2, false, 2>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 648,
+     "total_ns": 40881395
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<22, 2, false, 4, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 135,
+     "total_ns": 40711240
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<13, 2, false, 1>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 949,
+     "total_ns": 37318622
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<14, 4, false, 1>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 949,
+     "total_ns": 36828727
+    },
+    {
+     "name": "(anonymous namespace)::route_kernel(float const*, float const*, int*, float*, unsigned int, unsigned int, float)",
+     "calls": 5642,
+     "total_ns": 35993340
+    },
+    {
+     "name": "void (anonymous namespace)::hc_expand_sum_kernel<false>(float const*, float const*, unsigned int, float const*, float const*, float const*, float*, unsigned int, unsigned int, ds41_v41_lora_terms)",
+     "calls": 4648,
+     "total_ns": 34303584
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<10, 1, false, 2, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 321,
+     "total_ns": 33478381
+    },
+    {
+     "name": "void (anonymous namespace)::routed_f16_kernel<16, false, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, unsigned long, unsigned short const*, unsigned int, int const*, int const*, int const*, float const*, float, void*, unsigned int, unsigned int)",
+     "calls": 12,
+     "total_ns": 32658547
+    },
+    {
+     "name": "(anonymous namespace)::attention_combine_kernel(float const*, float const*, float*, unsigned int, float const*, unsigned int)",
+     "calls": 4320,
+     "total_ns": 32519541
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<8, 4, true, 4>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 243,
+     "total_ns": 31157735
+    },
+    {
+     "name": "void (anonymous namespace)::dense_f16_kernel<(anonymous namespace)::Q8, false, _Float16, float>(unsigned char const*, _Float16 const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 136,
+     "total_ns": 29567227
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<19, 2, true, 2, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 459,
+     "total_ns": 29536467
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<17, 2, false, 2, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 156,
+     "total_ns": 28339605
+    },
+    {
+     "name": "void (anonymous namespace)::dense_f16_kernel<(anonymous namespace)::Q8, true, float, float>(unsigned char const*, float const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 27,
+     "total_ns": 28166513
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<8, 8, false, 6>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 108,
+     "total_ns": 26518062
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<13, 4, true, 2>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 312,
+     "total_ns": 25262960
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<12, 8, true, 6>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 321,
+     "total_ns": 22893199
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<10, 1, false, 6, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 321,
+     "total_ns": 20813083
+    },
+    {
+     "name": "void (anonymous namespace)::expert_gemv_kernel<16, 2, false, true, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int)",
+     "calls": 219,
+     "total_ns": 20139406
+    },
+    {
+     "name": "(anonymous namespace)::q_kv_norm_kernel(float const*, float const*, float*, _Float16*, unsigned int, float const*, float const*, float*, unsigned int, unsigned int, float const*, unsigned int, float)",
+     "calls": 4721,
+     "total_ns": 20073315
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<14, 2, false, 4>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 117,
+     "total_ns": 19995801
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<12, 8, false, 1>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 92,
+     "total_ns": 18453728
+    },
+    {
+     "name": "void (anonymous namespace)::hc_expand_kernel<false>(float const*, float const*, float const*, float const*, float*, unsigned int, unsigned int, ds41_v41_lora_terms)",
+     "calls": 4641,
+     "total_ns": 17876342
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<8, 2, false, 4>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 243,
+     "total_ns": 15851474
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<8, 4, false, 6>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 108,
+     "total_ns": 15483772
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<16, 9, false, 2, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 78,
+     "total_ns": 15397847
+    },
+    {
+     "name": "(anonymous namespace)::fp4_fake_quant_kernel(float*, unsigned char*, unsigned char*, unsigned int, unsigned int, int)",
+     "calls": 1558,
+     "total_ns": 15057850
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<17, 2, false, 4, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 54,
+     "total_ns": 14958140
+    },
+    {
+     "name": "void (anonymous namespace)::dense_f16_kernel<(anonymous namespace)::Q6K, false, _Float16, float>(unsigned char const*, _Float16 const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 78,
+     "total_ns": 14527000
+    },
+    {
+     "name": "void (anonymous namespace)::dense_f16_kernel<(anonymous namespace)::Q6K, true, _Float16, float>(unsigned char const*, _Float16 const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 39,
+     "total_ns": 13759674
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<13, 2, false, 2>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 312,
+     "total_ns": 12854599
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<14, 4, false, 2>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 312,
+     "total_ns": 12364926
+    },
+    {
+     "name": "(anonymous namespace)::rope_tail_kernel(float*, unsigned int, unsigned int, unsigned int, float const*, unsigned int, unsigned int, unsigned int, int)",
+     "calls": 6199,
+     "total_ns": 11560926
+    },
+    {
+     "name": "(anonymous namespace)::matmul_f32_row_token_kernel(float const*, float const*, float*, unsigned int, unsigned int)",
+     "calls": 321,
+     "total_ns": 11193711
+    },
+    {
+     "name": "(anonymous namespace)::to_half_kernel(float const*, _Float16*, unsigned long)",
+     "calls": 160,
+     "total_ns": 11141581
+    },
+    {
+     "name": "void mul_mat_vec_q<(ggml_type)12, 8, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 72,
+     "total_ns": 11108981
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<12, 4, false, 6>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 642,
+     "total_ns": 10711276
+    },
+    {
+     "name": "void (anonymous namespace)::routed_f16_kernel<10, false, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, unsigned long, unsigned short const*, unsigned int, int const*, int const*, int const*, float const*, float, void*, unsigned int, unsigned int)",
+     "calls": 4,
+     "total_ns": 10667797
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<13, 4, true, 4>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 117,
+     "total_ns": 10414712
+    },
+    {
+     "name": "(anonymous namespace)::topk_kernel(float const*, unsigned long, unsigned int*, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 1008,
+     "total_ns": 10333172
+    },
+    {
+     "name": "void (anonymous namespace)::expert_gemv_kernel<10, 1, false, true, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int)",
+     "calls": 73,
+     "total_ns": 8973708
+    },
+    {
+     "name": "void (anonymous namespace)::dspark_attention_head_kernel<8u>(float const*, float const*, unsigned int, unsigned int, unsigned int, float const*, unsigned int, float const*, float*, unsigned int, unsigned int, float)",
+     "calls": 321,
+     "total_ns": 8715030
+    },
+    {
+     "name": "(anonymous namespace)::expert_plan_kernel(int const*, unsigned int, int*)",
+     "calls": 3532,
+     "total_ns": 7793859
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<8, 4, true, 6>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 54,
+     "total_ns": 7720565
+    },
+    {
+     "name": "void (anonymous namespace)::dense_f16_kernel<(anonymous namespace)::Q8, false, _Float16, _Float16>(unsigned char const*, _Float16 const*, _Float16*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, _Float16*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 34,
+     "total_ns": 7554595
+    },
+    {
+     "name": "void (anonymous namespace)::matmul_bf16_wmma_kernel<128u>(unsigned short const*, float const*, float*, unsigned int, unsigned int, unsigned int)",
+     "calls": 8,
+     "total_ns": 7537352
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<16, 9, false, 4, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 27,
+     "total_ns": 7424945
+    },
+    {
+     "name": "void (anonymous namespace)::top8_bias_kernel<true>(float const*, float const*, unsigned int, int*, float*, unsigned int const*, float, ds41_v41_proposal*, int*, int const*)",
+     "calls": 530,
+     "total_ns": 7022019
+    },
+    {
+     "name": "void (anonymous namespace)::indexer_score_small_kernel<false>(float const*, ds41_fp4_rows, float const*, float, float*, unsigned long, unsigned int, unsigned int, unsigned int const*, unsigned int)",
+     "calls": 880,
+     "total_ns": 6910731
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<10, 1, false, 2, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 26,
+     "total_ns": 6858678
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<19, 2, true, 4, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 125,
+     "total_ns": 6700144
+    },
+    {
+     "name": "void (anonymous namespace)::dense_f16_kernel<(anonymous namespace)::Q6K, true, _Float16, _Float16>(unsigned char const*, _Float16 const*, _Float16*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, _Float16*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 13,
+     "total_ns": 6465858
+    },
+    {
+     "name": "(anonymous namespace)::engram_gate_kernel(float*, float const*, float const*, unsigned int, unsigned int, float)",
+     "calls": 220,
+     "total_ns": 6418814
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<22, 2, true, 16, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 50,
+     "total_ns": 6114718
+    },
+    {
+     "name": "void (anonymous namespace)::hc_state_pass_kernel<false, false>(float const*, float const*, unsigned int, float const*, float const*, float const*, float*, float const*, float const*, float*, float const*, float*, unsigned int, unsigned int, float, ds41_v41_steer)",
+     "calls": 8,
+     "total_ns": 6085678
+    },
+    {
+     "name": "(anonymous namespace)::compress_pool_kernel(float const*, float const*, float*, float*, unsigned int, unsigned int, unsigned int, float*, unsigned int)",
+     "calls": 330,
+     "total_ns": 6035151
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<16, 2, true, 16, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 50,
+     "total_ns": 5833343
+    },
+    {
+     "name": "(anonymous namespace)::copy_list_kernel(ds41_v41_copy_list)",
+     "calls": 4540,
+     "total_ns": 5621858
+    },
+    {
+     "name": "void (anonymous namespace)::matmul_bf16_wmma_narrow_kernel<16u, 4u, 4u>(unsigned short const*, float const*, float*, unsigned int, unsigned int, unsigned int)",
+     "calls": 95,
+     "total_ns": 5510367
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<13, 2, false, 4>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 117,
+     "total_ns": 5164232
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<14, 4, false, 4>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 117,
+     "total_ns": 4901410
+    },
+    {
+     "name": "void (anonymous namespace)::dense_f16_kernel<(anonymous namespace)::Q6K, false, _Float16, _Float16>(unsigned char const*, _Float16 const*, _Float16*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, _Float16*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 26,
+     "total_ns": 4842334
+    },
+    {
+     "name": "(anonymous namespace)::swiglu_kernel(float const*, float const*, float const*, float*, unsigned int, unsigned int, float)",
+     "calls": 80,
+     "total_ns": 4728967
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<14, 2, false, 6>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 26,
+     "total_ns": 4704845
+    },
+    {
+     "name": "(anonymous namespace)::rms_norm_kernel(float const*, float const*, float*, unsigned int, float)",
+     "calls": 1119,
+     "total_ns": 4164691
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<19, 2, true, 16, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 31,
+     "total_ns": 3792915
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<18, 2, false, 6, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 30,
+     "total_ns": 3732315
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<8, 2, false, 6>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 54,
+     "total_ns": 3715515
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<10, 1, false, 4, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 9,
+     "total_ns": 3499744
+    },
+    {
+     "name": "(anonymous namespace)::sample_sum_kernel(float const*, unsigned int const*, unsigned int, float, (anonymous namespace)::SampleScratch*)",
+     "calls": 127,
+     "total_ns": 3183807
+    },
+    {
+     "name": "__amd_rocclr_copyBufferRectAligned",
+     "calls": 868,
+     "total_ns": 3018278
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<13, 4, true, 6>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 26,
+     "total_ns": 2663255
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<12, 8, false, 2>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 13,
+     "total_ns": 2643140
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<22, 2, false, 6, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 30,
+     "total_ns": 2625056
+    },
+    {
+     "name": "void (anonymous namespace)::dense_f16_kernel<(anonymous namespace)::Q5K, true, _Float16, float>(unsigned char const*, _Float16 const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 13,
+     "total_ns": 2589577
+    },
+    {
+     "name": "void (anonymous namespace)::dense_f16_kernel<(anonymous namespace)::Q8, false, float, float>(unsigned char const*, float const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 34,
+     "total_ns": 2550456
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<12, 4, false, 1>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 276,
+     "total_ns": 2540404
+    },
+    {
+     "name": "(anonymous namespace)::sample_pick_kernel(float const*, unsigned int const*, unsigned int, ds41_v41_proposal const*, float, double, double, (anonymous namespace)::SampleScratch*)",
+     "calls": 127,
+     "total_ns": 2513054
+    },
+    {
+     "name": "void (anonymous namespace)::dense_f16_kernel<(anonymous namespace)::Q5K, false, _Float16, float>(unsigned char const*, _Float16 const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 26,
+     "total_ns": 2337881
+    },
+    {
+     "name": "(anonymous namespace)::indexer_score_wmma_kernel(float const*, ds41_fp4_rows, float const*, float, float*, unsigned long, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 16,
+     "total_ns": 2244318
+    },
+    {
+     "name": "void (anonymous namespace)::dense_f16_kernel<(anonymous namespace)::Q6K, false, float, float>(unsigned char const*, float const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 2,
+     "total_ns": 1932421
+    },
+    {
+     "name": "(anonymous namespace)::rope_fp8_kernel(float*, unsigned int, unsigned int, unsigned int, float const*, unsigned int, unsigned int, unsigned int, int)",
+     "calls": 651,
+     "total_ns": 1772973
+    },
+    {
+     "name": "void (anonymous namespace)::dense_f16_kernel<(anonymous namespace)::Q5K, true, float, float>(unsigned char const*, float const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 13,
+     "total_ns": 1613282
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<17, 2, false, 6, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 12,
+     "total_ns": 1606805
+    },
+    {
+     "name": "(anonymous namespace)::routed_rows_kernel(int const*, unsigned int, int const*, int*)",
+     "calls": 160,
+     "total_ns": 1598810
+    },
+    {
+     "name": "(anonymous namespace)::argmax_bias_kernel(float const*, float const*, unsigned int, int*, unsigned int, int const*)",
+     "calls": 35,
+     "total_ns": 1412392
+    },
+    {
+     "name": "(anonymous namespace)::routed_counts_kernel(int const*, unsigned int, int*)",
+     "calls": 160,
+     "total_ns": 1344787
+    },
+    {
+     "name": "void (anonymous namespace)::dense_f16_kernel<(anonymous namespace)::Q5K, false, float, float>(unsigned char const*, float const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 26,
+     "total_ns": 1280186
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<13, 2, false, 6>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 26,
+     "total_ns": 1217186
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<14, 4, false, 6>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 26,
+     "total_ns": 1191741
+    },
+    {
+     "name": "(anonymous namespace)::routed_bounds_kernel(int*, int*, unsigned int, unsigned int)",
+     "calls": 160,
+     "total_ns": 908491
+    },
+    {
+     "name": "(anonymous namespace)::gather_row_kernel(void const*, int, int const*, unsigned int, float*, unsigned int)",
+     "calls": 530,
+     "total_ns": 885695
+    },
+    {
+     "name": "(anonymous namespace)::hc_mean_kernel(float const*, float*, unsigned long, unsigned int, unsigned int)",
+     "calls": 330,
+     "total_ns": 703111
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<12, 8, false, 4>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 3,
+     "total_ns": 635994
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<16, 9, false, 6, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 6,
+     "total_ns": 607631
+    },
+    {
+     "name": "(anonymous namespace)::apply_mask_kernel(float*, unsigned long, unsigned int const*, unsigned long, unsigned int, unsigned int, unsigned int)",
+     "calls": 448,
+     "total_ns": 569550
+    },
+    {
+     "name": "(anonymous namespace)::sample_max_kernel(float const*, unsigned int const*, unsigned int, (anonymous namespace)::SampleScratch*)",
+     "calls": 127,
+     "total_ns": 562991
+    },
+    {
+     "name": "void (anonymous namespace)::hc_sinkhorn_kernel<4u>(float const*, float const*, float const*, float*, float*, float*, unsigned int, float, unsigned int)",
+     "calls": 160,
+     "total_ns": 501029
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<12, 4, false, 2>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 39,
+     "total_ns": 392022
+    },
+    {
+     "name": "quantize_q8_1(float const*, void*, long, long, long, long, long, unsigned int, HIP_vector_type<unsigned int, 3u>)",
+     "calls": 72,
+     "total_ns": 222568
+    },
+    {
+     "name": "(anonymous namespace)::block_max_kernel(float const*, unsigned long, float*, unsigned long, unsigned int, unsigned int, unsigned int)",
+     "calls": 112,
+     "total_ns": 215250
+    },
+    {
+     "name": "(anonymous namespace)::rope_table_kernel(float const*, HIP_vector_type<float, 2u>*, unsigned int, unsigned int, unsigned int)",
+     "calls": 80,
+     "total_ns": 160566
+    },
+    {
+     "name": "(anonymous namespace)::fill_mask_kernel(unsigned int*, unsigned long, unsigned int const*, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 112,
+     "total_ns": 156126
+    },
+    {
+     "name": "(anonymous namespace)::clear_mask_kernel(unsigned int*, unsigned long, unsigned int, unsigned int, unsigned int)",
+     "calls": 112,
+     "total_ns": 122205
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<12, 4, false, 4>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 9,
+     "total_ns": 93603
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<10, 1, false, 6, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 2,
+     "total_ns": 21602
+    }
+   ]
+  },
+  "iq1m": {
+   "config": "resident IQ1_M, DSpark, gufo bench -p 2048 -n 128 --temperature 1",
+   "kernels": [
+    {
+     "name": "void (anonymous namespace)::routed_f16_kernel<19, true, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, unsigned long, unsigned short const*, unsigned int, int const*, int const*, int const*, float const*, float, void*, unsigned int, unsigned int)",
+     "calls": 56,
+     "total_ns": 371835747
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<13, 8, false, 6>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 1449,
+     "total_ns": 361015820
+    },
+    {
+     "name": "void (anonymous namespace)::dense_f16_kernel<(anonymous namespace)::Q5K, true, _Float16, float>(unsigned char const*, _Float16 const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 120,
+     "total_ns": 355408257
+    },
+    {
+     "name": "void (anonymous namespace)::expert_gemv_kernel<19, 2, true, false, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int)",
+     "calls": 1092,
+     "total_ns": 247768870
+    },
+    {
+     "name": "void (anonymous namespace)::routed_f16_kernel<19, false, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, unsigned long, unsigned short const*, unsigned int, int const*, int const*, int const*, float const*, float, void*, unsigned int, unsigned int)",
+     "calls": 54,
+     "total_ns": 169573616
+    },
+    {
+     "name": "(anonymous namespace)::attention_f16_kernel(float const*, float const*, float const*, unsigned int, unsigned int, ds41_fp4_rows, unsigned int const*, unsigned int, unsigned int, float const*, float*, _Float16*, unsigned int, unsigned int, float, HIP_vector_type<float, 2u> const*)",
+     "calls": 80,
+     "total_ns": 155180304
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<13, 8, false, 1>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 998,
+     "total_ns": 153878849
+    },
+    {
+     "name": "void (anonymous namespace)::hc_mix_small_kernel<4u>(float const*, float const*, float const*, float const*, float*, float*, float*, float*, unsigned int, float, unsigned int, float)",
+     "calls": 3348,
+     "total_ns": 149030715
+    },
+    {
+     "name": "void (anonymous namespace)::markov_select_kernel<8u>(_Float16 const*, float const*, float const*, unsigned int, float*, int*)",
+     "calls": 190,
+     "total_ns": 139549092
+    },
+    {
+     "name": "void (anonymous namespace)::expert_gemv_kernel<19, 2, false, false, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int)",
+     "calls": 1053,
+     "total_ns": 128051220
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<13, 2, false, 6>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 1360,
+     "total_ns": 122452398
+    },
+    {
+     "name": "void (anonymous namespace)::hc_state_pass_kernel<true, false>(float const*, float const*, unsigned int, float const*, float const*, float const*, float*, float const*, float const*, float*, float const*, float*, unsigned int, unsigned int, float, ds41_v41_steer)",
+     "calls": 153,
+     "total_ns": 122131545
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<13, 8, false, 2>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 747,
+     "total_ns": 120062445
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<16, 2, true, 2, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 234,
+     "total_ns": 99983464
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<19, 2, true, 16, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 476,
+     "total_ns": 97628391
+    },
+    {
+     "name": "void (anonymous namespace)::routed_f16_kernel<16, true, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, unsigned long, unsigned short const*, unsigned int, int const*, int const*, int const*, float const*, float, void*, unsigned int, unsigned int)",
+     "calls": 18,
+     "total_ns": 86893098
+    },
+    {
+     "name": "void (anonymous namespace)::dense_f16_kernel<(anonymous namespace)::Q5K, true, _Float16, _Float16>(unsigned char const*, _Float16 const*, _Float16*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, _Float16*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 40,
+     "total_ns": 84150952
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<19, 2, true, 2, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 756,
+     "total_ns": 81075254
+    },
+    {
+     "name": "(anonymous namespace)::matmul_bf16_vec8_kernel(unsigned short const*, float const*, float*, unsigned int, unsigned int)",
+     "calls": 2614,
+     "total_ns": 80112667
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<13, 2, false, 1>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 960,
+     "total_ns": 79882133
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<13, 4, true, 6>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 680,
+     "total_ns": 68410827
+    },
+    {
+     "name": "void (anonymous namespace)::dense_f16_kernel<(anonymous namespace)::Q5K, true, float, float>(unsigned char const*, float const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 42,
+     "total_ns": 63089132
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<13, 2, false, 2>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 720,
+     "total_ns": 60816323
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<19, 9, false, 6, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 459,
+     "total_ns": 55958601
+    },
+    {
+     "name": "void (anonymous namespace)::routed_f16_kernel<29, false, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, unsigned long, unsigned short const*, unsigned int, int const*, int const*, int const*, float const*, float, void*, unsigned int, unsigned int)",
+     "calls": 18,
+     "total_ns": 53383911
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<19, 9, false, 2, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 702,
+     "total_ns": 49876668
+    },
+    {
+     "name": "void (anonymous namespace)::expert_gemv_kernel<29, 1, false, false, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int)",
+     "calls": 351,
+     "total_ns": 41815861
+    },
+    {
+     "name": "(anonymous namespace)::attention_split_kernel(float const*, float const*, float const*, unsigned int, unsigned int, ds41_fp4_rows, unsigned int const*, unsigned int, unsigned int, float*, unsigned int, unsigned int, float)",
+     "calls": 1560,
+     "total_ns": 39275427
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<16, 2, true, 16, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 153,
+     "total_ns": 37042290
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<8, 4, false, 6>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 680,
+     "total_ns": 35844306
+    },
+    {
+     "name": "void (anonymous namespace)::hc_collapse_norm_kernel<4u>(float const*, float const*, float const*, float*, unsigned int, float)",
+     "calls": 3427,
+     "total_ns": 35521826
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<13, 4, true, 1>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 480,
+     "total_ns": 35194204
+    },
+    {
+     "name": "void (anonymous namespace)::matmul_bf16_wmma_narrow_kernel<32u, 4u, 2u>(unsigned short const*, float const*, float*, unsigned int, unsigned int, unsigned int)",
+     "calls": 53,
+     "total_ns": 33211576
+    },
+    {
+     "name": "void (anonymous namespace)::expert_gemv_kernel<29, 1, true, false, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int)",
+     "calls": 117,
+     "total_ns": 31999868
+    },
+    {
+     "name": "__amd_rocclr_fillBufferUnAligned",
+     "calls": 285,
+     "total_ns": 29242668
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<13, 4, true, 2>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 360,
+     "total_ns": 28617810
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<10, 1, true, 2, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 114,
+     "total_ns": 28390446
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<12, 8, false, 6>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 244,
+     "total_ns": 27562210
+    },
+    {
+     "name": "void (anonymous namespace)::dense_f16_kernel<(anonymous namespace)::Q8, true, _Float16, float>(unsigned char const*, _Float16 const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 40,
+     "total_ns": 26075005
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<29, 9, false, 6, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 153,
+     "total_ns": 24598291
+    },
+    {
+     "name": "void (anonymous namespace)::dense_f16_kernel<(anonymous namespace)::Q5K, false, _Float16, float>(unsigned char const*, _Float16 const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 180,
+     "total_ns": 24301468
+    },
+    {
+     "name": "(anonymous namespace)::attention_combine_kernel(float const*, float const*, float*, unsigned int, float const*, unsigned int)",
+     "calls": 1560,
+     "total_ns": 22493018
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<8, 4, false, 1>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 480,
+     "total_ns": 22300992
+    },
+    {
+     "name": "void (anonymous namespace)::hc_expand_sum_kernel<false>(float const*, float const*, unsigned int, float const*, float const*, float const*, float*, unsigned int, unsigned int, ds41_v41_lora_terms)",
+     "calls": 1681,
+     "total_ns": 19818649
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<29, 9, false, 2, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 234,
+     "total_ns": 19616815
+    },
+    {
+     "name": "void (anonymous namespace)::expert_gemv_kernel<16, 2, true, false, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int)",
+     "calls": 108,
+     "total_ns": 19313858
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<8, 4, false, 2>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 360,
+     "total_ns": 16961036
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<12, 2, false, 6>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 228,
+     "total_ns": 16722761
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<13, 8, false, 4>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 83,
+     "total_ns": 14770457
+    },
+    {
+     "name": "void (anonymous namespace)::routed_f16_kernel<29, true, true>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, unsigned long, unsigned short const*, unsigned int, int const*, int const*, int const*, float const*, float, void*, unsigned int, unsigned int)",
+     "calls": 6,
+     "total_ns": 14168739
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<16, 9, false, 2, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 52,
+     "total_ns": 13824281
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<10, 1, false, 2, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 114,
+     "total_ns": 13735234
+    },
+    {
+     "name": "void (anonymous namespace)::routed_f16_kernel<22, false, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, unsigned long, unsigned short const*, unsigned int, int const*, int const*, int const*, float const*, float, void*, unsigned int, unsigned int)",
+     "calls": 4,
+     "total_ns": 13435222
+    },
+    {
+     "name": "void (anonymous namespace)::routed_f16_kernel<16, false, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, unsigned long, unsigned short const*, unsigned int, int const*, int const*, int const*, float const*, float, void*, unsigned int, unsigned int)",
+     "calls": 4,
+     "total_ns": 13199650
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<22, 2, false, 2, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 52,
+     "total_ns": 13057641
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<10, 1, true, 16, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 114,
+     "total_ns": 12791546
+    },
+    {
+     "name": "(anonymous namespace)::route_kernel(float const*, float const*, int*, float*, unsigned int, unsigned int, float)",
+     "calls": 1754,
+     "total_ns": 12311405
+    },
+    {
+     "name": "void mul_mat_vec_q<(ggml_type)12, 8, false, false>(void const*, void const*, int const*, ds41_ggml_hip_mm_fusion_args_device, float*, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, HIP_vector_type<unsigned int, 3u>, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 72,
+     "total_ns": 11569721
+    },
+    {
+     "name": "(anonymous namespace)::fp4_fake_quant_kernel(float*, unsigned char*, unsigned char*, unsigned int, unsigned int, int)",
+     "calls": 622,
+     "total_ns": 10412834
+    },
+    {
+     "name": "(anonymous namespace)::to_half_kernel(float const*, _Float16*, unsigned long)",
+     "calls": 160,
+     "total_ns": 10052971
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<29, 1, true, 6, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 51,
+     "total_ns": 9616464
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<29, 1, true, 2, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 78,
+     "total_ns": 9507457
+    },
+    {
+     "name": "(anonymous namespace)::q_kv_norm_kernel(float const*, float const*, float*, _Float16*, unsigned int, float const*, float const*, float*, unsigned int, unsigned int, float const*, unsigned int, float)",
+     "calls": 1754,
+     "total_ns": 8815688
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<12, 8, true, 6>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 114,
+     "total_ns": 8145944
+    },
+    {
+     "name": "void (anonymous namespace)::hc_expand_kernel<false>(float const*, float const*, float const*, float const*, float*, unsigned int, unsigned int, ds41_v41_lora_terms)",
+     "calls": 1674,
+     "total_ns": 7699616
+    },
+    {
+     "name": "void (anonymous namespace)::matmul_bf16_wmma_kernel<128u>(unsigned short const*, float const*, float*, unsigned int, unsigned int, unsigned int)",
+     "calls": 8,
+     "total_ns": 7694202
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<13, 2, false, 4>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 80,
+     "total_ns": 6918598
+    },
+    {
+     "name": "void (anonymous namespace)::hc_state_pass_kernel<false, false>(float const*, float const*, unsigned int, float const*, float const*, float const*, float*, float const*, float const*, float*, float const*, float*, unsigned int, unsigned int, float, ds41_v41_steer)",
+     "calls": 8,
+     "total_ns": 6758795
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<10, 1, false, 6, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 114,
+     "total_ns": 6473055
+    },
+    {
+     "name": "void (anonymous namespace)::dense_f16_kernel<(anonymous namespace)::Q5K, false, _Float16, _Float16>(unsigned char const*, _Float16 const*, _Float16*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, _Float16*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 60,
+     "total_ns": 6455451
+    },
+    {
+     "name": "(anonymous namespace)::topk_kernel(float const*, unsigned long, unsigned int*, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 522,
+     "total_ns": 6182200
+    },
+    {
+     "name": "(anonymous namespace)::engram_gate_kernel(float*, float const*, float const*, unsigned int, unsigned int, float)",
+     "calls": 82,
+     "total_ns": 5680538
+    },
+    {
+     "name": "(anonymous namespace)::compress_pool_kernel(float const*, float const*, float*, float*, unsigned int, unsigned int, unsigned int, float*, unsigned int)",
+     "calls": 123,
+     "total_ns": 5534570
+    },
+    {
+     "name": "(anonymous namespace)::rope_tail_kernel(float*, unsigned int, unsigned int, unsigned int, float const*, unsigned int, unsigned int, unsigned int, int)",
+     "calls": 2296,
+     "total_ns": 5069654
+    },
+    {
+     "name": "(anonymous namespace)::swiglu_kernel(float const*, float const*, float const*, float*, unsigned int, unsigned int, float)",
+     "calls": 80,
+     "total_ns": 5042304
+    },
+    {
+     "name": "void (anonymous namespace)::dense_f16_kernel<(anonymous namespace)::Q8, false, _Float16, float>(unsigned char const*, _Float16 const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 60,
+     "total_ns": 5010299
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<22, 2, false, 6, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 34,
+     "total_ns": 4410554
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<12, 4, false, 6>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 276,
+     "total_ns": 4395190
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<16, 2, true, 4, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 9,
+     "total_ns": 4190777
+    },
+    {
+     "name": "(anonymous namespace)::matmul_f32_row_token_kernel(float const*, float const*, float*, unsigned int, unsigned int)",
+     "calls": 114,
+     "total_ns": 4015964
+    },
+    {
+     "name": "void (anonymous namespace)::dense_f16_kernel<(anonymous namespace)::Q5K, false, float, float>(unsigned char const*, float const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 62,
+     "total_ns": 3947728
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<16, 9, false, 6, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 34,
+     "total_ns": 3847559
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<13, 4, true, 4>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 40,
+     "total_ns": 3648188
+    },
+    {
+     "name": "void (anonymous namespace)::matmul_bf16_wmma_narrow_kernel<16u, 4u, 4u>(unsigned short const*, float const*, float*, unsigned int, unsigned int, unsigned int)",
+     "calls": 56,
+     "total_ns": 3376616
+    },
+    {
+     "name": "(anonymous namespace)::sample_sum_kernel(float const*, unsigned int const*, unsigned int, float, (anonymous namespace)::SampleScratch*)",
+     "calls": 127,
+     "total_ns": 3194603
+    },
+    {
+     "name": "void (anonymous namespace)::indexer_score_small_kernel<false>(float const*, ds41_fp4_rows, float const*, float, float*, unsigned long, unsigned int, unsigned int, unsigned int const*, unsigned int)",
+     "calls": 448,
+     "total_ns": 3193938
+    },
+    {
+     "name": "(anonymous namespace)::expert_plan_kernel(int const*, unsigned int, int*)",
+     "calls": 1194,
+     "total_ns": 3039399
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<12, 8, false, 1>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 15,
+     "total_ns": 3021880
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<19, 2, true, 4, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 28,
+     "total_ns": 2988639
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<19, 9, false, 4, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 27,
+     "total_ns": 2895954
+    },
+    {
+     "name": "void (anonymous namespace)::expert_gemv_kernel<22, 2, false, false, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int)",
+     "calls": 24,
+     "total_ns": 2626577
+    },
+    {
+     "name": "void (anonymous namespace)::top8_bias_kernel<true>(float const*, float const*, unsigned int, int*, float*, unsigned int const*, float, ds41_v41_proposal*, int*, int const*)",
+     "calls": 190,
+     "total_ns": 2535377
+    },
+    {
+     "name": "void (anonymous namespace)::dspark_attention_head_kernel<8u>(float const*, float const*, unsigned int, unsigned int, unsigned int, float const*, unsigned int, float const*, float*, unsigned int, unsigned int, float)",
+     "calls": 114,
+     "total_ns": 2532975
+    },
+    {
+     "name": "__amd_rocclr_copyBufferRectAligned",
+     "calls": 316,
+     "total_ns": 2391207
+    },
+    {
+     "name": "(anonymous namespace)::sample_pick_kernel(float const*, unsigned int const*, unsigned int, ds41_v41_proposal const*, float, double, double, (anonymous namespace)::SampleScratch*)",
+     "calls": 127,
+     "total_ns": 2305287
+    },
+    {
+     "name": "(anonymous namespace)::indexer_score_wmma_kernel(float const*, ds41_fp4_rows, float const*, float, float*, unsigned long, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 16,
+     "total_ns": 2293520
+    },
+    {
+     "name": "(anonymous namespace)::copy_list_kernel(ds41_v41_copy_list)",
+     "calls": 1748,
+     "total_ns": 2210788
+    },
+    {
+     "name": "void (anonymous namespace)::expert_gemv_kernel<16, 2, false, false, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int)",
+     "calls": 24,
+     "total_ns": 2143234
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<8, 4, false, 4>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 40,
+     "total_ns": 1992184
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<12, 8, false, 2>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 7,
+     "total_ns": 1448796
+    },
+    {
+     "name": "(anonymous namespace)::rms_norm_kernel(float const*, float const*, float*, unsigned int, float)",
+     "calls": 458,
+     "total_ns": 1365874
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<29, 9, false, 4, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 9,
+     "total_ns": 1363230
+    },
+    {
+     "name": "(anonymous namespace)::argmax_bias_kernel(float const*, float const*, unsigned int, int*, unsigned int, int const*)",
+     "calls": 27,
+     "total_ns": 1164860
+    },
+    {
+     "name": "__amd_rocclr_copyBuffer",
+     "calls": 581,
+     "total_ns": 988815
+    },
+    {
+     "name": "(anonymous namespace)::routed_rows_kernel(int const*, unsigned int, int const*, int*)",
+     "calls": 80,
+     "total_ns": 777649
+    },
+    {
+     "name": "(anonymous namespace)::rope_fp8_kernel(float*, unsigned int, unsigned int, unsigned int, float const*, unsigned int, unsigned int, unsigned int, int)",
+     "calls": 237,
+     "total_ns": 641636
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<22, 2, false, 4, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 2,
+     "total_ns": 634633
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<29, 1, true, 4, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 3,
+     "total_ns": 615111
+    },
+    {
+     "name": "void (anonymous namespace)::expert_group_kernel<16, 9, false, 4, false>(unsigned char const*, unsigned char const*, unsigned char const* const*, unsigned char const* const*, float const*, float, float const*, float*, unsigned int, unsigned int, int const*, unsigned long, unsigned int, unsigned int, int, int)",
+     "calls": 2,
+     "total_ns": 580471
+    },
+    {
+     "name": "(anonymous namespace)::routed_counts_kernel(int const*, unsigned int, int*)",
+     "calls": 80,
+     "total_ns": 562709
+    },
+    {
+     "name": "void (anonymous namespace)::hc_sinkhorn_kernel<4u>(float const*, float const*, float const*, float*, float*, float*, unsigned int, float, unsigned int)",
+     "calls": 160,
+     "total_ns": 497668
+    },
+    {
+     "name": "(anonymous namespace)::routed_bounds_kernel(int*, int*, unsigned int, unsigned int)",
+     "calls": 80,
+     "total_ns": 461066
+    },
+    {
+     "name": "(anonymous namespace)::sample_max_kernel(float const*, unsigned int const*, unsigned int, (anonymous namespace)::SampleScratch*)",
+     "calls": 127,
+     "total_ns": 427540
+    },
+    {
+     "name": "void (anonymous namespace)::gemv_kernel<12, 4, false, 1>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int)",
+     "calls": 45,
+     "total_ns": 409737
+    },
+    {
+     "name": "(anonymous namespace)::gather_row_kernel(void const*, int, int const*, unsigned int, float*, unsigned int)",
+     "calls": 190,
+     "total_ns": 315817
+    },
+    {
+     "name": "(anonymous namespace)::hc_mean_kernel(float const*, float*, unsigned long, unsigned int, unsigned int)",
+     "calls": 123,
+     "total_ns": 308251
+    },
+    {
+     "name": "(anonymous namespace)::apply_mask_kernel(float*, unsigned long, unsigned int const*, unsigned long, unsigned int, unsigned int, unsigned int)",
+     "calls": 232,
+     "total_ns": 301383
+    },
+    {
+     "name": "quantize_q8_1(float const*, void*, long, long, long, long, long, unsigned int, HIP_vector_type<unsigned int, 3u>)",
+     "calls": 72,
+     "total_ns": 236252
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<12, 8, false, 4>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 1,
+     "total_ns": 216652
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<12, 4, false, 2>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 21,
+     "total_ns": 207132
+    },
+    {
+     "name": "(anonymous namespace)::rope_table_kernel(float const*, HIP_vector_type<float, 2u>*, unsigned int, unsigned int, unsigned int)",
+     "calls": 80,
+     "total_ns": 132446
+    },
+    {
+     "name": "(anonymous namespace)::block_max_kernel(float const*, unsigned long, float*, unsigned long, unsigned int, unsigned int, unsigned int)",
+     "calls": 58,
+     "total_ns": 106368
+    },
+    {
+     "name": "(anonymous namespace)::fill_mask_kernel(unsigned int*, unsigned long, unsigned int const*, unsigned int, unsigned int, unsigned int, unsigned int)",
+     "calls": 58,
+     "total_ns": 77044
+    },
+    {
+     "name": "(anonymous namespace)::clear_mask_kernel(unsigned int*, unsigned long, unsigned int, unsigned int, unsigned int)",
+     "calls": 58,
+     "total_ns": 68046
+    },
+    {
+     "name": "void (anonymous namespace)::split_gemv_kernel<12, 4, false, 4>(unsigned char const*, unsigned char const*, float, float const*, unsigned long, float*, unsigned int, unsigned int, unsigned int, unsigned int, unsigned char const*, float*, unsigned int, unsigned int, float*, unsigned int*)",
+     "calls": 3,
+     "total_ns": 32841
+    }
+   ]
+  }
+ }
+}

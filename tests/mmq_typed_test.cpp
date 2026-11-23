@@ -1150,6 +1150,18 @@ bool RoutedF16Case(const TypeCase& t, int M, int K, int n_tokens, int n_experts,
 
 }  // namespace
 
+// The vendored SWAR __vcmpne4/__vsub4 match CUDA's per-byte definitions, and
+// the wrapping __vsub4 gives the saturating subtraction's bytes for every
+// value the IQ1/IQ2/IQ3 loaders and dot products pass it.
+bool SignHelpersCase() {
+  unsigned int counts[2] = {1, 1};
+  const bool ok = ds41_mmq_check_sign_helpers(counts) == 0 && counts[0] == 0 &&
+                  counts[1] == 0;
+  std::printf("%s sign helpers: %u definition, %u caller mismatches\n",
+              ok ? "PASS" : "FAIL", counts[0], counts[1]);
+  return ok;
+}
+
 int main(int argc, char** argv) {
   int devices = 0;
   if (hipGetDeviceCount(&devices) != hipSuccess || devices == 0) {
@@ -1161,6 +1173,7 @@ int main(int argc, char** argv) {
   std::mt19937 rng(41);
   bool ok = RoutedPlanCases(rng);
   ok = Iq2XsKnownCase() && ok;
+  ok = SignHelpersCase() && ok;
   if (argc == 2 && std::strcmp(argv[1], "--routed-plan") == 0) {
     for (const auto& t : kTypes) {
       if (t.type != 19 && t.type != 29 && t.type != 16 && t.type != 17 &&

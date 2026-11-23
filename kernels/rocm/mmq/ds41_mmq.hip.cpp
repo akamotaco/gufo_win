@@ -1841,3 +1841,88 @@ template void mul_mat_q_case<GGML_TYPE_Q4_K>(
     ds41_ggml_hip_context & ctx, const mmq_args & args, hipStream_t stream);
 template void mul_mat_q_case<GGML_TYPE_MXFP4>(
     ds41_ggml_hip_context & ctx, const mmq_args & args, hipStream_t stream);
+
+// Exhaustive check of the vendored SWAR byte helpers (vendors/hip.h).
+// counts[0]: __vcmpne4 and __vsub4 against CUDA's per-byte definitions
+// (compare, wrapping subtract) over all 65,536 byte pairs, a different pair
+// in each lane so a carry or borrow into a neighbouring lane shows up.
+// counts[1]: the wrapping __vsub4 against the saturating __vsubss4 it
+// replaced, over every value its callers pass: IQ2/IQ3 grid bytes with
+// all-zero or all-one sign masks, and IQ1 grid nibbles times 8 minus their
+// 7 or 9 bias. Both must be 0.
+namespace {
+
+__device__ unsigned int ds41_check_lane(unsigned int t, unsigned int lane) {
+  return (t * (2u * lane + 1u) + 37u * lane) & 0xffffu;
+}
+
+__global__ void ds41_check_sign_helpers_kernel(unsigned int* counts) {
+  const unsigned int t = blockIdx.x * blockDim.x + threadIdx.x;
+  if (t < 65536u) {
+    unsigned int a = 0, b = 0, ne = 0, sub = 0;
+    for (unsigned int lane = 0; lane < 4; ++lane) {
+      const unsigned int pair = ds41_check_lane(t, lane);
+      const unsigned int x = pair & 0xffu, y = pair >> 8;
+      a |= x << (8 * lane);
+      b |= y << (8 * lane);
+      ne |= (x != y ? 0xffu : 0u) << (8 * lane);
+      sub |= ((x - y) & 0xffu) << (8 * lane);
+    }
+    if (__vcmpne4(a, b) != ne || (unsigned int)__vsub4((int)a, (int)b) != sub)
+      atomicAdd(&counts[0], 1u);
+  }
+  // Grid words: IQ2_XXS 256, IQ2_XS 512, IQ2_S 1024 (two words each),
+  // IQ3_XXS 256, IQ3_S 512, IQ1 2048.
+  const auto masked = [&](unsigned int g) {
+    for (unsigned int m = 0; m < 16; ++m) {
+      unsigned int mask = 0;
+      for (unsigned int lane = 0; lane < 4; ++lane)
+        mask |= (m >> lane & 1u ? 0xffu : 0u) << (8 * lane);
+      const int x = (int)(g ^ mask);
+      if (__vsub4(x, (int)mask) != __vsubss4(x, (int)mask))
+        atomicAdd(&counts[1], 1u);
+    }
+  };
+  if (t < 256) {
+    masked((unsigned int)iq2xxs_grid[t]);
+    masked((unsigned int)(iq2xxs_grid[t] >> 32));
+    masked(iq3xxs_grid[t]);
+  }
+  if (t < 512) {
+    masked((unsigned int)iq2xs_grid[t]);
+    masked((unsigned int)(iq2xs_grid[t] >> 32));
+    masked(iq3s_grid[t]);
+  }
+  if (t < 1024) {
+    masked((unsigned int)iq2s_grid[t]);
+    masked((unsigned int)(iq2s_grid[t] >> 32));
+  }
+  if (t < NGRID_IQ1S) {
+    const int grid = (int)iq1s_grid_gpu[t];
+    for (const int bias : {0x09090909, 0x07070707})
+      for (const int shift : {0, 4}) {
+        const int x = ((grid >> shift) & 0x0F0F0F0F) << 3;
+        if (__vsub4(x, bias) != __vsubss4(x, bias))
+          atomicAdd(&counts[1], 1u);
+      }
+  }
+}
+
+}  // namespace
+
+extern "C" int ds41_mmq_check_sign_helpers(unsigned int counts[2]) {
+  unsigned int* d = nullptr;
+  if (hipMalloc(&d, 2 * sizeof(unsigned int)) != hipSuccess)
+    return -1;
+  int rc = hipMemset(d, 0, 2 * sizeof(unsigned int)) == hipSuccess ? 0 : -1;
+  if (rc == 0) {
+    ds41_check_sign_helpers_kernel<<<65536 / 256, 256>>>(d);
+    rc = hipGetLastError() == hipSuccess &&
+                 hipMemcpy(counts, d, 2 * sizeof(unsigned int),
+                           hipMemcpyDeviceToHost) == hipSuccess
+             ? 0
+             : -1;
+  }
+  (void)hipFree(d);
+  return rc;
+}

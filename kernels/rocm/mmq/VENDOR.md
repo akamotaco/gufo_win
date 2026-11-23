@@ -3,7 +3,11 @@
 These model-private kernels derive from llama.cpp commit
 `5c0e9468378eba6bf3cc1989ff5d62fbbe4d9e3a` (MIT, The ggml authors),
 originally under `ggml/src/ggml-cuda/`. The DS4 adapter also carries changes
-from `xangel82/DS4-GB10-GX10-DSpark-CUDA`, commit `910501e`.
+from `xangel82/DS4-GB10-GX10-DSpark-CUDA`, commit `910501e`. `vendors/hip.h`
+takes the SWAR `__vcmpne4` and wrapping `__vsub4` of llama.cpp #27962 as Gufo
+#1295 ported them; `ds41_mmq_check_sign_helpers` (run by `ds41.mmq_typed`)
+checks them against CUDA's definitions and against the saturating subtraction
+over every value the IQ loaders pass.
 
 Gufo builds this directory with HIP for AMD `gfx1151`. Device headers use
 `.hip.hpp`; translation units use `.hip.cpp`. The adapter calls HIP/hipBLAS

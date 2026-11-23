@@ -129,6 +129,11 @@ int ds41_mmq_moe_vec_typed(int type, const void* W, const float* X_f32,
                            int n_tokens, int n_experts, int n_expert_used,
                            hipStream_t stream);
 
+// Test hook: counts[0] and counts[1] are the vendored SWAR byte helpers'
+// mismatches against CUDA's definitions and, for __vsub4, against the
+// saturating subtraction over its callers' values (both 0). 0 on success.
+int ds41_mmq_check_sign_helpers(unsigned int counts[2]);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif
