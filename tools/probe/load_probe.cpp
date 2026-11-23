@@ -852,7 +852,8 @@ int main(int argc, char** argv) {
   options.stream_experts = stream_experts;
   options.expert_cache_bytes = expert_cache_bytes;
   options.dspark_model_path = dspark;
-  if (ds41_engine_open(&engine, &options) != 0)
+  if (ds41_engine_open(&engine, &options) != 0 ||
+      !ds41_engine_fit_expert_cache(engine))
     return 1;
   const double seconds =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - begin)

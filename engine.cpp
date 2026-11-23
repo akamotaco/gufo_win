@@ -334,9 +334,12 @@ bool Model::StreamsExperts() const noexcept {
   return options_.stream_experts;
 }
 
-void Model::FitExpertCache(std::uint64_t pending_bytes) {
-  if (options_.stream_experts)
-    (void)ds41_engine_fit_experts(engine_, pending_bytes);
+gufo::expert_stream::Store* Model::ExpertStore() const noexcept {
+  return options_.stream_experts ? ds41_engine_expert_store(engine_) : nullptr;
+}
+
+bool Model::FitExpertCache() {
+  return ds41_engine_fit_expert_cache(engine_);
 }
 
 bool Model::EnableImageRouting(std::string* error_msg) {

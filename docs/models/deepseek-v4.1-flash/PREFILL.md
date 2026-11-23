@@ -80,7 +80,7 @@ order with the build (E83).
 | DRAM read | 240 GB/s | same |
 | Reread of up to 32 MiB (last-level cache) | 750-920 GB/s | `tools/bench/ds41_read_ramp.hip` (E108) |
 | LDS read | 6,280 GB/s: a 16-byte read costs ~30 vector instructions, a matrix-core product ~60 | `gfx1151_peak.hip` (E109) |
-| Expert reads from two NVMe drives | ~10.4 GB/s (0.38 ms + 0.10 ms/MiB fitted) | `tools/ds41/prefetch_sim.py` read-cost fit on the served traces |
+| Expert reads from two NVMe drives | ~10.4 GB/s (0.38 ms + 0.10 ms/MiB fitted) | `prefetch_sim.py` (Gufo `tools/expert_stream/`) read-cost fit on the served traces |
 
 ## Served budget: one 19,927-token fresh prompt
 
@@ -323,7 +323,7 @@ python3 tools/prof/prof.py show prof/t_results.db --passes 1000 --pass 1 --stage
 
 # Route traces for replays (prediction is off while tracing)
 DS41_EXPERT_TRACE=routes.trace build/release/gufo serve ...
-python3 tools/ds41/prefetch_sim.py routes.trace --cache --limit-gib 98.8
+python3 $GUFO_SRC/tools/expert_stream/prefetch_sim.py routes.trace --cache --limit-gib 98.8
 ```
 
 Kernel microbenchmarks: `ds41_mmq_bench --f16 1` (routed, recorded counts),

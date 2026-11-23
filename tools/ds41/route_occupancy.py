@@ -6,7 +6,12 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from prefetch_sim import read_trace
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from gufo_tools import use_expert_stream_tools  # noqa: E402
+
+use_expert_stream_tools()
+from expert_trace import read_trace  # noqa: E402
 
 
 def main():

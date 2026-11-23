@@ -71,7 +71,7 @@ kernel, a demand read; before a 24,576-byte upload, the Engram rows; right
 after the logits download, host work (sampling, verification, commit,
 setup); in DSpark cycles, up to the drafter's token download, drafter time.
 Route traces (`DS41_EXPERT_TRACE`, prediction off) of these workloads feed
-`tools/ds41/prefetch_sim.py` and `tools/ds41/evict_sim.py` (E89, E92).
+Gufo's `tools/expert_stream/prefetch_sim.py` and `evict_sim.py` (E89, E92).
 
 ## Bytes per decoded token (UD-IQ2_XXS)
 

@@ -2,7 +2,7 @@
   "schema": 1,
   "name": "deepseek41flash",
   "version": "0.4.0",
-  "api_version": ">= 0.3.3",
+  "api_version": ">= 0.3.43",
   "entry": "deepseek41flash_register",
   "registration_target": "gufo_deepseek41flash",
   "depends": [],
@@ -163,6 +163,12 @@
       "role": "test"
     },
     "deepseek41flash_vision_prompt_test": {
+      "requires": [
+        "testing"
+      ],
+      "role": "test"
+    },
+    "deepseek41flash_checkpoint_size_test": {
       "requires": [
         "testing"
       ],

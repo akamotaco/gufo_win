@@ -154,6 +154,20 @@ int main() {
       std::fprintf(stderr, "expert store check failed: %s\n", label);
     ok = pass && ok;
   };
+  // Fit fills the cache within the limit; most checks start from an empty
+  // one that misses refill.
+  constexpr uint64_t kAmpleGrant = uint64_t{1} << 40;
+  const auto fit = [&](ds41_expert_store* s) {
+    return s && ds41_expert_store_handle(s)->Fit(kAmpleGrant);
+  };
+  const auto fit_empty = [&](ds41_expert_store* s) {
+    if (!fit(s))
+      return false;
+    auto* handle = ds41_expert_store_handle(s);
+    (void)handle->Release(UINT64_MAX);
+    return handle->Restore() > 0 && handle->GetStats().cache_bytes == 0;
+  };
+  check(fit_empty(store), "fit, then empty");
   check(run(0, {0, 1, 2, 3, 1, 2}), "cold stage bytes");
   const auto cold = ds41_expert_store_get_stats(store);
   check(cold.uses == 6 && cold.hits == 0 && cold.bytes_read == 4 * kSlot,
@@ -226,6 +240,7 @@ int main() {
   // another scan does not displace the working set for one-use experts.
   ds41_expert_store_destroy(store);
   store = ds41_expert_store_create(&f.model, &f.weights, 4 * kSlot);
+  check(fit_empty(store), "fit, then empty");
   std::vector<int32_t> scan(32 * 6);
   for (int i = 0; i < 16 * 6; ++i)
     scan[i] = i;
@@ -249,6 +264,7 @@ int main() {
   // decays to the lowest score while layer 15 stays hot, then a batch routes
   // it with a new expert that outscores it.
   store = ds41_expert_store_create(&f.model, &f.weights, 4 * kSlot);
+  check(fit_empty(store), "fit, then empty");
   check(store && run(10, {0, 0, 0, 0, 0, 0}) && run(15, {1, 1, 2, 2, 3, 3}),
         "routed victim setup");
   const std::vector<int32_t> hot15{1, 1, 2, 2, 3, 3};
@@ -264,6 +280,7 @@ int main() {
   // Frequency classes: expert 0, routed in eight batches, outlasts expert 9,
   // routed once and more recently (LRU would evict expert 0).
   store = ds41_expert_store_create(&f.model, &f.weights, 4 * kSlot);
+  check(fit_empty(store), "fit, then empty");
   bool frequent = store != nullptr;
   for (int i = 0; i < 8 && frequent; ++i)
     frequent = run(5, {0, 0, 0, 0, 0, 0});
@@ -283,6 +300,7 @@ int main() {
   // next prepare of that layer adopts them without re-reading, and any other
   // layer drops the job and reads its own experts again.
   store = ds41_expert_store_create(&f.model, &f.weights, 4 * kSlot);
+  check(fit_empty(store), "fit, then empty");
   check(store && run(0, {0, 1, 2, 3, 1, 2}), "prefetch setup stage bytes");
   const auto sweep_base = ds41_expert_store_get_stats(store);
   const auto idle = [](const ds41_expert_store* s) {
@@ -326,6 +344,7 @@ int main() {
   // set wider than the stage half keeps the experts with the most predicted
   // routes: 100-147 twice, the rest once, and the batch routes 100-107.
   store = ds41_expert_store_create(&f.model, &f.weights, 4 * kSlot);
+  check(fit_empty(store), "fit, then empty");
   {
     std::vector<int32_t> all(DS41_MAX_EXPERT);
     for (uint32_t e = 0; e < DS41_MAX_EXPERT; ++e)
@@ -366,7 +385,6 @@ int main() {
           "small batch drops the wide prefetch");
   }
   ds41_expert_store_destroy(store);
-  store = ds41_expert_store_create(&f.model, &f.weights, 4 * kSlot);
   char histogram_path[] = "/tmp/gufo-ds41-histogram-XXXXXX";
   const int histogram = mkstemp(histogram_path);
   const char data[] =
@@ -376,8 +394,9 @@ int main() {
         "write histogram");
   if (histogram >= 0)
     (void)close(histogram);
-  check(store && ds41_expert_store_seed(store, histogram_path),
-        "seed histogram");
+  store = ds41_expert_store_create(&f.model, &f.weights, 4 * kSlot, 0,
+                                   histogram_path);
+  check(fit(store), "seed histogram");
   (void)unlink(histogram_path);
   before = ds41_expert_store_get_stats(store);
   check(before.uses == 0 && before.bytes_read == 0,
@@ -390,13 +409,12 @@ int main() {
   after = ds41_expert_store_get_stats(store);
   check(after.hits - before.hits == 6, "higher ranked layer seeded first");
   before = after;
-  check(run(6, {15, 15, 15, 15, 15, 15}), "unseeded expert bytes");
+  check(run(6, {15, 15, 15, 15, 15, 15}), "last ranked expert bytes");
   after = ds41_expert_store_get_stats(store);
-  check(after.hits == before.hits, "seed leaves a slot for request experts");
+  check(after.hits - before.hits == 6, "seed fills the whole cache");
   ds41_expert_store_destroy(store);
   // Experts the ranking leaves out fill the rest of the seed, interleaved
   // across layers: expert 0 of layers 0 and 1 after the one ranked expert.
-  store = ds41_expert_store_create(&f.model, &f.weights, 4 * kSlot);
   char partial_path[] = "/tmp/gufo-ds41-histogram-XXXXXX";
   const int partial = mkstemp(partial_path);
   const char partial_data[] = "DS41_EXPERT_HISTOGRAM_V1\n4 12 50\n";
@@ -406,8 +424,9 @@ int main() {
       "write partial histogram");
   if (partial >= 0)
     (void)close(partial);
-  check(store && ds41_expert_store_seed(store, partial_path),
-        "seed partial histogram");
+  store = ds41_expert_store_create(&f.model, &f.weights, 4 * kSlot, 0,
+                                   partial_path);
+  check(fit(store), "seed partial histogram");
   (void)unlink(partial_path);
   before = ds41_expert_store_get_stats(store);
   check(run(4, {12, 12, 12, 12, 12, 12}) && run(0, {0, 0, 0, 0, 0, 0}) &&
@@ -418,8 +437,7 @@ int main() {
         "seed fills the cache past the ranking");
   ds41_expert_store_destroy(store);
   store = ds41_expert_store_create(&f.model, &f.weights, 4 * kSlot);
-  check(store && ds41_expert_store_seed_default(store),
-        "seed built-in ranking");
+  check(fit(store), "seed built-in ranking");
   before = ds41_expert_store_get_stats(store);
   check(run(26, {116, 116, 116, 116, 116, 116}), "built-in seeded stage bytes");
   after = ds41_expert_store_get_stats(store);
@@ -443,6 +461,7 @@ int main() {
     Fixture m(true);
     check(m.ok, "mixed-size fixture");
     store = ds41_expert_store_create(&m.model, &m.weights, 4 * kSlot);
+    check(fit_empty(store), "fit, then empty");
     std::vector<int32_t> all(DS41_MAX_EXPERT);
     for (uint32_t e = 0; e < DS41_MAX_EXPERT; ++e)
       all[e] = static_cast<int32_t>(e);
@@ -474,6 +493,7 @@ int main() {
     // the cache of four large experts holds seven of them, and a large
     // expert never takes a small slot.
     store = ds41_expert_store_create(&m.model, &m.weights, 4 * kSlot);
+    check(fit_empty(store), "fit, then empty");
     const std::vector<int32_t> seven{0, 1, 2, 3, 4, 5, 6, 0, 1, 2, 3, 4};
     check(store && prepare(1, seven) && CheckStage(1, seven, stage, true),
           "small experts cold");
@@ -501,7 +521,7 @@ int main() {
     Fixture pruned(false, 192);
     check(pruned.ok, "pruned fixture");
     store = ds41_expert_store_create(&pruned.model, &pruned.weights, 4 * kSlot);
-    check(store && ds41_expert_store_seed_default(store), "pruned seed");
+    check(fit(store), "pruned seed");
     check(run(0, {0, 0, 0, 0, 0, 0}), "pruned seeded stage bytes");
     check(ds41_expert_store_get_stats(store).hits == 6,
           "pruned seed interleaves layers");

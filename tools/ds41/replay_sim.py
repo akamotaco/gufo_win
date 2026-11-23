@@ -12,7 +12,7 @@ encoder layer's FFN input. This tool reports:
   C. replay, prompt and decode reads and stalls under cache policies that
      keep the replay's experts cached.
 
-Uses prefetch_sim.py's trace reader and cache model.
+Uses the trace reader and cache model of Gufo's tools/expert_stream/ (GUFO_SRC).
 """
 
 import argparse
@@ -23,6 +23,9 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from gufo_tools import use_expert_stream_tools  # noqa: E402
+
+use_expert_stream_tools()
 import prefetch_sim as ps  # noqa: E402
 
 FIRST_DECODER = 20

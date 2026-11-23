@@ -42,6 +42,66 @@ static_assert(std::is_trivially_copyable_v<Metadata>);
 struct DrafterRange {
   std::uint32_t start{}, end{};
 };
+// The RAM cache backing (BackingPlan): payloads take whole pages, each page
+// has its own block metadata, and a tenth of the budget beyond a fixed
+// reserve is left to the cache's other memory.
+constexpr std::size_t kBackingPage = 65536, kBackingBlockMetadata = 1024,
+                      kBackingHeader = 4096, kBackingReserve = 4ULL << 20;
+// The components of one continuation, by ID (index + 1).
+std::vector<ContinuationComponent> LayoutComponents(bool speculative,
+                                                    std::size_t vocab) {
+  std::vector<ContinuationComponent> components;
+  const auto add = [&](ContinuationPart part, std::uint32_t layer,
+                       cache::ComponentDescriptor d, int state = 0,
+                       std::uint32_t ratio = 1) {
+    d.id = {static_cast<std::uint32_t>(components.size() + 1)};
+    d.layout_version = 1;
+    components.push_back({d, part, layer, state, ratio});
+  };
+  add(ContinuationPart::kTokens, 0,
+      {.kind = cache::ComponentKind::kAppendRows,
+       .row_bytes = sizeof(int),
+       .rows_per_chunk = kChunkRows});
+  const std::size_t index_dim = DS41_N_INDEXER_HEAD_DIM;
+  const std::array<std::size_t, 4> row_bytes = {
+      DS41_N_HEAD_DIM / 2, DS41_N_HEAD_DIM / 16, index_dim / 2, index_dim / 32};
+  // Every window ring and every compressor frontier form one private
+  // component each: cache bookkeeping scales with the component count.
+  std::size_t pool_bytes = 0;
+  for (std::uint32_t l = 0; l < DS41_N_LAYER; ++l) {
+    const auto ratio = ds41_layer_layout_state_ratio(l);
+    if (!ratio)
+      continue;
+    for (std::size_t i = 0; i < kRowParts.size(); ++i)
+      add(ContinuationPart::kRows, l,
+          {.kind = cache::ComponentKind::kAppendRows,
+           .row_bytes = row_bytes[i],
+           .rows_per_chunk = kChunkRows},
+          kRowParts[i], ratio);
+    pool_bytes += 2 * std::size_t{ratio} * DS41_N_HEAD_DIM * sizeof(float);
+  }
+  add(ContinuationPart::kWindow, 0,
+      {.kind = cache::ComponentKind::kPrivateState,
+       .state_bytes = std::size_t{DS41_N_LAYER} * DS41_N_SWA * DS41_N_HEAD_DIM *
+                      sizeof(float)});
+  add(ContinuationPart::kPool, 0,
+      {.kind = cache::ComponentKind::kPrivateState, .state_bytes = pool_bytes});
+  add(ContinuationPart::kLogits, 0,
+      {.kind = cache::ComponentKind::kPrivateState,
+       .state_bytes = vocab * sizeof(float)});
+  add(ContinuationPart::kMetadata, 0,
+      {.kind = cache::ComponentKind::kPrivateState,
+       .state_bytes = sizeof(Metadata)});
+  if (speculative)
+    add(ContinuationPart::kDrafter, 0,
+        {.kind = cache::ComponentKind::kPrivateState,
+         .state_bytes = sizeof(DrafterRange) + ds41_dspark_ring_bytes()});
+  return components;
+}
+// Rows a component holds at `context` tokens (its allocation).
+Rows ComponentRows(const ContinuationComponent& c, std::uint32_t context) {
+  return c.part == ContinuationPart::kTokens ? context : context / c.ratio + 1;
+}
 using Coverage = std::vector<std::pair<std::size_t, std::size_t>>;
 // Loaded byte ranges cover [0, end) without a gap.
 bool Covered(Coverage ranges, std::size_t end) {
@@ -182,51 +242,7 @@ ContinuationAdapter::ContinuationAdapter(std::shared_ptr<Model> model,
   if (!model_ || identity_.empty() || context < 2 ||
       context > model_->MaxContext() || (speculative && !model_->HasDspark()))
     throw std::invalid_argument("invalid DeepSeek V4.1 adapter configuration");
-  const auto add = [&](ContinuationPart part, std::uint32_t layer,
-                       cache::ComponentDescriptor d, int state = 0,
-                       std::uint32_t ratio = 1) {
-    d.id = {static_cast<std::uint32_t>(components_.size() + 1)};
-    d.layout_version = 1;
-    components_.push_back({d, part, layer, state, ratio});
-  };
-  add(ContinuationPart::kTokens, 0,
-      {.kind = cache::ComponentKind::kAppendRows,
-       .row_bytes = sizeof(int),
-       .rows_per_chunk = kChunkRows});
-  const std::size_t index_dim = DS41_N_INDEXER_HEAD_DIM;
-  const std::array<std::size_t, 4> row_bytes = {
-      DS41_N_HEAD_DIM / 2, DS41_N_HEAD_DIM / 16, index_dim / 2, index_dim / 32};
-  // Every window ring and every compressor frontier form one private
-  // component each: cache bookkeeping scales with the component count.
-  std::size_t pool_bytes = 0;
-  for (std::uint32_t l = 0; l < DS41_N_LAYER; ++l) {
-    const auto ratio = ds41_layer_state_ratio(l);
-    if (!ratio)
-      continue;
-    for (std::size_t i = 0; i < kRowParts.size(); ++i)
-      add(ContinuationPart::kRows, l,
-          {.kind = cache::ComponentKind::kAppendRows,
-           .row_bytes = row_bytes[i],
-           .rows_per_chunk = kChunkRows},
-          kRowParts[i], ratio);
-    pool_bytes += 2 * std::size_t{ratio} * DS41_N_HEAD_DIM * sizeof(float);
-  }
-  add(ContinuationPart::kWindow, 0,
-      {.kind = cache::ComponentKind::kPrivateState,
-       .state_bytes = std::size_t{DS41_N_LAYER} * DS41_N_SWA * DS41_N_HEAD_DIM *
-                      sizeof(float)});
-  add(ContinuationPart::kPool, 0,
-      {.kind = cache::ComponentKind::kPrivateState, .state_bytes = pool_bytes});
-  add(ContinuationPart::kLogits, 0,
-      {.kind = cache::ComponentKind::kPrivateState,
-       .state_bytes = std::size_t(model_->VocabSize()) * sizeof(float)});
-  add(ContinuationPart::kMetadata, 0,
-      {.kind = cache::ComponentKind::kPrivateState,
-       .state_bytes = sizeof(Metadata)});
-  if (speculative_)
-    add(ContinuationPart::kDrafter, 0,
-        {.kind = cache::ComponentKind::kPrivateState,
-         .state_bytes = sizeof(DrafterRange) + ds41_dspark_ring_bytes()});
+  components_ = LayoutComponents(speculative_, model_->VocabSize());
   for (const auto& component : components_)
     descriptors_.push_back(component.descriptor);
   const auto put = [&](std::uint32_t value) {
@@ -262,8 +278,7 @@ Session& ContinuationAdapter::GetSession(cache::Slot& slot) {
   return *state.session;
 }
 Rows ContinuationAdapter::Capacity(const ContinuationComponent& c) const {
-  return c.part == ContinuationPart::kTokens ? context_
-                                             : context_ / c.ratio + 1;
+  return ComponentRows(c, context_);
 }
 std::vector<cache::ComponentPosition> ContinuationAdapter::PositionsAt(
     Rows tokens) const {
@@ -277,14 +292,47 @@ std::vector<cache::BackingClass> ContinuationAdapter::BackingPlan(
     std::size_t ram) const {
   // Rows, private states and metadata share the same committed pages; a
   // payload takes a contiguous page group and charges all of its slack.
-  constexpr std::size_t page = 65536, per_block = 1024, header = 4096;
-  const auto budget = ram > (4ULL << 20) ? (ram - (4ULL << 20)) / 10 * 9 : 0;
-  if (budget <= header)
-    return {};
-  const auto blocks = (budget - header) / (page + per_block);
+  const auto blocks = BackingBlocks(ram);
   if (!blocks)
     return {};
-  return {{page, blocks, header + blocks * per_block}};
+  return {
+      {kBackingPage, blocks, kBackingHeader + blocks * kBackingBlockMetadata}};
+}
+std::size_t ContinuationAdapter::BackingBlocks(std::size_t ram) {
+  const auto budget =
+      ram > kBackingReserve ? (ram - kBackingReserve) / 10 * 9 : 0;
+  return budget > kBackingHeader ? (budget - kBackingHeader) /
+                                       (kBackingPage + kBackingBlockMetadata)
+                                 : 0;
+}
+std::size_t ContinuationAdapter::CheckpointBlocks(std::uint32_t context,
+                                                  bool speculative,
+                                                  std::size_t vocab) {
+  const auto pages = [](std::size_t bytes) {
+    return (bytes + kBackingPage - 1) / kBackingPage;
+  };
+  // Every chunk of rows and every private state is its own payload.
+  std::size_t blocks = 0;
+  for (const auto& c : LayoutComponents(speculative, vocab)) {
+    const auto& d = c.descriptor;
+    if (d.kind == cache::ComponentKind::kPrivateState) {
+      blocks += pages(d.state_bytes);
+      continue;
+    }
+    const std::size_t rows = ComponentRows(c, context);
+    blocks += rows / d.rows_per_chunk * pages(d.rows_per_chunk * d.row_bytes) +
+              pages(rows % d.rows_per_chunk * d.row_bytes);
+  }
+  return blocks;
+}
+std::size_t ContinuationAdapter::FullContextBackingBytes(std::uint32_t context,
+                                                         bool speculative,
+                                                         std::size_t vocab) {
+  // The smallest budget whose BackingBlocks holds the checkpoint's blocks.
+  const auto plan =
+      kBackingHeader + CheckpointBlocks(context, speculative, vocab) *
+                           (kBackingPage + kBackingBlockMetadata);
+  return kBackingReserve + (plan + 8) / 9 * 10;
 }
 cache::Capabilities ContinuationAdapter::GetCapabilities() const {
   return {.continuation = true, .persistent_encoding = true};

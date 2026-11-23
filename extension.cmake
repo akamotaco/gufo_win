@@ -192,6 +192,8 @@ _deepseek41flash_test(lora_adapter "cpu;gguf"
 if(ENGINE_ENABLE_HIP)
   _deepseek41flash_test(vision_prompt "cpu;vision"
     LINK_LIBRARIES gufo_deepseek41flash_hip gufo_deepseek41flash)
+  _deepseek41flash_test(checkpoint_size "cpu;cache"
+    LINK_LIBRARIES gufo_deepseek41flash_hip gufo_deepseek41flash gufo_ext_hip)
   foreach(name IN ITEMS attention candidate_mask draft_sampling expert_store
                         hc_state_pass mmq_typed steer)
     _deepseek41flash_test(${name} "hip;gpu;gfx1151;quality"

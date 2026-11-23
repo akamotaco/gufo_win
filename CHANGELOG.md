@@ -3,6 +3,34 @@
 Notable user-facing changes are recorded here. Versions follow `version` in
 [extension.json](extension.json).
 
+## Unreleased
+
+Needs extension API 0.3.43 (Gufo's experimental expert store, gufo-org/gufo#1318).
+
+### Features
+
+* **expert streaming:** Gufo's serving sizes the streamed expert cache
+  together with the RAM prompt cache, and the automatic prompt-cache share
+  is now per session
+  ([E126](docs/models/deepseek-v4.1-flash/EXPERIMENTS.md#e126--serving-sizes-the-expert-cache-with-the-prompt-cache-retained)).
+* **expert streaming:** the automatic RAM prompt cache follows the context:
+  room for one checkpoint of a whole context per session (0.29 GiB at 256K),
+  or one in all with `--cache-disk` and at least 1 GiB, instead of a fixed
+  3 GiB or 1 GiB per session, so the expert cache gets the rest
+  ([E128](docs/models/deepseek-v4.1-flash/EXPERIMENTS.md#e128--the-automatic-prompt-cache-follows-the-context-retained)).
+* **expert streaming:** under host pressure the streamed expert cache gives
+  memory back first, keeping the experts in use, and regrows once it is free
+  again; pressure is measured against the store's 1 GiB floor instead of
+  Gufo's 4 GiB host reserve, which the cache leaves unused on purpose.
+  Without this, Gufo's idle relief released the RAM prompt cache at startup.
+  The expert cache gets back the 3.6-3.9 GiB that 0.4.0 left free for that
+  reason ([E127](docs/models/deepseek-v4.1-flash/EXPERIMENTS.md#e127--the-expert-store-as-proposed-to-gufo-retained)).
+* **expert streaming:** the streamed expert cache lives in device pages the
+  host cannot swap and is filled once, when its size is known: it starts at
+  the same size every time, and gives memory back under host pressure in
+  about a second instead of up to a minute
+  ([E127](docs/models/deepseek-v4.1-flash/EXPERIMENTS.md#e127--the-expert-store-as-proposed-to-gufo-retained)).
+
 ## 0.4.0 (2026-11-23)
 
 Built on upstream Gufo `e7e38411`; needs extension API 0.3.3 or later.

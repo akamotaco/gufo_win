@@ -45,6 +45,16 @@ public:
   [[nodiscard]] Session& GetSession(cache::Slot&);
   [[nodiscard]] std::vector<cache::BackingClass> BackingPlan(
       std::size_t ram_bytes) const override;
+  // Backing blocks a RAM cache budget of `ram` bytes commits (BackingPlan).
+  [[nodiscard]] static std::size_t BackingBlocks(std::size_t ram);
+  // Backing blocks one checkpoint of a whole `context`-token continuation
+  // takes: each row chunk and private state in whole blocks.
+  [[nodiscard]] static std::size_t CheckpointBlocks(std::uint32_t context,
+                                                    bool speculative,
+                                                    std::size_t vocab);
+  // The smallest RAM cache budget whose backing holds that checkpoint.
+  [[nodiscard]] static std::size_t FullContextBackingBytes(
+      std::uint32_t context, bool speculative, std::size_t vocab);
   [[nodiscard]] std::span<const ContinuationComponent> Layout() const {
     return components_;
   }

@@ -16,7 +16,6 @@
 #include <limits>
 #include <map>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <span>
 #include <sstream>
@@ -43,11 +42,19 @@ using namespace gufo::ext;
 constexpr std::string_view kStateAbi = "deepseek-v4.1-flash-gfx1151-state-v1";
 
 // The memory left to a streamed model's expert cache depends on the RAM cache,
-// so its automatic budget is a fixed share, smaller with a disk cache.
-constexpr std::size_t kStreamedRamShareBytes = std::size_t{3} << 30;
-constexpr std::size_t kStreamedDiskRamShareBytes = std::size_t{1} << 30;
-// What the host's backing commits before readiness.
-constexpr std::size_t kBackingGrowAheadBytes = std::size_t{2} << 30;
+// so its automatic budget is room for checkpoints of a whole context: one per
+// session, or one in all with a disk cache, from which conversations evicted
+// from RAM restore in milliseconds.
+// With a disk cache the budget is at least this much: Gufo charges the disk
+// checkpoints' token lists to the RAM cache's metadata, about a tenth of the
+// budget, and they grow with the conversations on disk (gufo-org/gufo#1329).
+// 1 GiB holds those of about five 67K-token agent sessions (E128).
+constexpr std::size_t kDiskRamFloorBytes = std::size_t{1} << 30;
+// Free memory the expert cache leaves once serving sizes it after the
+// sessions: buffers the first prompt still allocates (~0.8 GiB measured at 1,
+// 2 and 4 sessions), transient prefill peaks (~0.3-0.6 GiB) and margin
+// against swap.
+constexpr std::size_t kExpertHeadroomBytes = std::size_t{2} << 30;
 // Prompt-cache transfer streams besides each session's own: one capture or
 // restore batch leases at most this many. Gufo's default of 64 holds about
 // 0.4 GiB more GPU memory, which streamed builds lose from the expert cache.
@@ -242,15 +249,13 @@ public:
                      std::string artifact_fingerprint,
                      std::string support_fingerprint,
                      std::shared_ptr<vision::Encoder> vision,
-                     std::size_t snapshot_budget_cap,
-                     std::size_t retained_ram_bytes, std::size_t sessions)
+                     std::size_t ram_share_bytes, std::size_t sessions)
       : model_(std::move(model)),
         vision_(std::move(vision)),
         max_context_(max_context),
         use_dspark_(use_dspark),
         max_draft_tokens_(std::max(max_draft_tokens, 1u)),
-        snapshot_budget_cap_(snapshot_budget_cap),
-        retained_ram_bytes_(retained_ram_bytes),
+        ram_share_bytes_(ram_share_bytes),
         sessions_(sessions) {
     const auto policy = PrefillPolicy(model_->ExactPrefill());
     if (!artifact_fingerprint.empty()) {
@@ -284,21 +289,10 @@ public:
            server::Logger::Info("cache", message);
          },
          kBatchTransferStreams + sessions_});
-    // The host measures free memory for the RAM cache and commits its backing
-    // before readiness, so the expert cache takes what is left only then.
-    if (model_->StreamsExperts() && resources->commit_backing) {
-      resources->commit_backing =
-          [this, commit = resources->commit_backing](std::size_t budget) {
-            commit(budget);
-            FitExpertCache();
-          };
-    }
     return resources;
   }
   [[nodiscard]] std::unique_ptr<TextRunnerState> BindComponentState(
       cache::Adapter& adapter, cache::Slot& slot) const override {
-    // A server with no RAM or disk cache commits no backing.
-    FitExpertCache();
     auto& deepseek = dynamic_cast<ContinuationAdapter&>(adapter);
     return std::make_unique<DeepSeekTextRunnerState>(deepseek.GetSession(slot),
                                                      adapter, slot);
@@ -351,17 +345,23 @@ public:
     if (hipMemGetInfo(&free_bytes, &total_bytes) == hipSuccess) {
       capacity = free_bytes;
     }
+    // Serving sizes a streamed expert cache after the sessions and the
+    // prompt cache, whose automatic budget is the share per session.
+    TextRunnerExpertCacheClaim experts{};
+    if (auto* store = model_->ExpertStore()) {
+      experts.store = store;
+      experts.headroom_bytes = kExpertHeadroomBytes;
+      experts.prompt_cache_share_per_session_bytes = ram_share_bytes_;
+    }
     return {
         .resident_weights_bytes = std::nullopt,
         .state_capacity_bytes = capacity,
         .per_request_state_bytes = std::nullopt,
         .temporary_scratch_bytes = std::nullopt,
-        .retained_snapshot_capacity_bytes =
-            snapshot_budget_cap_
-                ? std::min(HostSnapshotBudgetBytes(), snapshot_budget_cap_)
-                : HostSnapshotBudgetBytes(),
+        .retained_snapshot_capacity_bytes = HostSnapshotBudgetBytes(),
         .retained_snapshot_ceiling_bytes = CacheCeilingBytes(),
         .requires_device_runtime_lock = true,
+        .expert_cache = experts,
     };
   }
 
@@ -910,19 +910,6 @@ private:
     return {std::move(messages), std::move(tools), options};
   }
 
-  // Sessions and the committed backing exist; the retained checkpoints past
-  // the backing's grow-ahead still commit with captures.
-  void FitExpertCache() const {
-    if (model_->StreamsExperts()) {
-      std::call_once(expert_fit_, [this] {
-        model_->FitExpertCache(retained_ram_bytes_ > kBackingGrowAheadBytes
-                                   ? retained_ram_bytes_ -
-                                         kBackingGrowAheadBytes
-                                   : 0);
-      });
-    }
-  }
-
   static bool HasImages(const ChatRequest& request) {
     return std::ranges::any_of(request.messages,
                                [](const auto& m) { return !m.images.empty(); });
@@ -990,10 +977,8 @@ private:
   std::uint32_t max_context_;
   bool use_dspark_;
   std::uint32_t max_draft_tokens_;
-  std::size_t snapshot_budget_cap_;
-  std::size_t retained_ram_bytes_;
+  std::size_t ram_share_bytes_;
   std::size_t sessions_;
-  mutable std::once_flag expert_fit_;
   cache::Identity component_identity_;
 };
 
@@ -1143,18 +1128,31 @@ std::shared_ptr<ext::TextModelRunner> CreateDeepSeekTextRunner(
       }
       PrepareVision(*vision);
     }
-    const std::size_t ram_share = !model->StreamsExperts() ? 0
-                                  : disk_cache ? kStreamedDiskRamShareBytes
-                                               : kStreamedRamShareBytes;
-    const std::size_t retained_ram = !options.ram_cache.enabled ? 0
-                                     : options.ram_cache.capacity_bytes != 0
-                                         ? options.ram_cache.capacity_bytes
-                                         : ram_share;
+    std::size_t ram_share = 0;
+    if (model->StreamsExperts()) {
+      const auto checkpoint = ContinuationAdapter::FullContextBackingBytes(
+          max_context, use_dspark,
+          static_cast<std::size_t>(model->VocabSize()));
+      // Serving multiplies the share by the sessions.
+      const auto sessions = options.session_count;
+      const auto disk_total = std::max(checkpoint, kDiskRamFloorBytes);
+      ram_share =
+          disk_cache ? (disk_total + sessions - 1) / sessions : checkpoint;
+      server::Logger::Info(
+          "cache", "deepseek41 prompt-cache share per session: " +
+                       std::to_string(ram_share) + " bytes (" +
+                       std::to_string(checkpoint) + " for a " +
+                       std::to_string(max_context) + "-token checkpoint, " +
+                       (disk_cache ? "one in all with the disk cache, "
+                                     "at least 1 GiB"
+                                   : "one per session") +
+                       ")");
+    }
     return std::make_shared<DeepSeekTextRunner>(
         std::move(model), max_context, use_dspark,
         options.speculative.max_draft_tokens, std::move(model_fingerprint),
         std::move(support_fingerprint), std::move(vision), ram_share,
-        retained_ram, options.session_count);
+        options.session_count);
   } catch (const std::exception& e) {
     set_error(std::string("DeepSeek V4.1 load failed: ") + e.what());
     return nullptr;

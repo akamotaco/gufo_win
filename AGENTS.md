@@ -73,8 +73,8 @@ not a pass.
 - For agent workloads, record one session with `tools/ds41/agent_replay.py`
   and replay it against each arm, so every arm sees the same requests.
 - Expert-streaming rules can be compared offline first: `DS41_EXPERT_TRACE=PATH`
-  writes a routing trace for `tools/ds41/{prefetch,evict,replay}_sim.py`
-  ([tools/README.md](tools/README.md)).
+  writes a routing trace for Gufo's `tools/expert_stream/{prefetch,evict}_sim.py`
+  and `tools/ds41/replay_sim.py` ([tools/README.md](tools/README.md)).
 - Keep small measured gains. Report noisy results as inconclusive rather than
   repeating until a run agrees.
 

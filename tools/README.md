@@ -17,13 +17,16 @@ checkout.
 
 ## Expert streaming
 
-These replay an expert trace, which the engine writes with `DS41_EXPERT_TRACE=PATH`.
+The engine writes an expert trace with `DS41_EXPERT_TRACE=PATH`. Gufo's
+`tools/expert_stream/` reads it (the format is in its README) and holds the
+model-neutral replays: `prefetch_sim.py` (prefetch policies), `evict_sim.py`
+(eviction rules, LRU and the offline optimum) and `trace_compare.py` (two
+traces record the same cache decisions). The scripts below import that reader:
+set `GUFO_SRC` to a Gufo checkout.
 
 | Script | Use |
 | --- | --- |
-| `ds41/prefetch_sim.py` | Compare prefetch policies offline |
 | `ds41/prefetch_fit.py` | Fit the simulator's costs to measured A/B ratios |
-| `ds41/evict_sim.py` | Compare eviction rules, LRU and the offline optimum |
 | `ds41/replay_sim.py` | Read stalls of the decoder's bounded replay |
 | `ds41/rank_eval.py` | Evaluate the built-in expert ranking |
 | `ds41/route_occupancy.py` | Routed tile occupancy per layer |

@@ -2,8 +2,12 @@
 
 How the engine runs a backbone whose routed experts do not fit in memory:
 the dense weights stay resident and the routed experts are read from the
-SSD into a bounded cache. The code is `runtime/expert_store.{h,cpp}` and the
-expert paths of `runtime/v41_decode.cpp`. Measured results, including the
+SSD into a bounded cache. The cache, reads and prefetch are Gufo's
+experimental expert store (`gufo/ext/experimental/expert_stream.hpp`).
+`runtime/expert_store.{h,cpp}` describes DeepSeek's expert tensors to it and
+holds the DeepSeek policy (headroom without serving, built-in ranking,
+pruned builds, histograms); the decoder's expert paths are in `runtime/v41_decode.cpp`.
+Measured results, including the
 rejected designs, are in [EXPERIMENTS.md](EXPERIMENTS.md#ssd-expert-streaming-m3);
 open work is in [BACKLOG.md](BACKLOG.md).
 
@@ -38,14 +42,12 @@ only the resident tensors, so the dense weights go through the device heap.
 ## Expert cache
 
 - **Slots by size class.** Each distinct per-layer expert size (gate, up and
-  down together, rounded to 256 B) is a class. A class grows by 128 MiB
-  managed-memory chunks while the cap and the reserve allow (4 GiB of free
-  memory until the server fits the cache; after the fit, the limit holds
-  back 5.5 GiB plus RAM-cache backing still to commit, and the cache grows
-  toward it while 4.5 GiB stays free, above the 4 GiB host reserve under
-  which Gufo gives the RAM prompt cache's memory back, E129). An expert
-  takes a free slot of its own class, or the smallest larger free slot once
-  its class can no longer grow.
+  down together, rounded to 256 B) is a class. The cache lives in 2 MiB
+  device pages (`hipMemCreate`), which the kernel does not swap; each class's
+  slots lie back to back in one reserved address range, mapped in 128 MiB
+  chunks as it grows, while the cap, the grant and 1 GiB of free host and
+  device-heap memory allow. An expert takes a free slot of its own class, or
+  the smallest larger free slot once its class can no longer grow.
 - **Admission and eviction.** Each expert counts its uses (its route count,
   at most 4 per call), decaying with a half-life of 2,048 tokens of its
   layer's clock, which a prompt chunk advances by at most 16; at each use it
@@ -59,23 +61,45 @@ only the resident tensors, so the dense weights go through the device heap.
   long (E105); a larger expert never takes a smaller slot. A batch's
   own hits are never victims: its weight table points at their slots, and
   the admission copies land before its kernels run.
-- **Startup seed.** The cache is filled at load from the built-in ranking of
+- **Ranking.** The cache is filled from the built-in ranking of
   all 15,360 experts (`expert_rank.inc`, imported from Xolotl's calibration
   trace by `tools/ds41/import_expert_rank.py`), or from
   `MODEL.gguf.expert-histogram` (`DS41_EXPERT_HISTOGRAM_V1`, built by
   `tools/ds41/expert_histogram.py` from oracle `routes.npz` files) when that
-  sidecar exists. Experts a histogram omits follow its ranked ones,
-  interleaved across layers. The seed fills 15/16 of min(cap, free memory −
-  reserve), leaving room for session allocations and request-specific
-  experts; seed reads do not count in the statistics.
-- **Fit after the sessions.** Once `gufo serve` has created its sessions
-  and the RAM prompt cache's backing, it allocates the prefetch stage and
-  sets the limit to the cache plus the free memory minus the reserve. Over
-  it, the newest chunks are freed: each size class keeps its highest-scored
-  experts, moving survivors out of the freed chunks into the slots of the
-  evicted ones. The ranking then seeds whatever room is left, so the first
-  prompt does not grow the cache. With `--cache-disk`, a streamed model's
-  automatic RAM prompt cache is 1 GiB (3 GiB without it).
+  sidecar exists; the store gets it when it is created. Experts the ranking
+  omits follow its ranked ones, interleaved across layers. Nothing is cached
+  until the cache is sized; filling it does not count in the statistics.
+- **Fit after the sessions.** The runner declares an expert-cache claim
+  (Gufo's `TextRunnerExpertCacheClaim`): its store, 2 GiB of headroom, and
+  the RAM prompt cache's automatic share per session. Its total is the
+  backing one checkpoint of a whole context takes, from the continuation
+  layout (`ContinuationAdapter::FullContextBackingBytes`), once per session,
+  or once in all with `--cache-disk`, whose checkpoints restore the
+  conversations the RAM cache evicts (16-30 ms for about 38K tokens). With
+  DSpark one checkpoint is 0.29 GiB at a 256K context and 1.11 GiB at 1M.
+  With `--cache-disk` the total is at least 1 GiB: Gufo charges the disk
+  checkpoints' token lists to the RAM cache's metadata, about a tenth of its
+  budget, and a smaller budget fills with them after one or two long agent
+  sessions, after which checkpoints are refused (E128, gufo-org/gufo#1329).
+  Once `gufo serve` has created its sessions, it commits the prompt cache's
+  whole backing and grants the store the cache plus the free memory, minus
+  the headroom. The store allocates the prefetch stage out of the grant, takes
+  the rest as its limit and fills it once from the ranking (about 25 s for
+  101 GiB), so the first prompt does not grow the cache. `gufo prompt`,
+  `gufo bench` and the load probe size it themselves right after loading
+  (`ds41_expert_store_fit_available`), leaving 4 GiB free, more for prefill
+  batches over 2,048 tokens. The RAM prompt cache keeps what its backing
+  committed by then: growing it later needs 4 GiB of device heap free, which
+  the fitted expert cache does not leave (E126); the disk cache serves the
+  rest.
+- **Host pressure.** The fitted cache leaves about 2 GiB free on purpose, so
+  while experts stream Gufo measures host pressure against the store's
+  1 GiB floor rather than its 4 GiB host reserve. Below the floor, the idle
+  server first frees the cache's newest chunks, moving the experts in use
+  out of them into the slots of the coldest, then prompt-cache memory, and
+  refuses new requests below half the floor. Once the floor, the
+  released bytes and 256 MiB are available again, the cache may regrow to
+  its grant (E127).
 
 ## A layer's prepare
 
@@ -128,14 +152,17 @@ its pinned mirror is rewritten.
   keep value's. Lent slots stay unoccupied, return to the spare slots at
   the next call, and are the first an admitted expert takes, so the
   admission policy does not change (E119).
-- **Prefetch stage.** A compact 96-row buffer in two 48-row parity halves,
-  allocated when prefetch first runs, so it never shrinks the seed. A job's
-  experts take rows in its layer's half, addressed with the allocation
-  stride (the stride of the largest expert). A job beyond 48 experts keeps
-  the experts the most predicted routes use (E104); the excess stays a
-  demand read. A job starts only while its
-  layer is the next one to prepare, checked under the read pool's lock: an
-  overtaken job's half may hold the rows of the layer in compute.
+- **Prefetch stage.** A compact 96-row buffer in two 48-row halves,
+  allocated out of the grant before the cache is filled. Each prepare opens
+  the next prediction window, and windows alternate halves, so the layer
+  in compute and the one being prefetched never share one, also where the
+  last layer wraps to the first (E130). A job's experts take rows in its
+  window's half, addressed with the allocation stride (the stride of the
+  largest expert). A job beyond 48 experts keeps the experts the most
+  predicted routes use (E104); the excess stays a demand read. A job starts
+  only while its window is the next one to prepare, checked under the read
+  pool's lock: an overtaken job's half may hold the rows of the layer in
+  compute.
 
 ## Split reads across two drives
 

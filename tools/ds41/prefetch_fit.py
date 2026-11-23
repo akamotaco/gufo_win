@@ -9,6 +9,9 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from gufo_tools import use_expert_stream_tools  # noqa: E402
+
+use_expert_stream_tools()
 from prefetch_sim import Policy, fit_read_cost, read_trace, simulate  # noqa: E402
 
 CURRENT = Policy("current", lead=1, k=6, only_after_miss=True)

@@ -209,8 +209,10 @@ int RunDeepSeekBenchmarkImpl(
   }
   std::string error;
   auto model = Model::Load(options.model_path, model_options, &error);
-  if (model == nullptr) {
-    std::cerr << "Error creating DeepSeek V4.1 Flash model: " << error << '\n';
+  if (model == nullptr || !model->FitExpertCache()) {
+    std::cerr << "Error creating DeepSeek V4.1 Flash model: "
+              << (model ? "cannot fill the streamed expert cache" : error)
+              << '\n';
     PrintModelLoadTime(model_load_start, false);
     return 1;
   }
@@ -740,8 +742,10 @@ static std::shared_ptr<Model> LoadDeepSeekModel(
   }
   std::string error;
   auto model = Model::Load(opt.model_path, model_options, &error);
-  if (model == nullptr) {
-    std::cerr << "Error creating DeepSeek V4.1 Flash model: " << error << '\n';
+  if (model == nullptr || !model->FitExpertCache()) {
+    std::cerr << "Error creating DeepSeek V4.1 Flash model: "
+              << (model ? "cannot fill the streamed expert cache" : error)
+              << '\n';
     PrintModelLoadTime(load_start, false);
     return nullptr;
   }

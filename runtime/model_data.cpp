@@ -122,6 +122,11 @@ bool ds41_layer_is_kv_source(uint32_t il) {
   return false;
 }
 
+uint32_t ds41_layer_layout_state_ratio(uint32_t il) {
+  return ds41_layer_is_kv_source(il) ? ds41_expected_layer_compress_ratio(il)
+                                     : 0;
+}
+
 bool ds41_layer_is_index_source(uint32_t il) {
   for (uint32_t layer : DS41_INDEX_SOURCE_LAYERS) {
     if (layer == il)
@@ -1828,20 +1833,6 @@ static void ds41_acquire_instance_lock(void) {
   g_ds41_lock_fd = fd;
 }
 
-/* Primes the streamed expert cache from the model's histogram file when one
- * sits beside it, otherwise from the built-in ranking. */
-static void seed_experts(ds41_engine* e) {
-  const char* histogram = e->expert_histogram;
-  const bool custom = access(histogram, F_OK) == 0;
-  if (custom && !ds41_expert_store_seed(e->expert_store, histogram)) {
-    fprintf(stderr, "ds41: failed to load expert histogram %s; using the built-in ranking\n", histogram);
-    if (!ds41_expert_store_seed_default(e->expert_store))
-      fprintf(stderr, "ds41: failed to warm the expert cache\n");
-  } else if (!custom && !ds41_expert_store_seed_default(e->expert_store)) {
-    fprintf(stderr, "ds41: failed to warm the expert cache\n");
-  }
-}
-
 /* Copies the direction adapter sets to the device and fills e->steer: each
  * layer's vectors, then for project mode the Gram terms of each edit. */
 static bool upload_directions(ds41_engine* e, const ds41_engine_options* opt) {
@@ -2133,8 +2124,9 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
     }
 
     if (streaming) {
+      const std::string histogram = std::string(opt->model_path) + ".expert-histogram";
       e->expert_store = ds41_expert_store_create(e->model, e->weights, opt->expert_cache_bytes,
-                                                 e->prefill_batch);
+                                                 e->prefill_batch, histogram.c_str());
       if (!e->expert_store) {
         fprintf(stderr, "ds41: failed to initialize the streamed expert store\n");
         ds41_engine_close(e);
@@ -2144,8 +2136,6 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
       const std::string tails = std::string(opt->model_path) + ".expert-tails";
       if (access(tails.c_str(), F_OK) == 0)
         (void)ds41_expert_store_attach_tails(e->expert_store, tails.c_str());
-      e->expert_histogram = strdup((std::string(opt->model_path) + ".expert-histogram").c_str());
-      seed_experts(e);
     }
     if (!upload_loras(e, opt)) {
       fprintf(stderr, "ds41: failed to load the LoRA adapter\n");
@@ -2205,19 +2195,12 @@ bool ds41_engine_has_image_bias(const ds41_engine* e) {
     return e && e->image_bias;
 }
 
-/* Free memory the expert cache leaves when it is sized after the sessions:
- * the store's live floor, above Gufo's 4 GiB host reserve, plus the buffers
- * the first prompt still allocates (~0.8 GiB measured at 1, 2 and 4
- * sessions). */
-static constexpr uint64_t kWarmHeadroom = 11ull << 29;
+gufo::expert_stream::Store* ds41_engine_expert_store(ds41_engine* e) {
+  return e ? ds41_expert_store_handle(e->expert_store) : nullptr;
+}
 
-int ds41_engine_fit_experts(ds41_engine* e, uint64_t pending_bytes) {
-  if (!e || !e->expert_store)
-    return 1;
-  if (!ds41_expert_store_set_reserve(e->expert_store, kWarmHeadroom + pending_bytes))
-    fprintf(stderr, "ds41: unable to fit the expert cache to the memory left after the sessions\n");
-  seed_experts(e);
-  return 0;
+bool ds41_engine_fit_expert_cache(ds41_engine* e) {
+  return !e || !e->expert_store || ds41_expert_store_fit_available(e->expert_store);
 }
 
 bool ds41_engine_has_dspark(const ds41_engine* e) {
@@ -2248,7 +2231,6 @@ void ds41_engine_close(ds41_engine* e) {
     (void)hipFree(e->weights->router_bf16);
   ds41_expert_store_log(e->expert_store);
   ds41_expert_store_destroy(e->expert_store);
-  free(e->expert_histogram);
   weights_free(e->weights);
   if (e->dspark) {
     ds41_dspark_free(e->dspark);

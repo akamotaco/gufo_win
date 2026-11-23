@@ -15,6 +15,9 @@ import sys
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from gufo_tools import use_expert_stream_tools  # noqa: E402
+
+use_expert_stream_tools()
 from prefetch_sim import Cache, Snapshot, read_trace  # noqa: E402
 
 RANK_INC = Path(__file__).resolve().parents[2] / "runtime/expert_rank.inc"

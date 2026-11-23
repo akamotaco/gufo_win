@@ -29,7 +29,7 @@ were measured, and the comparison with the engine this extension replaces, are i
 
 > [!WARNING]
 > **By default the model takes the whole machine.** Resident builds and streamed
-> builds with the default expert cache leave about 2-5 GiB of host memory free, so a
+> builds with the default expert cache leave about 2 GiB of host memory free, so a
 > desktop, browser or other GPU workload can push the server or the system out of
 > memory. To share the machine, stream and cap the expert cache; see
 > [Leaving memory for other work](#leaving-memory-for-other-work).
@@ -204,9 +204,8 @@ file must have that shard count.
 
 ## Leaving memory for other work
 
-A streamed build's expert cache fills the free memory, minus 5.5 GiB (it stops
-growing at 4.5 GiB free, above the 4 GiB Gufo keeps for the host), which is the
-fastest setting but leaves little for anything else. `--expert-cache-bytes N` caps
+A streamed build's expert cache fills the free memory, minus 2 GiB, which is the
+fastest setting but leaves nothing for anything else. `--expert-cache-bytes N` caps
 it, and the rest stays free for a desktop, other models or other jobs. A smaller
 cache means more SSD reads: decode slows, and recovers as the cache learns which
 experts the current work routes to.
@@ -228,8 +227,12 @@ memory use is about 13 GiB plus the cap.
 With `--stream-experts`, routed experts are read from the SSD into a cache that
 fills the free memory, so more free memory means fewer disk reads. Streaming is
 never chosen automatically: a build that does not fit fails to load and says what
-it needs. The automatic RAM prompt cache is 1 GiB with `--cache-disk` and 3 GiB
-without, and the expert cache gets the rest.
+it needs. The automatic RAM prompt cache has room for one checkpoint of a whole
+context per session (about 0.29 GiB at a 256K context and 1.1 GiB at 1M), and
+the expert cache gets the rest. With `--cache-disk` it has room for one in all,
+whatever the sessions, and at least 1 GiB: conversations it evicts restore
+from disk in milliseconds, and the RAM cache keeps the disk checkpoints'
+bookkeeping.
 
 **A second NVMe drive helps.** Pack each expert's tail into a file on the second
 drive and link it beside the first shard as `MODEL.gguf.expert-tails`. Every expert
@@ -302,8 +305,8 @@ Resident `IQ1_M` at the native 1M context, one session:
 | Vision projector | 0.9 GiB |
 | **Host memory left**, server ready | **1.7 GiB**, 1.6 GiB with vision |
 
-Streamed `UD-IQ2_XXS` with the drafter and vision gets a 97 GiB expert cache and
-leaves about 5 GiB free.
+Streamed `UD-IQ2_XXS` with the drafter and vision gets a 95-96 GiB expert cache and
+leaves about 2 GiB free.
 
 - Set the UMA carve-out to its minimum in the firmware; the model lives in GTT.
 - Let the GPU map nearly all memory with `amdgpu.gttsize=126976 ttm.pages_limit=32505856`.

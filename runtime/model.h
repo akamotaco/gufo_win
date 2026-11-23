@@ -5,6 +5,10 @@
 #include <cstdint>
 #include <vector>
 
+namespace gufo::expert_stream {
+class Store;
+}  // namespace gufo::expert_stream
+
 struct ds41_tokens {
   int* v;
   int len;
@@ -188,11 +192,13 @@ inline constexpr std::uint32_t DS41_SESSION_PAYLOAD_VERSION = 6;
 
 int ds41_engine_open(ds41_engine** out, const ds41_engine_options* options);
 void ds41_engine_close(ds41_engine* engine);
-/* Streamed engines: re-sizes the expert cache seeded at open from the memory
- * free now, shrinking it or seeding the room left. Call once the sessions and
- * other long-lived buffers exist; pending_bytes is what the caller will still
- * allocate later (cache backing that grows with use). 0 on success. */
-int ds41_engine_fit_experts(ds41_engine* engine, uint64_t pending_bytes);
+/* Streamed engines: the expert store, which serving sizes once the sessions
+ * exist; null for a resident engine. */
+gufo::expert_stream::Store* ds41_engine_expert_store(ds41_engine* engine);
+/* Without serving (gufo prompt, gufo bench, probes): sizes and fills the
+ * streamed expert cache from the memory available now, leaving headroom for
+ * the sessions. True for a resident engine. */
+bool ds41_engine_fit_expert_cache(ds41_engine* engine);
 int ds41_engine_vocab_size(const ds41_engine* engine);
 const char* ds41_engine_model_name(const ds41_engine* engine);
 
@@ -385,6 +391,10 @@ void* ds41_decoder_state_part(ds41_decoder* decoder, uint32_t layer, int part,
                               uint64_t* bytes);
 /* Tokens per row of a KV source layer's row parts; 0 for other layers. */
 uint32_t ds41_layer_state_ratio(uint32_t layer);
+/* The same ratio as the compiled layout declares it. Loading refuses an
+ * artifact whose ratios differ, so it equals ds41_layer_state_ratio once a
+ * model is loaded, and needs none. */
+uint32_t ds41_layer_layout_state_ratio(uint32_t layer);
 /* Adopts state restored into the decoder's arrays at `n` tokens, rebuilding
  * the Engram n-gram history from the tokens. */
 int ds41_decoder_adopt(ds41_decoder* decoder, const int* tokens, uint32_t n);
