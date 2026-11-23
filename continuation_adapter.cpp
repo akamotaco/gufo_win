@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdio>
 #include <cstring>
+#include <gufo/ext/host.hpp>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -18,9 +20,44 @@ namespace gufo::models::gemma4 {
 namespace {
 using cache::Rows;
 using cache::TransferResult;
+// A failed transfer only costs this checkpoint (the cache skips it), so the
+// error must not stay behind as the thread's last error: the next kernel
+// launch check would report it and fail the whole request (seen on Windows,
+// "candidates.hip.cpp: invalid argument" after capture_failed).
 void Check(hipError_t result) {
-  if (result != hipSuccess)
+  if (result != hipSuccess) {
+    (void)hipGetLastError();
     throw std::runtime_error(hipGetErrorString(result));
+  }
+}
+// Describes a pointer for the failed-copy log: memory type and the device and
+// host addresses HIP maps it to.
+std::string Describe(const void* pointer) {
+  hipPointerAttribute_t a{};
+  const auto status = hipPointerGetAttributes(&a, pointer);
+  (void)hipGetLastError();
+  char text[160];
+  if (status != hipSuccess) {
+    std::snprintf(text, sizeof(text), "%p(unknown to HIP)", pointer);
+  } else {
+    std::snprintf(text, sizeof(text), "%p(type=%d device=%p host=%p)", pointer,
+                  static_cast<int>(a.type), a.devicePointer, a.hostPointer);
+  }
+  return text;
+}
+// Copies one run, logging what failed so the cause can be found.
+void CopyRun(const rocm::CopyRun& run, hipStream_t stream) {
+  const auto result =
+      hipMemcpyAsync(run.to, run.from, run.bytes, hipMemcpyDefault, stream);
+  if (result != hipSuccess) {
+    (void)hipGetLastError();
+    server::Logger::Warn(
+        "gemma4",
+        std::string("event=cache_copy_failed error=") +
+            hipGetErrorName(result) + " bytes=" + std::to_string(run.bytes) +
+            " from=" + Describe(run.from) + " to=" + Describe(run.to));
+    throw std::runtime_error(hipGetErrorString(result));
+  }
 }
 // Global rows share 256-row chunks. Window chunks of 64 rows bound each
 // checkpoint's private tail to 63 sliding rows (31B: 52 MB, 26B: 13 MB).
@@ -38,10 +75,13 @@ using Coverage = std::vector<std::pair<std::size_t, std::size_t>>;
 // Loaded byte ranges cover [begin, end) without a gap.
 // Copies a gather launch can serve: 16-byte aligned memory the device reads
 // and writes in place (device or registered host memory, not pageable).
+// Windows maps registered host memory at a different device address, so a
+// kernel can use the pointer only where the device address is the same.
 bool Accessible(const void* pointer) {
   hipPointerAttribute_t attributes{};
   return hipPointerGetAttributes(&attributes, pointer) == hipSuccess &&
-         attributes.type != hipMemoryTypeUnregistered;
+         attributes.type != hipMemoryTypeUnregistered &&
+         attributes.devicePointer == pointer;
 }
 bool Gatherable(const rocm::CopyRun& run) {
   return (reinterpret_cast<std::uintptr_t>(run.from) |
@@ -600,8 +640,7 @@ cache::Completion ContinuationAdapter::Transfer(
     } else {
       AfterExecution(state, copy_stream_);
       for (const auto& run : runs)
-        Check(hipMemcpyAsync(run.to, run.from, run.bytes, hipMemcpyDefault,
-                             copy_stream_));
+        CopyRun(run, copy_stream_);
       auto launch = std::make_shared<State::Launch>();
       Check(hipEventRecord(launch->done, copy_stream_));
       const std::lock_guard lock(job->mutex);

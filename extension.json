@@ -6,7 +6,7 @@
   "entry": "gemma4_register",
   "registration_target": "gufo_gemma4",
   "depends": [],
-  "platforms": ["linux"],
+  "platforms": ["linux", "windows"],
   "providers": [
     {
       "id": "gemma4",
