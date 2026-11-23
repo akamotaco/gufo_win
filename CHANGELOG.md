@@ -5,6 +5,10 @@ Notable user-facing changes are recorded here. Versions follow `version` in
 
 ## Unreleased
 
+## 0.2.2 (2026-11-23)
+
+Built on Gufo v0.35.0 (`0260e116`); needs extension API 0.3.20 or later.
+
 ### Features
 
 * **windows:** the manifest lists Windows among the supported platforms, so a
@@ -17,6 +21,11 @@ Notable user-facing changes are recorded here. Versions follow `version` in
 
 ### Bug Fixes
 
+* **tokenization:** special-token spellings in request text (message
+  content, thoughts, tool declarations, tool call names and arguments, and
+  tool responses) tokenize as text. Before, a message containing `<turn|>`,
+  `<|tool_call>` or another special-token spelling was tokenized as that
+  special token, so request text could end a turn or start a tool call.
 * **prompt cache:** cache copies use the gather kernel only where the device
   address of a pointer equals the pointer, and copy the other runs with
   `hipMemcpyAsync`. On Windows, HIP maps registered host memory at a different
