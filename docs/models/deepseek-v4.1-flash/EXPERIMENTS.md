@@ -166,6 +166,7 @@ Measurements first recorded in the backlog, without an E-number, are in
 | [E130](#e130--the-expert-store-as-merged-into-gufo-retained) | expert cache | retained | The store as merged into Gufo (`60c48924`, extension API 0.3.43), after a review that seeds exact uses, alternates prefetch halves per window and fixes its failure and pressure paths. Same replies and drafts as before review (P R R P) and at the pin, decode within noise; route hits 95.94% against 95.93% at an 80 GiB cache; 17/17 on the coding-agent benchmark, replies identical until a tool's output differed. |
 | [E131](#e131--masked-device-draws-under-a-grammar-retained) | sampling | retained | A selection under a JSON grammar (tool calls) draws on the device like a plain one, from the row with the excluded tokens at -inf through Gufo's cached packed mask (gufo-org/gufo#1321), instead of building the 129,280-entry distribution on the host. Coding-agent replay A B B A, identical replies and drafts: decode 163.4/164.1 → 162.5/161.1 s (−1.2%), all of it in the tool-call replies (110.4/111.0 → 109.1/108.1 s); text replies unchanged. |
 | [E132](#e132--swar-sign-helpers-and-the-llamacpp-kernel-fixes-retained) | vendored kernels | retained | Gufo #1295's SWAR `__vcmpne4`/`__vsub4` in the vendored helpers: bit-identical (exhaustive check), 8-14% fewer instructions in the IQ1_M, IQ2_XS and IQ2_S MMQ tiles and 29% in 60 mmvq kernels. Kernel traces of streamed `UD-IQ2_XXS` and resident `IQ1_M` with DSpark launch none of them, so served speed cannot change. llama.cpp's MMQ out-of-bounds and few-row fixes do not apply to the vendored code; its Q8_1 sum change alters rounding in paths production does not run, and is not taken. |
+| [E133](#e133--q8_0-matrix-cores-at-verification-widths-rejected) | decode kernels | rejected | Gufo #1321's packed-K16 Q8_0 WMMA for small batches, as a ceiling first: the split GEMV's Q8_0 decode shapes cost 1.00/1.03/1.07/1.10 × one token's time at 2/4/6/8 rows (bit-exact, DRAM-cold) and 1.27/1.40 × at 12/16. Over the sampled 1-6-row cycle mix a kernel at the read bound saves at most ~0.5% of decode, and int8 activations change rounding. Not built. |
 
 ## Milestones
 
@@ -5270,6 +5271,44 @@ so it is not taken.
 
 Per-kernel instruction counts and both traces' kernel lists are in
 [artifacts/2026-11-23-swar-sign-helpers/](artifacts/2026-11-23-swar-sign-helpers/isa-and-traces.json).
+
+## E133 — Q8_0 matrix cores at verification widths (rejected)
+
+Gufo #1321 gives Qwen3.8 Flash-Next a packed-K16 Q8_0 WMMA decode kernel for
+batches of up to 24 rows (`hc_up` 1.58×, `shexp_dn` 1.44× there), with the
+activations quantized to Q8_1. Q8_0 is this model's largest dense format
+(`attn_q_b`, `attn_output_a`/`_b` and the shared expert in 27 layers), and
+DSpark verifies several rows per cycle, so the ceiling came first: how far
+the split GEMV (`split_gemv_kernel`, FP32 activations) is from one token's
+time at each width.
+
+`tools/bench/ds41_dense_gemv_types.hip` (now 1-16 tokens) on the Q8_0
+decode shapes, DRAM-cold, best of slices 1-8, every multi-token result
+bit-exact against single-token launches, µs per layer:
+
+| Shape | 1 | 2 | 4 | 6 | 8 | 12 | 16 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `wo_b` 5120 × 8192 | 204.0 | 205.7 | 207.3 | 213.2 | 221.7 | 262.7 | 296.4 |
+| `wo_a` 8192 × 4096 | 163.3 | 164.0 | 166.5 | 173.6 | 181.8 | 210.9 | 236.1 |
+| `q_b` 32768 × 1280 | 202.1 | 200.2 | 215.2 | 220.4 | 224.0 | 244.8 | 265.9 |
+| shared down 5120 × 2304 | 58.7 | 59.4 | 59.6 | 61.0 | 62.8 | 73.2 | 74.9 |
+| `q_a` + `kv` 1792 × 5120 | 46.3 | 48.1 | 48.9 | 51.7 | 54.4 | 61.7 | 73.9 |
+| Sum | 674.4 | 677.4 | 697.5 | 719.9 | 744.7 | 853.3 | 947.2 |
+| × one token | 1.00 | 1.00 | 1.03 | 1.07 | 1.10 | 1.27 | 1.40 |
+
+Up to eight rows the kernel stays within 10% of the read bound (one token
+reads the same weights at 211-221 GB/s); past it the FP32 activation work
+shows. A kernel at the read bound at every width saves the excess over one
+token: 27 layers × 674 µs = 18.2 ms of Q8_0 per evaluation, times 0.03 at
+four rows and 0.07 at six. Over DECODE.md's sampled cycle mix (76/106/95/76/
+64/174 cycles of 1-6 rows, 68.4 s) that is ~0.35 s, ~0.5% of decode; the
+12-16-row widths that would gain 27-40% occur only for long prompt-lookup
+copies (7 of ~1,000 greedy cycles) and multi-session joint batches. A
+matrix-core kernel would recover part of that ceiling and changes rounding
+(int8 activations against today's FP32), which needs perplexity and
+agreement gates of its own. Not built; the 12-16-row cost stays a lever for
+multi-session batches.
+[Sweep](artifacts/2026-11-23-q8-verify-widths/q8_0-width-sweep.txt).
 
 ## Backlog measurements without an E-number
 

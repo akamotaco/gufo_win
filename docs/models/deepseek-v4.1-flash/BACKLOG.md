@@ -428,6 +428,7 @@ Kernel micro-variants are listed per kernel in
 | 11. Engram reads under a full cache | Skipping every read (upper bound) | +0.8% warm | E28 |
 | 12. Expert-contiguous repack | Read benchmark on real spans | ~1% | E30, E70 |
 | Graph replay | Dependent launch chains | ~0.13 µs per launch | E44 |
+| Q8_0 matrix cores at verification widths | Split GEMV vs one token's time, 1-16 rows | 1.03-1.10× at 4-8 rows; ceiling ~0.5% of decode over the 1-6-row cycle mix; rounding change | E133 |
 | Dense decode GEMV slices, formats, nontemporal loads | DRAM-cold sweep; loads in the model | No Q8_0 gap; slices worth 0.1-0.4%, under the rounding bar; nontemporal no gain | E59, E65, E69, E90 |
 | Verification grouped-GEMV redundancy | Distinct experts per layer | At the arithmetic minimum | E89 |
 | Decoder replay read-ahead and protection | Simulated policies | Read-ahead recovers 14-15% (drive-bound); protection costs ~4 GiB of prompt reads per GiB | E86 |

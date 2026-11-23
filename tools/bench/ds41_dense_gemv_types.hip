@@ -1,9 +1,10 @@
 /* DRAM-cold slice sweep of the V4.1 Flash dense decode GEMV
  * (ds41_v41_gemv) on the decode shapes for Q8_0 (8), Q6_K (14) and Q5_K
  * (13), the formats the streamed build mixes per layer, and on the DSpark
- * drafter's Q4_K (12) shapes, at 1-8 tokens (the DSpark verification and
- * drafting widths), over slices 1-8. Optional arguments: repetitions, then
- * the types to run. Weights rotate through
+ * drafter's Q4_K (12) shapes, at 1-16 tokens (the DSpark verification and
+ * drafting widths, 16 rows for long prompt-lookup copies), over slices 1-8.
+ * Optional arguments: repetitions, then the types to run. Weights rotate
+ * through
  * copies larger than the caches so every launch reads DRAM; each
  * multi-token result is checked bit for bit against single-token launches
  * on the same weights, the contract the verification rows rely on. The
@@ -78,15 +79,15 @@ int main(int argc, char** argv) {
       }
       const uint32_t groups = s.m / s.rows_per_x;
       const uint64_t xs = (uint64_t)groups * s.k;
-      std::vector<float> xh(8 * xs);
+      std::vector<float> xh(16 * xs);
       std::normal_distribution<float> nd;
       for (auto& v : xh) v = nd(rng);
       float *x, *y, *y1;
       (void)hipMalloc(&x, xh.size() * 4);
       (void)hipMemcpy(x, xh.data(), xh.size() * 4, hipMemcpyHostToDevice);
-      (void)hipMalloc(&y, (size_t)8 * s.m * 4);
-      (void)hipMalloc(&y1, (size_t)8 * s.m * 4);
-      for (uint32_t n : {1u, 2u, 4u, 6u, 8u}) {
+      (void)hipMalloc(&y, (size_t)16 * s.m * 4);
+      (void)hipMalloc(&y1, (size_t)16 * s.m * 4);
+      for (uint32_t n : {1u, 2u, 4u, 6u, 8u, 12u, 16u}) {
         for (int sl : {1, 2, 4, 8}) {
           const auto run = [&](int i) {
             return ds41_v41_gemv(type, w[i % copies], x, y, s.m, s.k, s.rows_per_x, sl, n, xs, s.m);
