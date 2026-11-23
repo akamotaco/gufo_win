@@ -69,6 +69,42 @@ plus `tool\q5km_rollback.ps1`. The frozen pre-v0.30 build that served this
 model since November 5 (`gufo-atomicchat\`, tag `win-backup-20261105-pre030`)
 is retired and deleted as of November 19, 2026.
 
+What the branch changes, in commit order:
+- `04082839`: reads the AtomicChat tensor formats (IQ4_XS, IQ4_NL, Q5_0 experts, Q4_1 n-gram table).
+- `e79b8bb7`: serves the Q5_0 down experts, and logs any pending HIP error before prefill.
+- `57a46923`: uploads Q5_0 experts as Q5_1 (same values: the Q5_1 minimum is set to -16 x the block scale), so the
+  12 Q5_K/Q5_0 layers use the existing Q5_1 WMMA prefill.
+- `1bc4738a`: runs IQ4_XS/IQ4_NL experts on the routed F16 WMMA prefill (the 144-byte repack above).
+- `1f751fc9`: fuses IQ4_XS gate/up and SwiGLU in the decode and MTP verify kernels.
+- `61748f51`, `e7fce80d`, `3cbe5112`: the load-time probe accepts these formats, and IQ4_XS gate/up
+  and IQ4_NL down get a split tile map next to the wide one.
+- The old fork's fix for the Q8_0 hc-inject weights (expanded to F32 at upload) is in upstream
+  now (`HcInjectUpload::kExpandQ8_0`), so the branch does not carry it.
+
+Accuracy, checked November 23 on `4c1be0bf`: the Flash-Next kernel tests built with
+`BUILD_TESTING=ON` pass (`iq_experts_ops` 12/12 with relative error about 0.004 against an F64
+reference; `routed_wmma_ops` and `moe_epilogue_ops` exit 0), and the 40-identifier verbatim
+copy test has 0/40 misses at 411, 75,620 and 179,692 prompt tokens.
+
+Efficiency (`gufo bench --speculative none`, no MTP): one token reads 5,871 MiB of weights
+(73% of it dense Q8_0) and uses 6.67 G active parameters. Prefill is 1,239 / 1,763 / 1,840 /
+1,784 tok/s at 512 / 2K / 8K / 32K, about 28-43% of the GPU's 59.4 TFLOPS FP16. Decode is
+29.5 tok/s, which reads 182 GB/s, 71% of the 256 GB/s memory bus. The server measures about
+10% lower prefill than the bench: about 4% is the MTP draft head, 3-4% is prompt content
+(the bench prompt is synthetic), and 1-3% is the server itself.
+
+> [!NOTE]
+> **Open item: `NMSE -nan` in a Q8_0 test line.** `qwen38_flash_next_routed_wmma_ops_test`
+> exits 0, but its line `Q8_0 routed n=3000 used=1 E=64 m=2560 k=640` prints `MMQ NMSE -nan`
+> while the worst-error columns are finite. All other formats print NMSE about 1.4e-05. The
+> reference is finite, so the integer MMQ output (`qfn_mmq_q8_0_moe_raw`) likely has a NaN in
+> some rows, and `std::max` hides it from the worst-error columns. The test case comes from
+> upstream, and AtomicChat has no Q8_0 experts, so this does not affect this model. Not yet
+> checked: whether it happens before the November 22 merge or on Linux, which rows are NaN,
+> whether it depends on n or on k = 640 (not a multiple of 256), whether it goes away when the
+> test's int8 codes exclude -128 (real quantizers do not emit -128), and whether any
+> production path calls this kernel.
+
 > [!WARNING]
 > **Windows: raise the GPU timeout (TDR) before long runs.** Windows resets the GPU
 > when submitted work takes longer than 2 seconds (`TdrDelay`). Under long prefills
