@@ -3,6 +3,32 @@
 Notable user-facing changes are recorded here. Versions follow `version` in
 [extension.json](extension.json).
 
+## Unreleased
+
+Built on upstream Gufo `e7e38411`; needs extension API 0.3.3 or later.
+
+This release fixes #13 but gives a streamed build's expert cache about
+3.6-3.9 GiB less memory, until the expert store proposed to Gufo
+(gufo-org/gufo#1318) can give it back. On a coding-agent replay decode was
+unchanged and prefill 2-4% slower, but workloads that miss the expert cache
+more may lose some speed.
+
+### Fixes
+
+* **prompt cache:** with `--cache-disk`, a long session no longer fails
+  every turn with `std::bad_alloc` once the disk checkpoints' bookkeeping
+  fills the RAM prompt cache's budget (#13). Gufo now refuses that
+  bookkeeping instead of failing the reply (gufo-org/gufo#1326) and keeps
+  each disk manifest once (gufo-org/gufo#1327), so `--cache-ram-bytes off`
+  is no longer needed. Past that point turns recompute more until the
+  bookkeeping itself shrinks (gufo-org/gufo#1329).
+* **expert streaming:** the expert cache stops growing at 4.5 GiB of free
+  memory instead of 1 GiB (5.5 GiB instead of 2 GiB at startup). Gufo now
+  gives the RAM prompt cache's memory back whenever less than 4 GiB is
+  available, and below that the prompt cache was lost at the first idle
+  moment, so every turn recomputed its whole prompt
+  ([E129](docs/models/deepseek-v4.1-flash/EXPERIMENTS.md#e129--keep-the-expert-cache-above-gufos-host-reserve-retained)).
+
 ## 0.3.1 (2026-11-21)
 
 Built on upstream Gufo `a27bbf98`, the same pin as 0.3.0; needs extension API

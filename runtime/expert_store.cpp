@@ -54,12 +54,12 @@ constexpr uint64_t kReserve = 4 * kGiB;
 constexpr uint64_t kReserveBatch = 2048;
 constexpr uint64_t kReservePerToken = 320 << 10;
 /* Free memory below which the cache stops growing once the server has sized
- * it after its sessions: the limit already holds back the buffers the first
- * prompt allocates, so only transient prefill peaks (~0.3-0.6 GiB) and margin
- * against swap remain. Comparing against the whole reserve stopped the seed
- * 0.4-0.6 GiB short whenever free memory dipped while it ran, and the first
- * prompt's buffers then kept misses from growing the cache back. */
-constexpr uint64_t kLiveFloor = 1 * kGiB;
+ * it after its sessions. Gufo's idle relief gives the RAM prompt cache's
+ * memory back whenever available memory is under its 4 GiB host reserve
+ * (gufo-org/gufo#1275); a cache grown below it lost the whole prompt cache at
+ * the first idle moment, and every later turn prefilled its whole prompt. The
+ * floor keeps half a GiB above that reserve. */
+constexpr uint64_t kLiveFloor = 9 * kGiB / 2;
 /* Rows of the compact prefetch stage: two parity halves, so the job a layer
  * adopts and the job submitted for the layer after never share rows. A
  * whole-layer set measured 3.6 GiB; jobs touch only the predicted experts

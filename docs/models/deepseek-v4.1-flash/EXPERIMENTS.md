@@ -157,6 +157,7 @@ Measurements first recorded in the backlog, without an E-number, are in
 | [E121](#e121--wait-for-the-decoder-reset-before-a-prompt-cache-restore-retained) | prompt cache | retained | Before a restore into a used session, the decoder reset zeroes its windows on the null stream without waiting, and the restore writes them on non-blocking transfer streams, so a late fill could zero restored rows. The reset now waits for the null stream. Greedy cache hits that part from the uncached reply at their second token: 16 / 70 before, 0 / 70 after. Restores 2.1-2.5 → 0.4-0.9 ms, decode unchanged. |
 | [E122](#e122--wait-for-queued-writes-before-a-prompt-cache-capture-retained) | prompt cache, DSpark | retained | Captures read on non-blocking transfer streams while the drafter's ring stores were still queued on the null stream. The checkpoint 3 tokens before the end of each prompt saved stale drafter rings every time, 36 of 36 over three servers with 4 and 16 hardware queues. With a wait for the null stream before each capture, 0 of those 24 checkpoints stale (0 of 136 drafter captures, two servers with 16 queues). Window, pool, rows and logits captures matched in every arm. |
 | [E123](#e123--one-prefill-batch-per-pass-beside-decoders-retained) | scheduling, prefill | retained | Gufo's extension API 0.3 has each runner declare the prompt tokens per pass beside decoding sessions; the 0.2 host used 512. An uncached 8.6-9.7K-token prompt arriving while another session decodes: 512 → 736 tok/s, 1,024 → 873, 2,048 → 1,001, 4,096 → 1,002. The decoding session's total stall 16.1 → 12.0 s, its longest 1.9 → 2.3 s, decode unchanged. Passes now take one prefill batch (2,048 by default). Outputs identical. |
+| [E129](#e129--keep-the-expert-cache-above-gufos-host-reserve-retained) | expert cache, prompt cache | retained | Gufo past #1275 gives the RAM prompt cache's memory back whenever less than 4 GiB is available; a streamed expert cache that leaves 1-2 GiB lost the whole prompt cache at the first idle moment, and every later turn prefilled its whole prompt (agent session 1,924 s instead of 615 s). The cache now stops at 4.5 GiB free (5.5 GiB at startup), which lets `main` pin Gufo `e7e38411` with #1326 and #1327 (#13). Coding-agent replay A B B A: 97.0/97.3 GiB instead of 100.9/100.8, route hits 98.08/98.10% instead of 98.42/98.41%, decode 153.4/152.5 s against 152.6/156.1 s, prefill 36.5/36.0 s against 35.2/35.2 s. |
 
 ## Milestones
 
@@ -4657,6 +4658,58 @@ now declares its prefill batch (`--prefill-batch`, 2,048 by default) as
 `pass_tokens`. With the final build, one more 2,048 arm gave 999 tok/s and the
 same replies. The probe and the arms' JSON are in
 [artifacts/2026-11-17-scheduling-pass/](artifacts/2026-11-17-scheduling-pass/).
+
+## E129 — keep the expert cache above Gufo's host reserve (retained)
+
+Gufo's idle relief (gufo-org/gufo#1275, after this extension's pin
+`a27bbf98`) gives the RAM prompt cache's memory back while the server is
+idle and less than its 4 GiB host reserve is available. The streamed expert
+cache fills memory down to 2 GiB free at startup and grows on misses down to
+1 GiB, so on Gufo `e7e38411` (current `main`, with gufo-org/gufo#1326 and
+#1327 for franzmoca/ds41-gufo-extension#13) the relief released the whole
+948 MB backing right after startup:
+
+```
+event=host_pressure_release shortfall_bytes=2189090816 released_bytes=947716096
+  host_available_bytes=2105876480 host_reserve_bytes=4294967296
+```
+
+The backing was never committed again. Every capture was refused
+(`byte_capacity`), disk checkpoints included, since they stage through the
+backing, and no turn resumed even from its own session: on a scripted
+62-request agent session (one session, subagents, a regenerate and an edit,
+a second conversation) every request prefilled its whole prompt, 1,924 s in
+all instead of 615 s, 54 s to the first token at 65K tokens.
+
+The cache now stops growing at 4.5 GiB free (`kLiveFloor`), half a GiB above
+the reserve, and leaves 5.5 GiB when the server sizes it (`kWarmHeadroom`,
+the floor plus the first prompt's buffers). The relief only acts while the
+server is idle, so transient prefill peaks below the reserve do not trigger
+it. The expert store proposed to Gufo (gufo-org/gufo#1318) measures pressure
+against its own floor and gives expert memory back first; once it merges this
+headroom can return to the expert cache.
+
+Built with `nix build`: A is 0.3.1 (`3b235bf`, Gufo `a27bbf98`), B this
+change on Gufo `e7e38411`. Streamed `UD-IQ2_XXS` with the `MXFP8` Engram,
+DSpark and vision, one session, `--cache-disk`, E127's 53-request Pi
+coding-agent replay, a fresh server per run, A B B A:
+
+| Arm | Expert cache (GiB) | Route hits | MiB read/token | Decode (s) | Prefill (s) | Lowest free (GB) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0.3.1 A1 | 100.9 | 98.42% | 23.9 | 152.6 | 35.2 | 1.37 |
+| this B1 | 97.0 | 98.08% | 28.5 | 153.4 | 36.5 | 5.06 |
+| this B2 | 97.3 | 98.10% | 28.2 | 152.5 | 36.0 | 5.20 |
+| 0.3.1 A2 | 100.8 | 98.41% | 24.1 | 156.1 | 35.2 | 1.59 |
+
+The cache holds 3.6-3.9 GiB less and reads 18% more per token, but prefetch
+hides it: decode is within the arms' noise, prefill 2-4% slower. Neither B
+run released the prompt cache. B differs from A in replies 44 and 45, as in
+E127: on request 44 Gufo `e7e38411` resumed from 9,918 cached prompt tokens
+where `a27bbf98` resumed from 9,921, so it prefilled three tokens and wrote a
+different tool call; both B runs agree, with E127's drafts (3,519 drafted,
+2,939 accepted). On the agent session B matched the draft branch's prompt
+cache request for request (60 RAM, 1 disk, 1 cold; 107,952 tokens
+prefilled), in 615 s against 606 s.
 
 ## Backlog measurements without an E-number
 
