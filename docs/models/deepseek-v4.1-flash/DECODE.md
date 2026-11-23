@@ -327,10 +327,12 @@ at 205-220 GB/s (E89). Open: per-row miss pricing
 ([BACKLOG item 3](BACKLOG.md#3-expert-reads-for-rejected-verification-rows));
 output-changing cache-aware routing is opt-in (items 13, 24).
 
-### 4. Host sampling (0.85 ms per verified row; top-p fixed in E88)
+### 4. Host sampling (0.85 ms per verified row; top-p fixed in E88, grammars in E131)
 
-The device sampler (`DsparkSamplerBridge::DeviceTemperature`) takes only
-plain temperature; other requests build the full 129,280-entry
+The device sampler (`DsparkSamplerBridge::DeviceTemperature`) takes plain
+temperature, also under a JSON grammar: it draws from the row with the
+grammar's excluded tokens at -inf, through Gufo's cached packed mask
+(`DeviceMask`, E131). Other requests build the full 129,280-entry
 distribution on the host (`sampler.Sample`, `working_.Distribution`) while
 the GPU idles: ~0.85 ms per AR token (1.5%) and per verified row, 2.5-5 ms
 per 4-6-row cycle. E88 computes the top-p softmax totals on the device

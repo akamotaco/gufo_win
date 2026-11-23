@@ -292,12 +292,13 @@ against an uncached prompt.
 
 ### 15. Smaller items
 
-- **Device top-k sampling.** After E88, top-k, penalties and constraints
+- **Device top-k sampling.** After E88 and E131, top-k and penalties
   still build the full distribution on the host (~0.85 ms per row); a
   device top-k filter with the host's uniforms and tie rules keeps seeded
-  outputs identical. Constrained (tool-call) draws cost the agent replay ~2 s
-  of ~160 s on the host and mask misses ~2.6 s; computing masks ahead or a
-  larger mask cache did not show in decode time (E118).
+  outputs identical. Constrained (tool-call) draws now run on the device
+  through the grammar's packed mask (E131); mask misses cost the agent
+  replay ~2.6 s, which a larger mask cache did not show in decode time
+  (E118).
 - **Tokenizer merges** rescan adjacent pairs (`bpe_rank`); Qwen's heap
   merge is the precedent. **`gufo diagnose`** lacks streaming statistics.
 - **Encoder SWA replay on a frontier miss.** Approximate; needs its own
@@ -453,6 +454,7 @@ in EXPERIMENTS.md.
 | LoRA adapters (item 26): `--adapter` on `attn_output_b`, `ffn_down_shexp`, `ffn_down_exps` | Bit-identical without one; L22 LoRA 3K KL 0.012, heretic 0.018; decode −1.6 to −3.2% | E98 |
 | Direction adapters (item 25): `--adapter`, mako files and rank-1 LoRAs | Bit-identical without one; 3K perplexity ±0.002 nats, KL 0.012-0.015; decode −0.5 to −0.9% | E97 |
 | Greedy DSpark width policy (DECODE.md lever 1) | Chat 16.5-16.9 → 17.6-18.9, code 26.6-27.4 → 28.3-28.7, long 24.7-26.2 → 26.4-26.7 tok/s | E87 |
+| Grammar-constrained draws on the device (item 15, DECODE.md lever 4) | Agent replay decode −1.2%, tool-call replies −1.9%; identical replies | E131 |
 | Top-p softmax totals on the device (DECODE.md lever 4) | Sampled DSpark +0.3 to +1.1 tok/s, AR sampled +0.1 to +0.2 | E88 |
 | Eviction victim lists, exact pops (item 31) | Scan removed; served speed unchanged (scan ≤ ~0.15 ms per admission) | E91, E92 |
 | Eviction by frequency class (item 31) | Agent replay −0.9% total, −6% reads; code prompt after a chat −10%; cold 2K/15K +1-2% | E105 |

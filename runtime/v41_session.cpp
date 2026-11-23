@@ -405,13 +405,18 @@ bool device_draw(ds41_session* s, const ds41_dspark_sampler* sampler, uint32_t r
   if (!sampler || !sampler->device_temperature) return false;
   const float temperature = sampler->device_temperature(sampler->ctx);
   if (!(temperature > 0.0f)) return false;
+  uint32_t mask_words = 0;
+  const uint32_t* mask = sampler->device_mask
+                             ? sampler->device_mask(sampler->ctx, &mask_words)
+                             : nullptr;
   const uint64_t start = sampler->rng(sampler->ctx);
   const double u = sampler->uniform(sampler->ctx);
   const uint64_t one = sampler->rng(sampler->ctx);
   const double u2 = sampler->uniform(sampler->ctx);
   ds41_v41_sample_result r{};
-  if (!ds41_decoder_sample(s->decoder, row, q, temperature, u, u2, &r) || r.degenerate || r.token < 0 ||
-      r.token >= (int)vocab(s)) {
+  if (!ds41_decoder_sample(s->decoder, row, q, mask, mask_words, temperature, u,
+                           u2, &r) ||
+      r.degenerate || r.token < 0 || r.token >= (int)vocab(s)) {
     sampler->set_rng(sampler->ctx, start);
     return false;
   }

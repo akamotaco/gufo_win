@@ -5,7 +5,10 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
+#include <memory>
 #include <numeric>
+#include <string>
 #include <vector>
 
 #include "ds41_v41.h"
@@ -486,8 +489,8 @@ void DeviceTargetDraw() {
     const uint64_t after_one = device.rng_state();
     const double u2 = device.Uniform();
     ds41_v41_sample_result r{};
-    Check(ds41_v41_sample_row(dl, n, propose ? dq : nullptr, temperature, u, u2,
-                              scratch, &r) == 0,
+    Check(ds41_v41_sample_row(dl, n, propose ? dq : nullptr, nullptr,
+                              temperature, u, u2, scratch, &r) == 0,
           "target draw launch");
     Check(!r.degenerate, "target draw is not degenerate");
     Check(r.token == expected && (r.accepted != 0) == expected_accept,
@@ -513,13 +516,208 @@ void DeviceTargetDraw() {
       hipMemcpy(dl, logits.data(), n * 4, hipMemcpyHostToDevice) == hipSuccess,
       "target draw upload");
   ds41_v41_sample_result r{};
-  Check(ds41_v41_sample_row(dl, n, nullptr, 1.F, .5, .5, scratch, &r) == 0 &&
+  Check(ds41_v41_sample_row(dl, n, nullptr, nullptr, 1.F, .5, .5, scratch,
+                            &r) == 0 &&
             r.degenerate && r.argmax == 77,
         "single-token rows are degenerate");
   for (void* ptr : {static_cast<void*>(dl), scratch, static_cast<void*>(dq)})
     (void)hipFree(ptr);
   std::printf("device target draws: %u accepted, %u rejected, %u plain\n",
               accepted, rejected, plain);
+}
+// Masked device draws against the host sampler on the same row with every
+// excluded token at -inf (what SamplerState draws under a grammar): identical
+// tokens, acceptance and uniform consumption, with dense, sparse and
+// few-token masks and proposals that hold excluded tokens. The argmax stays
+// the unmasked row's.
+void MaskedTargetDraw() {
+  using gufo::sampling::SamplerState;
+  constexpr uint32_t n = 129280, words = n / 32;
+  std::vector<float> logits(n), masked(n);
+  std::vector<uint32_t> mask(words);
+  uint64_t state = 977;
+  const auto next = [&] {
+    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+    return static_cast<float>((state >> 40) & 0xffffff) / 16777216.F;
+  };
+  float* dl = nullptr;
+  uint32_t* dm = nullptr;
+  void* scratch = nullptr;
+  ds41_v41_proposal* dq = nullptr;
+  Check(hipMalloc(&dl, n * 4) == hipSuccess &&
+            hipMalloc(&dm, words * 4) == hipSuccess &&
+            hipMalloc(&scratch, DS41_V41_SAMPLE_SCRATCH_BYTES) == hipSuccess &&
+            hipMalloc(&dq, sizeof(ds41_v41_proposal)) == hipSuccess,
+        "masked draw allocation");
+  uint32_t accepted = 0, rejected = 0, plain = 0, excluded_head = 0;
+  for (uint32_t trial = 0; trial < 240; ++trial) {
+    const float scale = trial % 3 == 0 ? 1.F : (trial % 3 == 1 ? 4.F : 9.F);
+    const float temperature = trial % 4 == 0 ? .6F : 1.F;
+    for (auto& v : logits)
+      v = scale * (next() + next() + next() - 1.5F);
+    logits[next() * n] = NAN;
+    logits[next() * n] = -INFINITY;
+    std::vector<int32_t> order(n);
+    std::iota(order.begin(), order.end(), 0);
+    std::partial_sort(order.begin(), order.begin() + 16, order.end(),
+                      [&](int32_t a, int32_t b) {
+                        return std::isnan(logits[b]) || logits[a] > logits[b];
+                      });
+    for (uint32_t k = 0; k < 16; ++k)
+      logits[order[k]] += 10.F;
+    // Half, 1% or a handful of tokens, always some of the head and never
+    // the unmasked argmax on odd trials.
+    const float density = trial % 3 == 0 ? .5F : (trial % 3 == 1 ? .01F : 0.F);
+    std::fill(mask.begin(), mask.end(), 0U);
+    const auto allow = [&](uint32_t t) { mask[t / 32] |= 1U << (t % 32); };
+    for (uint32_t t = 0; t < n; ++t)
+      if (next() < density)
+        allow(t);
+    for (uint32_t k = 0; k < 6; ++k)
+      allow(static_cast<uint32_t>(next() * n));
+    for (uint32_t k = 1; k < 16; k += 2)
+      allow(static_cast<uint32_t>(order[k]));
+    if (trial % 2 == 1)
+      mask[order[0] / 32] &= ~(1U << (order[0] % 32));
+    for (uint32_t t = 0; t < n; ++t)
+      masked[t] = mask[t / 32] >> (t % 32) & 1U
+                      ? logits[t]
+                      : -std::numeric_limits<float>::infinity();
+    Check(hipMemcpy(dl, logits.data(), n * 4, hipMemcpyHostToDevice) ==
+                  hipSuccess &&
+              hipMemcpy(dm, mask.data(), words * 4, hipMemcpyHostToDevice) ==
+                  hipSuccess,
+          "masked draw upload");
+    const bool propose = trial % 2 == 1 || trial % 5 == 0;
+    ds41_v41_proposal q{};
+    std::vector<gufo::sampling::TokenId> ids;
+    std::vector<float> probabilities;
+    if (propose) {
+      q.size = 8;
+      uint32_t total = 0;
+      for (uint32_t k = 0; k < 8; ++k) {
+        q.ids[k] = order[(k * 5 + trial) % 16];
+        q.masses[k] = 1 + static_cast<uint32_t>(next() * 1500000.F);
+        total += q.masses[k];
+      }
+      q.masses[0] += (1U << 24) - total;
+      q.token = q.ids[(trial / 2) % 8];
+      excluded_head += !(mask[q.token / 32] >> (q.token % 32) & 1U);
+      for (uint32_t k = 0; k < 8; ++k) {
+        ids.push_back(static_cast<gufo::sampling::TokenId>(q.ids[k]));
+        probabilities.push_back(static_cast<float>(q.masses[k]) / (1U << 24));
+      }
+      Check(hipMemcpy(dq, &q, sizeof(q), hipMemcpyHostToDevice) == hipSuccess,
+            "proposal upload");
+    }
+    SamplerState host(
+        {.temperature = temperature, .seed = static_cast<int64_t>(trial) + 7});
+    SamplerState device = host;
+    int expected = -1;
+    bool expected_accept = false;
+    if (propose) {
+      const auto target = host.Distribution(masked);
+      const double probability = probabilities[(trial / 2) % 8];
+      expected_accept =
+          host.Uniform() * probability < target.probability(q.token);
+      expected = expected_accept
+                     ? q.token
+                     : static_cast<int>(target.SampleResidual(
+                           ids, probabilities, host.mutable_rng_state()));
+    } else {
+      expected = static_cast<int>(host.Sample(masked));
+    }
+    const double u = device.Uniform();
+    const uint64_t after_one = device.rng_state();
+    const double u2 = device.Uniform();
+    ds41_v41_sample_result r{};
+    Check(ds41_v41_sample_row(dl, n, propose ? dq : nullptr, dm, temperature, u,
+                              u2, scratch, &r) == 0,
+          "masked draw launch");
+    if (r.degenerate)
+      continue;
+    Check(r.token == expected && (r.accepted != 0) == expected_accept,
+          "masked device draw matches the host sampler");
+    Check(mask[r.token / 32] >> (r.token % 32) & 1U,
+          "masked device draw keeps to the mask");
+    if (r.uniforms == 1)
+      device.SetRngState(after_one);
+    Check(device.rng_state() == host.rng_state(),
+          "masked device draw consumes the host's uniforms");
+    int best = -1;
+    for (uint32_t i = 0; i < n; ++i)
+      if (std::isfinite(logits[i]) && (best < 0 || logits[i] > logits[best]))
+        best = static_cast<int>(i);
+    Check(r.argmax == best, "masked draw reports the unmasked argmax");
+    accepted += propose && expected_accept;
+    rejected += propose && !expected_accept;
+    plain += !propose;
+  }
+  Check(accepted > 10 && rejected > 10 && plain > 60 && excluded_head > 10,
+        "masked draw coverage");
+  // One allowed token: the host draws it without a uniform.
+  std::fill(mask.begin(), mask.end(), 0U);
+  mask[1234 / 32] = 1U << (1234 % 32);
+  Check(hipMemcpy(dm, mask.data(), words * 4, hipMemcpyHostToDevice) ==
+            hipSuccess,
+        "masked draw upload");
+  ds41_v41_sample_result r{};
+  Check(
+      ds41_v41_sample_row(dl, n, nullptr, dm, 1.F, .5, .5, scratch, &r) == 0 &&
+          r.degenerate,
+      "single-token masks are degenerate");
+  for (void* ptr : {static_cast<void*>(dl), static_cast<void*>(dm), scratch,
+                    static_cast<void*>(dq)})
+    (void)hipFree(ptr);
+  std::printf("masked device draws: %u accepted, %u rejected, %u plain\n",
+              accepted, rejected, plain);
+}
+// Under a grammar the bridge offers the device draw with the grammar's
+// packed mask for the current state, and withdraws it while a grammar admits
+// every token, with filters, or with logprobs.
+void GrammarDeviceMask() {
+  using gufo::models::deepseek_v41_flash::DsparkSamplerBridge;
+  using gufo::sampling::ConstraintVocabulary;
+  using gufo::sampling::JsonConstraint;
+  using gufo::sampling::SamplerState;
+  using gufo::sampling::SamplingConfig;
+  using gufo::sampling::TokenConstraint;
+  const std::vector<std::string> pieces{"prose", "{", "}", ""};
+  auto binding = std::make_shared<TokenConstraint>();
+  binding->grammar = JsonConstraint::Object();
+  binding->vocabulary = std::make_shared<ConstraintVocabulary>(
+      pieces.size(), [&](std::uint32_t i) {
+        return ConstraintVocabulary::Piece{pieces[i], i == 3};
+      });
+  SamplingConfig config;
+  config.temperature = 1.F;
+  config.seed = 5;
+  config.constraint = binding;
+  DsparkSamplerBridge bridge{SamplerState(config)};
+  const auto* hook = bridge.hook();
+  Check(hook->device_temperature(hook->ctx) == 1.F,
+        "a grammar keeps the device draw");
+  uint32_t words = 0;
+  const uint32_t* mask = hook->device_mask(hook->ctx, &words);
+  Check(mask != nullptr && words == 1 && mask[0] == 0b0010U,
+        "the device draw gets the grammar's mask: only '{' opens an object");
+  hook->accept(hook->ctx, 1);
+  Check(hook->device_temperature(hook->ctx) == 1.F,
+        "the next state keeps the device draw");
+  mask = hook->device_mask(hook->ctx, &words);
+  Check(mask != nullptr && words == 1 && (mask[0] & 0b0110U) == 0b0100U,
+        "the mask follows the accepted token: '}' closes, '{' cannot");
+  config.top_p = .9F;
+  DsparkSamplerBridge filtered{SamplerState(config)};
+  hook = filtered.hook();
+  Check(hook->device_temperature(hook->ctx) == 0.F &&
+            hook->device_mask(hook->ctx, &words) == nullptr && words == 0,
+        "filters keep constrained draws on the host");
+  config.top_p = 1.F;
+  config.logprobs = 1;
+  DsparkSamplerBridge observed{SamplerState(config)};
+  Check(observed.hook()->device_temperature == nullptr,
+        "logprobs keep constrained draws on the host");
 }
 // Logprobs observe the raw target distribution without changing draws, and
 // keep every selection on host logits.
@@ -565,9 +763,12 @@ int main() {
   MarkovFused();
   Confidence();
   DeviceTargetDraw();
+  MaskedTargetDraw();
+  GrammarDeviceMask();
   std::puts(
       "PASS: logprobs, post-Markov top8, fused Markov selection, learned "
       "confidence, "
-      "device target draws, device q, exact sampled "
+      "device target draws, masked device draws, grammar masks, device q, "
+      "exact sampled "
       "correction and seeded replay");
 }

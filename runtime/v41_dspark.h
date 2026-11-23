@@ -131,8 +131,11 @@ bool ds41_dspark_state_load(ds41_dspark_state* s, const uint8_t* data, uint64_t 
 inline constexpr uint32_t DS41_DSPARK_FEATURE_ROWS = 128;
 bool ds41_decoder_enable_features(ds41_decoder* d);
 /* ds41_v41_sample_row on row `row` of the last evaluation's logits, while
- * resident (evaluations of at most 64 logit rows). */
-bool ds41_decoder_sample(ds41_decoder* d, uint32_t row, const ds41_v41_proposal* q, float temperature, double u,
+ * resident (evaluations of at most 64 logit rows). A non-null `mask` is the
+ * host's packed grammar mask of `mask_words` words, one bit per token. */
+bool ds41_decoder_sample(ds41_decoder* d, uint32_t row,
+                         const ds41_v41_proposal* q, const uint32_t* mask,
+                         uint32_t mask_words, float temperature, double u,
                          double u2, ds41_v41_sample_result* out);
 /* ds41_v41_softmax_totals on the same resident row. */
 bool ds41_decoder_softmax_totals(ds41_decoder* d, uint32_t row, float temperature, double* maximum, double* sum);

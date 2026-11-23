@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -45,6 +46,7 @@ public:
                                      : nullptr,
             .device_temperature =
                 sampler.config().logprobs ? nullptr : &DeviceTemperature,
+            .device_mask = &DeviceMask,
             .uniform = &DrawUniform,
             .rng = &Rng,
             .set_rng = &SetRng,
@@ -223,15 +225,37 @@ private:
   }
 
   // Plain softmax sampling: what SamplerState::Sample draws through its
-  // unfiltered linear distribution, with no state that can change the row.
+  // unfiltered linear distribution, with no state that can change the row
+  // except a grammar. Under a grammar the sampler draws from the row with
+  // every token it excludes at -inf, so the device draws the same row through
+  // the grammar's packed mask (DeviceMask) once the mask is cached.
   static float DeviceTemperature(void* ctx) {
-    const auto& working = static_cast<DsparkSamplerBridge*>(ctx)->working_;
+    auto& self = *static_cast<DsparkSamplerBridge*>(ctx);
+    const auto& working = self.working_;
     const auto& config = working.config();
-    const bool plain =
-        config.temperature > 0.F && config.top_k == 0 && config.top_p == 1.F &&
-        config.min_p <= 0.F && !config.penalties_enabled() &&
-        !working.NeedsConstraintMask() && !working.SaveDrawState().pending;
-    return plain ? config.temperature : 0.F;
+    self.mask_.reset();
+    const bool plain = config.temperature > 0.F && config.top_k == 0 &&
+                       config.top_p == 1.F && config.min_p <= 0.F &&
+                       !config.penalties_enabled() &&
+                       !working.SaveDrawState().pending;
+    if (!plain)
+      return 0.F;
+    if (working.NeedsConstraintMask()) {
+      if (working.ForcedToken())
+        return 0.F;
+      self.mask_ = working.CachedConstraintBitmask();
+      if (!self.mask_ || !self.mask_->restricts) {
+        self.mask_.reset();
+        return 0.F;
+      }
+    }
+    return config.temperature;
+  }
+
+  static const std::uint32_t* DeviceMask(void* ctx, std::uint32_t* words) {
+    const auto& mask = static_cast<DsparkSamplerBridge*>(ctx)->mask_;
+    *words = mask ? static_cast<std::uint32_t>(mask->words.size()) : 0;
+    return mask ? mask->words.data() : nullptr;
   }
 
   static double DrawUniform(void* ctx) {
@@ -256,6 +280,8 @@ private:
   }
 
   sampling::SamplerState working_;
+  // The grammar mask DeviceTemperature found for the next device draw.
+  std::shared_ptr<const sampling::TokenBitmask> mask_;
   std::vector<sampling::TokenLogprobs> logprobs_;
   std::array<Proposal, 16> proposals_{};
   ds41_dspark_sampler hook_;

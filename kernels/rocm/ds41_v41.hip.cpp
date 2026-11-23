@@ -1161,6 +1161,9 @@ struct SampleScratch {
   int32_t arg[kSampleBlocks];
   int32_t big[kSampleBlocks];
   double sum[kSampleBlocks];
+  /* With a mask: the unmasked row's per-span maxima, for the argmax. */
+  float raw_max[kSampleBlocks];
+  int32_t raw_arg[kSampleBlocks];
 };
 static_assert(sizeof(SampleScratch) <= DS41_V41_SAMPLE_SCRATCH_BYTES);
 
@@ -1169,52 +1172,83 @@ __device__ bool sample_better(float v, int32_t a, float best, int32_t best_a) {
   return a >= 0 && (best_a < 0 || v > best || (v == best && a < best_a));
 }
 
+/* Logit i of the row the draw sees: -inf where `mask` (32 tokens per word,
+ * bit i % 32 of word i / 32) excludes i, as the host's constrained logits. */
+__device__ __forceinline__ float sample_logit(const float* logits,
+                                              const uint32_t* mask,
+                                              uint32_t i) {
+  return !mask || (mask[i >> 5] >> (i & 31) & 1u) ? logits[i] : -INFINITY;
+}
+
 __device__ void sample_span(uint32_t n, uint32_t b, uint32_t* lo, uint32_t* hi) {
   const uint32_t span = (n + kSampleBlocks - 1) / kSampleBlocks;
   *lo = min(n, b * span);
   *hi = min(n, *lo + span);
 }
 
-__global__ void __launch_bounds__(kSampleThreads) sample_max_kernel(const float* logits, uint32_t n, SampleScratch* s) {
-  __shared__ float sv[kSampleThreads];
-  __shared__ int32_t sa[kSampleThreads];
+/* The span's largest finite logit and its token, of the masked row and,
+ * with a mask, of the unmasked row too. */
+__global__ void __launch_bounds__(kSampleThreads)
+    sample_max_kernel(const float* logits, const uint32_t* mask, uint32_t n,
+                      SampleScratch* s) {
+  __shared__ float sv[kSampleThreads], rv[kSampleThreads];
+  __shared__ int32_t sa[kSampleThreads], ra[kSampleThreads];
   uint32_t lo, hi;
   sample_span(n, blockIdx.x, &lo, &hi);
-  float v = -INFINITY;
-  int32_t a = -1;
+  float v = -INFINITY, w = -INFINITY;
+  int32_t a = -1, b = -1;
   for (uint32_t i = lo + threadIdx.x; i < hi; i += kSampleThreads) {
     const float x = logits[i];
-    if (isfinite(x) && sample_better(x, (int32_t)i, v, a)) v = x, a = (int32_t)i;
+    if (!isfinite(x))
+      continue;
+    if (sample_better(x, (int32_t)i, w, b))
+      w = x, b = (int32_t)i;
+    if (isfinite(sample_logit(logits, mask, i)) &&
+        sample_better(x, (int32_t)i, v, a))
+      v = x, a = (int32_t)i;
   }
   sv[threadIdx.x] = v;
   sa[threadIdx.x] = a;
+  rv[threadIdx.x] = w;
+  ra[threadIdx.x] = b;
   __syncthreads();
   for (uint32_t o = kSampleThreads / 2; o > 0; o >>= 1) {
     if (threadIdx.x < o && sample_better(sv[threadIdx.x + o], sa[threadIdx.x + o], sv[threadIdx.x], sa[threadIdx.x]))
       sv[threadIdx.x] = sv[threadIdx.x + o], sa[threadIdx.x] = sa[threadIdx.x + o];
+    if (threadIdx.x < o &&
+        sample_better(rv[threadIdx.x + o], ra[threadIdx.x + o], rv[threadIdx.x],
+                      ra[threadIdx.x]))
+      rv[threadIdx.x] = rv[threadIdx.x + o],
+      ra[threadIdx.x] = ra[threadIdx.x + o];
     __syncthreads();
   }
-  if (threadIdx.x == 0) s->max[blockIdx.x] = sv[0], s->arg[blockIdx.x] = sa[0];
+  if (threadIdx.x == 0) {
+    s->max[blockIdx.x] = sv[0], s->arg[blockIdx.x] = sa[0];
+    s->raw_max[blockIdx.x] = rv[0], s->raw_arg[blockIdx.x] = ra[0];
+  }
 }
 
-__device__ void sample_global_max(const SampleScratch* s, float* v, int32_t* a) {
+__device__ void sample_global_max(const float* max, const int32_t* arg,
+                                  float* v, int32_t* a) {
   *v = -INFINITY;
   *a = -1;
   for (uint32_t b = 0; b < kSampleBlocks; b++)
-    if (sample_better(s->max[b], s->arg[b], *v, *a)) *v = s->max[b], *a = s->arg[b];
+    if (sample_better(max[b], arg[b], *v, *a))
+      *v = max[b], *a = arg[b];
 }
 
 /* The host's softmax term of a finite logit. */
 __device__ double sample_term(float x, double mx, double t) { return isfinite(x) ? exp(((double)x - mx) / t) : 0.0; }
 
 __global__ void __launch_bounds__(kSampleThreads)
-    sample_sum_kernel(const float* logits, uint32_t n, float temperature, SampleScratch* s) {
+    sample_sum_kernel(const float* logits, const uint32_t* mask, uint32_t n,
+                      float temperature, SampleScratch* s) {
   __shared__ double ss[kSampleThreads];
   __shared__ int32_t sb[kSampleThreads];
   __shared__ float smax;
   if (threadIdx.x == 0) {
     int32_t a;
-    sample_global_max(s, &smax, &a);
+    sample_global_max(s->max, s->arg, &smax, &a);
   }
   __syncthreads();
   uint32_t lo, hi;
@@ -1224,7 +1258,7 @@ __global__ void __launch_bounds__(kSampleThreads)
   int32_t big = 0;
   if (isfinite(smax))
     for (uint32_t i = lo + threadIdx.x; i < hi; i += kSampleThreads) {
-      const double e = sample_term(logits[i], mx, t);
+      const double e = sample_term(sample_logit(logits, mask, i), mx, t);
       sum += e;
       big += e > kSampleTiny;
     }
@@ -1239,7 +1273,8 @@ __global__ void __launch_bounds__(kSampleThreads)
 }
 
 __global__ void __launch_bounds__(kSampleThreads)
-    sample_pick_kernel(const float* logits, uint32_t n, const ds41_v41_proposal* q, float temperature, double u,
+    sample_pick_kernel(const float* logits, const uint32_t* mask, uint32_t n,
+                       const ds41_v41_proposal* q, float temperature, double u,
                        double u2, SampleScratch* s) {
   __shared__ double scan[kSampleThreads];
   __shared__ double sh_total, sh_residual, sh_start;
@@ -1250,8 +1285,12 @@ __global__ void __launch_bounds__(kSampleThreads)
   if (threadIdx.x == 0) {
     ds41_v41_sample_result r{-1, 0, 1, 0, -1};
     int32_t arg;
-    sample_global_max(s, &sh_max, &arg);
+    sample_global_max(s->max, s->arg, &sh_max, &arg);
     r.argmax = arg;
+    if (mask) {
+      float raw;
+      sample_global_max(s->raw_max, s->raw_arg, &raw, &r.argmax);
+    }
     double total = 0.0;
     int32_t big = 0;
     for (uint32_t b = 0; b < kSampleBlocks; b++) total += s->sum[b], big += s->big[b];
@@ -1270,9 +1309,14 @@ __global__ void __launch_bounds__(kSampleThreads)
         sh_qid[k] = q->ids[k];
         sh_qp[k] = (double)((float)q->masses[k] / 16777216.0f);
         if (qd == 0.0 && q->ids[k] == q->token) qd = sh_qp[k];
-        q_big += q->ids[k] >= 0 && (uint32_t)q->ids[k] < n && sample_term(logits[q->ids[k]], mx, t) > kSampleTiny;
+        q_big += q->ids[k] >= 0 && (uint32_t)q->ids[k] < n &&
+                 sample_term(sample_logit(logits, mask, q->ids[k]), mx, t) >
+                     kSampleTiny;
       }
-      const double pd = q->token >= 0 && (uint32_t)q->token < n ? sample_term(logits[q->token], mx, t) / total : 0.0;
+      const double pd =
+          q->token >= 0 && (uint32_t)q->token < n
+              ? sample_term(sample_logit(logits, mask, q->token), mx, t) / total
+              : 0.0;
       if (u * qd < pd) {
         r.token = q->token;
         r.accepted = 1;
@@ -1285,7 +1329,8 @@ __global__ void __launch_bounds__(kSampleThreads)
         double residual = 0.0;
         for (uint32_t b = 0; b < kSampleBlocks; b++) residual += s->sum[b] / total;
         for (int32_t k = 0; k < qsize; k++) {
-          const double p = sample_term(logits[sh_qid[k]], mx, t) / total;
+          const double p =
+              sample_term(sample_logit(logits, mask, sh_qid[k]), mx, t) / total;
           residual -= fmin(p, sh_qp[k]);
         }
         sh_residual = residual;
@@ -1308,7 +1353,10 @@ __global__ void __launch_bounds__(kSampleThreads)
         double w = s->sum[b] / total;
         for (int32_t k = 0; qsize && k < qsize; k++)
           if ((uint32_t)sh_qid[k] >= lo && (uint32_t)sh_qid[k] < hi)
-            w -= fmin(sample_term(logits[sh_qid[k]], mx, t) / total, sh_qp[k]);
+            w -=
+                fmin(sample_term(sample_logit(logits, mask, sh_qid[k]), mx, t) /
+                         total,
+                     sh_qp[k]);
         if (qsize) w /= sh_residual;
         if (!(w > 0.0)) continue;
         last = (int32_t)b;
@@ -1333,8 +1381,9 @@ __global__ void __launch_bounds__(kSampleThreads)
   const double mx = sh_max, t = temperature, total = sh_total;
   const int32_t qsize = sh_qsize;
   const auto mass = [&](uint32_t i) {
-    double p = sample_term(logits[i], mx, t) / total;
-    if (!qsize || p == 0.0) return p;
+    double p = sample_term(sample_logit(logits, mask, i), mx, t) / total;
+    if (!qsize || p == 0.0)
+      return p;
     for (int32_t k = 0; k < qsize; k++)
       if ((uint32_t)sh_qid[k] == i) p = fmax(p - sh_qp[k], 0.0);
     return p / sh_residual;
@@ -3469,15 +3518,20 @@ extern "C" int ds41_v41_dspark_confidence(const float* h, const float* pre, cons
   return launch_ok("dspark confidence");
 }
 
-extern "C" int ds41_v41_sample_row(const float* logits, uint32_t n, const ds41_v41_proposal* q, float temperature,
-                                   double u, double u2, void* scratch, ds41_v41_sample_result* out) {
+extern "C" int ds41_v41_sample_row(const float* logits, uint32_t n,
+                                   const ds41_v41_proposal* q,
+                                   const uint32_t* mask, float temperature,
+                                   double u, double u2, void* scratch,
+                                   ds41_v41_sample_result* out) {
   if (!logits || !scratch || !out || n == 0 || (n + kSampleBlocks - 1) / kSampleBlocks > kSampleThreads * kSamplePer ||
       !(temperature > 0.0f))
     return 1;
   auto* s = static_cast<SampleScratch*>(scratch);
-  sample_max_kernel<<<kSampleBlocks, kSampleThreads>>>(logits, n, s);
-  sample_sum_kernel<<<kSampleBlocks, kSampleThreads>>>(logits, n, temperature, s);
-  sample_pick_kernel<<<1, kSampleThreads>>>(logits, n, q, temperature, u, u2, s);
+  sample_max_kernel<<<kSampleBlocks, kSampleThreads>>>(logits, mask, n, s);
+  sample_sum_kernel<<<kSampleBlocks, kSampleThreads>>>(logits, mask, n,
+                                                       temperature, s);
+  sample_pick_kernel<<<1, kSampleThreads>>>(logits, mask, n, q, temperature, u,
+                                            u2, s);
   if (launch_ok("sample row") != 0) return 1;
   return hipMemcpy(out, &s->result, sizeof(*out), hipMemcpyDeviceToHost) == hipSuccess ? 0 : 1;
 }
@@ -3488,8 +3542,9 @@ extern "C" int ds41_v41_softmax_totals(const float* logits, uint32_t n, float te
       (n + kSampleBlocks - 1) / kSampleBlocks > kSampleThreads * kSamplePer || !(temperature > 0.0f))
     return 1;
   auto* s = static_cast<SampleScratch*>(scratch);
-  sample_max_kernel<<<kSampleBlocks, kSampleThreads>>>(logits, n, s);
-  sample_sum_kernel<<<kSampleBlocks, kSampleThreads>>>(logits, n, temperature, s);
+  sample_max_kernel<<<kSampleBlocks, kSampleThreads>>>(logits, nullptr, n, s);
+  sample_sum_kernel<<<kSampleBlocks, kSampleThreads>>>(logits, nullptr, n,
+                                                       temperature, s);
   if (launch_ok("softmax totals") != 0) return 1;
   SampleScratch host;
   if (hipMemcpy(&host, s, sizeof(host), hipMemcpyDeviceToHost) != hipSuccess) return 1;

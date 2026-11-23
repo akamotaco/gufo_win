@@ -400,14 +400,19 @@ struct ds41_v41_proposal {
  * max(p - q, 0) with u2. Uses the host's FP64 softmax arithmetic and draw
  * order; a row the host would draw without a uniform (fewer than two nonzero
  * probabilities) is marked degenerate. `uniforms` counts u (1) or u and u2
- * (2); argmax is the lowest finite maximum. Scratch:
- * DS41_V41_SAMPLE_SCRATCH_BYTES; the result is copied to *out. */
+ * (2); argmax is the lowest finite maximum. A non-null `mask` (device,
+ * 32 tokens per word: bit t % 32 of word t / 32 admits token t) draws from
+ * the row with every other token at -inf, as the host draws under a grammar;
+ * argmax stays the unmasked row's. Scratch: DS41_V41_SAMPLE_SCRATCH_BYTES;
+ * the result is copied to *out. */
 struct ds41_v41_sample_result {
   int32_t token, accepted, uniforms, degenerate, argmax;
 };
 #define DS41_V41_SAMPLE_SCRATCH_BYTES 4096
-int ds41_v41_sample_row(const float* logits, uint32_t n, const struct ds41_v41_proposal* q, float temperature,
-                        double u, double u2, void* scratch, struct ds41_v41_sample_result* out);
+int ds41_v41_sample_row(const float* logits, uint32_t n,
+                        const struct ds41_v41_proposal* q, const uint32_t* mask,
+                        float temperature, double u, double u2, void* scratch,
+                        struct ds41_v41_sample_result* out);
 /* The row's largest finite logit and FP64 softmax sum at `temperature`, as
  * ds41_v41_sample_row computes them (per-span sums added in span order), for
  * a host sampler that filters the row. *maximum is -inf without a finite

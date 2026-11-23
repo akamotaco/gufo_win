@@ -164,6 +164,7 @@ Measurements first recorded in the backlog, without an E-number, are in
 | [E128](#e128--the-automatic-prompt-cache-follows-the-context-retained) | prompt cache, expert cache | retained | With streamed experts the automatic RAM prompt cache is one full-context checkpoint per session (0.29 GiB at 256K), or one in all with `--cache-disk` and at least 1 GiB, instead of 3 GiB or 1 GiB per session. On a scripted agent session (one session, subagents, regenerate, edit, a second conversation) 0.31, 1 and 2 GiB gave the same times (604/606/605 s): disk restores cost what RAM ones do. The floor is for Gufo's disk-checkpoint metadata (gufo-org/gufo#1329): at 312 MB it filled after 10 rounds of an 8-conversation rotation and prefill rose from 44k to 298k tokens per round; at 1 GiB it held all 16. |
 | [E129](#e129--keep-the-expert-cache-above-gufos-host-reserve-retained) | expert cache, prompt cache | retained | Gufo past #1275 gives the RAM prompt cache's memory back whenever less than 4 GiB is available; a streamed expert cache that leaves 1-2 GiB lost the whole prompt cache at the first idle moment, and every later turn prefilled its whole prompt (agent session 1,924 s instead of 615 s). The cache now stops at 4.5 GiB free (5.5 GiB at startup), which lets `main` pin Gufo `e7e38411` with #1326 and #1327 (#13). Coding-agent replay A B B A: 97.0/97.3 GiB instead of 100.9/100.8, route hits 98.08/98.10% instead of 98.42/98.41%, decode 153.4/152.5 s against 152.6/156.1 s, prefill 36.5/36.0 s against 35.2/35.2 s. |
 | [E130](#e130--the-expert-store-as-merged-into-gufo-retained) | expert cache | retained | The store as merged into Gufo (`60c48924`, extension API 0.3.43), after a review that seeds exact uses, alternates prefetch halves per window and fixes its failure and pressure paths. Same replies and drafts as before review (P R R P) and at the pin, decode within noise; route hits 95.94% against 95.93% at an 80 GiB cache; 17/17 on the coding-agent benchmark, replies identical until a tool's output differed. |
+| [E131](#e131--masked-device-draws-under-a-grammar-retained) | sampling | retained | A selection under a JSON grammar (tool calls) draws on the device like a plain one, from the row with the excluded tokens at -inf through Gufo's cached packed mask (gufo-org/gufo#1321), instead of building the 129,280-entry distribution on the host. Coding-agent replay A B B A, identical replies and drafts: decode 163.4/164.1 → 162.5/161.1 s (−1.2%), all of it in the tool-call replies (110.4/111.0 → 109.1/108.1 s); text replies unchanged. |
 
 ## Milestones
 
@@ -5172,6 +5173,57 @@ pass 16/16 at two sessions and a 32K context, as on R.
 
 The arms' JSON is in
 [artifacts/2026-11-23-expert-store-merged/](artifacts/2026-11-23-expert-store-merged/).
+
+## E131 — masked device draws under a grammar (retained)
+
+BACKLOG item 15 and DECODE.md lever 4. The device draw
+(`ds41_v41_sample_row`, the host's FP64 softmax and draw order) served only
+plain temperature sampling. A selection under a JSON grammar (every tool
+call) went to the host sampler, which masks the full 129,280-entry row to
+-inf outside the grammar's tokens and builds its distribution while the GPU
+idles: ~2 s of E118's ~160 s agent replay.
+
+Gufo's #1321 caches each grammar state's mask packed 32 tokens per word
+beside its byte mask (`SamplerState::CachedConstraintBitmask`, a 128-entry
+LRU). Its constrained compact sampling (`TryDistributionFromCandidates`)
+needs top-k, which the model's default sampling (temperature 1, top-p 1)
+does not set, so only the packed mask applies here. With plain temperature
+sampling the host's constrained draw is the unconstrained one on the masked
+row (`ConstrainedLogits`, then the linear distribution), so the device draw
+now takes the packed mask and reads excluded tokens as -inf in its maximum,
+softmax sums, p/q acceptance, residual and pick. Its argmax stays the
+unmasked row's, which the DSpark acceptance statistics read. The bridge
+offers the mask once `NeedsConstraintMask` has built it, and keeps the host
+draw while a token is forced, while the grammar admits every token, and with
+filters, penalties or logprobs. The decoder uploads the mask (16 KiB) only
+when its words change. `ds41.draft_sampling` checks 240 masked draws against
+the host sampler on the masked row (dense, 1% and few-token masks, proposals
+holding excluded tokens: 70 accepted, 74 rejected, 96 plain, identical
+tokens and uniforms) and the bridge's masks along a grammar.
+
+Built with `nix build` at Gufo `60c48924`: base is `main` (`3be6c15`).
+Streamed `UD-IQ2_XXS` with the `MXFP8` Engram, DSpark and vision, one
+session, E127's 53-request Pi coding-agent replay (server default sampling,
+seeded), a fresh server per run, in the order base, candidate, candidate,
+base:
+
+| Run | Decode (s) | Tool-call replies (s) | Text replies (s) | Prefill (s) | Route hits | MiB read/token | Expert cache (GiB) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Base 1 | 163.4 | 110.4 | 53.0 | 34.7 | 98.6% | 25.4 | 99.15 |
+| Candidate 1 | 162.5 | 109.1 | 53.4 | 35.2 | 98.6% | 26.0 | 100.51 |
+| Candidate 2 | 161.1 | 108.1 | 53.0 | 34.9 | 98.6% | 24.9 | 101.15 |
+| Base 2 | 164.1 | 111.0 | 53.1 | 34.9 | 98.6% | 25.1 | 101.15 |
+
+Every run gave the same 53 replies, 5,883 tokens and 3,787 drafted / 3,110
+accepted. The arms do not overlap: decode −1.2% (163.75 → 161.8 s), all of
+it in the 38 replies that call tools (4,133 tokens, −1.9%); the 15 text
+replies, which sample without a grammar, are unchanged. Route hits and
+reads per token match; the expert caches ended at 99.15-101.15 GiB (base 1
+gave back 2.15 GB under host pressure, and its decode is the faster base
+run). Gufo's `tools`, `conversation` and `structured` suites pass on the
+candidate (two sessions, 32K context, the model's default sampling, so tool
+calls and structured output take the masked draw). Retained.
+[Runs](artifacts/2026-11-23-masked-device-draw/runs.json).
 
 ## Backlog measurements without an E-number
 

@@ -369,6 +369,10 @@ struct ds41_decoder : Activations {
   uint32_t logits_row0 = 0;  // their first row there
   uint64_t logits_gen = 0;   // the evaluation that left them
   void* sample_scratch = nullptr;
+  /* The grammar mask of a constrained draw on the device, and the words it
+   * holds (uploaded again only when they change). */
+  uint32_t* sample_mask = nullptr;
+  std::vector<uint32_t> sample_mask_words;
   /* Rows' device argmax for the speculative evaluations (row_argmax), and
    * where eval_rows leaves them on the host (null: not wanted). */
   int32_t* row_argmax = nullptr;
@@ -2533,13 +2537,37 @@ int ds41_decoder_step(ds41_decoder* d, int token, float* logits, ds41_decoder_la
   return ds41_decoder_eval(d, &token, 1, logits, logits ? 1 : 0, layer_fn, ctx);
 }
 
-bool ds41_decoder_sample(ds41_decoder* d, uint32_t row, const ds41_v41_proposal* q, float temperature, double u,
+bool ds41_decoder_sample(ds41_decoder* d, uint32_t row,
+                         const ds41_v41_proposal* q, const uint32_t* mask,
+                         uint32_t mask_words, float temperature, double u,
                          double u2, ds41_v41_sample_result* out) {
   if (!d || row >= d->resident_logits || d->logits_gen != d->shared->logits_gen) return false;
   if (!d->sample_scratch) d->sample_scratch = alloc<uint8_t>(d->allocations, DS41_V41_SAMPLE_SCRATCH_BYTES);
+  constexpr uint32_t kWords = (DS41_N_VOCAB + 31) / 32;
+  if (mask) {
+    if (mask_words != kWords)
+      return false;
+    if (!d->sample_mask)
+      d->sample_mask = alloc<uint32_t>(d->allocations, kWords);
+    if (!d->sample_mask)
+      return false;
+    if (d->sample_mask_words.size() != kWords ||
+        memcmp(d->sample_mask_words.data(), mask, kWords * sizeof(uint32_t)) !=
+            0) {
+      d->sample_mask_words.clear();
+      if (hipMemcpy(d->sample_mask, mask, kWords * sizeof(uint32_t),
+                    hipMemcpyHostToDevice) != hipSuccess) {
+        (void)hipGetLastError();
+        return false;
+      }
+      d->sample_mask_words.assign(mask, mask + kWords);
+    }
+  }
   const float* logits = d->shared->views.logits + (uint64_t)(d->logits_row0 + row) * DS41_N_VOCAB;
   return d->sample_scratch &&
-         ds41_v41_sample_row(logits, DS41_N_VOCAB, q, temperature, u, u2, d->sample_scratch, out) == 0;
+         ds41_v41_sample_row(logits, DS41_N_VOCAB, q,
+                             mask ? d->sample_mask : nullptr, temperature, u,
+                             u2, d->sample_scratch, out) == 0;
 }
 
 bool ds41_decoder_softmax_totals(ds41_decoder* d, uint32_t row, float temperature, double* maximum, double* sum) {

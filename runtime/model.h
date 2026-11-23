@@ -147,10 +147,15 @@ struct ds41_dspark_sampler {
   bool (*try_accept_argmax)(void* ctx, int token) = nullptr;
   // Device target draws: `device_temperature` returns the temperature while
   // the request's next selection is plain softmax sampling over the whole
-  // vocabulary (no filters, penalties, grammar, forced or deferred token),
-  // else 0. `uniform` draws the request's next uniform; `rng`/`set_rng` save
-  // and restore its state. Drawn tokens are recorded with `accept`.
+  // vocabulary, or over the tokens a grammar admits (no filters, penalties,
+  // forced or deferred token), else 0. `uniform` draws the request's next
+  // uniform; `rng`/`set_rng` save and restore its state. Drawn tokens are
+  // recorded with `accept`.
   float (*device_temperature)(void* ctx) = nullptr;
+  // After a positive `device_temperature`: the grammar's packed mask for that
+  // selection (bit t % 32 of word t / 32 admits token t, *words words), valid
+  // until the next call, or null when every token is allowed.
+  const uint32_t* (*device_mask)(void* ctx, uint32_t* words) = nullptr;
   // Filtered draws on the host: `totals_temperature` returns the temperature
   // while the request's next selection sums the whole row's softmax (top-p
   // without top-k or penalties), else 0. `totals` hands the next `sample` or

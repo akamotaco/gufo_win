@@ -3,6 +3,16 @@
 Notable user-facing changes are recorded here. Versions follow `version` in
 [extension.json](extension.json).
 
+## Unreleased
+
+### Performance
+
+* **sampling:** tool calls and other output under a JSON grammar sample on
+  the GPU, like unconstrained text, instead of building the distribution
+  on the host; outputs are unchanged. On a coding-agent replay decode is
+  1.2% faster, 1.9% in the replies that call tools
+  ([E131](docs/models/deepseek-v4.1-flash/EXPERIMENTS.md#e131--masked-device-draws-under-a-grammar-retained)).
+
 ## 0.5.0 (2026-11-24)
 
 Built on upstream Gufo `60c48924`; needs extension API 0.3.43 or later (Gufo's
