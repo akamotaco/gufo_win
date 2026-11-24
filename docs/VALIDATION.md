@@ -80,6 +80,24 @@ again.
 
 ## Functional checks
 
+Release 0.5.1, November 24, 2026, on streamed `UD-IQ2_XXS` with the `MXFP8` Engram,
+DSpark and the vision projector, built at Gufo `60c48924` and run with Gufo's runner at
+the same revision:
+
+- With two sessions, the `conversation`, `tools`, `long-context`, `cache` (disk restart
+  included) and `image-inputs` suites passed. After them, `tool-images` fails its
+  text-array replay as in 0.5.0. `reasoning-budget` fails its control case: the
+  uncapped reply reasons for 62 tokens, under the suite's 64-token floor, with the same
+  answer. E138's ten-way attention split changes the rounding (0.5.0 reasoned for 68
+  tokens; the build before E138 passes).
+- The Pi coding-agent check passed its 8 tasks and `image-read`.
+- With two sessions, two fresh 29K-token prompts sent at once both answered correctly.
+  One took the wide prefill rows, and they were returned when it ended.
+- The 53-request Pi coding-agent replay is self-consistent in both 0.5.0 and 0.5.1
+  (two runs each, identical replies and drafts). E138 changes 33 of the 53 replies
+  against 0.5.0. Over the whole session decode takes 139.3 s instead of 146.9 s (5.1%
+  faster); in the 20 replies that match, it is 9.5% faster (19 of 20 faster).
+
 Release 0.5.0, November 24, 2026, on streamed `UD-IQ2_XXS` with the `MXFP8` Engram,
 DSpark and the vision projector, built at Gufo `60c48924` and run with Gufo's runner at
 the same revision:

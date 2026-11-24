@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "name": "deepseek41flash",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "api_version": ">= 0.3.43",
   "entry": "deepseek41flash_register",
   "registration_target": "gufo_deepseek41flash",

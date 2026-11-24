@@ -3,7 +3,9 @@
 Notable user-facing changes are recorded here. Versions follow `version` in
 [extension.json](extension.json).
 
-## Unreleased
+## 0.5.1 (2026-11-24)
+
+Built on upstream Gufo `60c48924`; needs extension API 0.3.43 or later.
 
 ### Performance
 
