@@ -1,0 +1,18 @@
+# 3k text, decode path (ds41_load_probe --stream-experts --decode IDS --out DIR): E137 0ece144 (20 splits) and E138 (10 splits), Gufo 60c48924
+run                          ppl     dNLL      se    KL mean    KL p99    KL max  argmax      bits
+e137-3k                    6.156
+e138-3k                    6.151  -0.0008  0.0039   1.68e-02  1.10e-01  3.01e-01  0.9320    differ
+run                          ppl   top-1     dNLL      se   |dNLL|  argmax
+oracle                     6.194  0.5862
+e137-3k                    6.156  0.5869  -0.0060  0.0046   0.1247  0.9403
+e138-3k                    6.151  0.5895  -0.0069  0.0048   0.1212  0.9343
+
+# 18k text, decode path (ds41_load_probe --stream-experts --decode IDS --out DIR): E137 0ece144 (20 splits) and E138 (10 splits), Gufo 60c48924
+run                          ppl     dNLL      se    KL mean    KL p99    KL max  argmax      bits
+e137-18k                   5.697
+e138-18k                   5.706  +0.0016  0.0015   1.32e-02  1.01e-01  7.72e-01  0.9477    differ
+run                          ppl   top-1     dNLL      se   |dNLL|  argmax
+oracle                     5.708  0.6094
+e137-18k                   5.697  0.6105  -0.0020  0.0015   0.1005  0.9482
+e138-18k                   5.706  0.6111  -0.0004  0.0014   0.1009  0.9471
+

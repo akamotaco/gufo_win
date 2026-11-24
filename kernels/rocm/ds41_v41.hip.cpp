@@ -2646,7 +2646,7 @@ __global__ __launch_bounds__(256) void attention_f16_kernel(const float* q, cons
  * head with an online softmax, and leaves (max, sum, out[512]) per head and
  * split in `partial`; attention_combine_kernel merges the splits with the
  * sink. head_dim 512, 512 threads. */
-constexpr uint32_t kAttnSplits = 20;
+constexpr uint32_t kAttnSplits = 10;
 constexpr uint32_t kAttnSplitHeads = 16;
 /* (max, sum, pad, pad, out[512]) per head and split. */
 constexpr uint32_t kAttnPartial = 512 + 4;

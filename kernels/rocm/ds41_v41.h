@@ -346,7 +346,7 @@ int ds41_v41_topk(const float* score, uint64_t score_stride, uint32_t* out, uint
  * place of out (returns 1 for out_half on a batch of another form). */
 #define DS41_V41_ATTN_SPLIT_TOKENS 8u
 #define DS41_V41_ATTN_SPLIT_MAX_TOKENS 16u
-#define DS41_V41_ATTN_PARTIAL_PER_HEAD (20u * 516u)
+#define DS41_V41_ATTN_PARTIAL_PER_HEAD (10u * 516u)
 int ds41_v41_attention(float* q, const float* ring, const float* chunk, uint32_t window, uint32_t floor,
                        ds41_fp4_rows comp, const uint32_t* idx, uint32_t k, uint32_t ratio, const float* sinks,
                        float* out, uint16_t* out_half, float* partial, uint32_t pos0, uint32_t n, uint32_t heads,

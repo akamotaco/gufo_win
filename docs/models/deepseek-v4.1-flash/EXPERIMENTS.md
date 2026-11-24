@@ -171,6 +171,7 @@ Measurements first recorded in the backlog, without an E-number, are in
 | [E135](#e135--two-wave-decode-overlap-resident-experts-down-during-ssd-reads-retained) | decode / streaming | retained | On streamed decode and verification batches (1–16 rows), resident experts' `down` projection runs during the SSD read stall behind their `gate+up` (matching E84 on prefill), leaving only missed slots' `down` after the reads and dropping the redundant second `expert_plan` on grouped layers. Coding-agent replay ABBA: decode 144.05/144.62 → 143.10/142.44 s (−1.1%, −3.1 to −5.4% on warming turns); AR greedy chat+code 57.70/57.53 → 57.14/57.21 s (−0.8%), identical replies and drafts. |
 | [E136](#e136--grouped-expert-gemv-uniform-sgpr-offsets-hoisted-decode-and-task-major-dispatch-retained) | decode kernels | retained | Replaced per-column 64-bit pointer arrays in the grouped expert GEMV with uniform SGPR `x_off[kCols]`, eliminating spills at 6–8 columns so 2–8-row `gate+up` runs in one launch without splitting, and added a task-major kernel (`expert_group_task_kernel`, scalar activation loads, hoisted weight decode, LDS xor-tree reduction) for 9–16-row batches and `IQ1`/`IQ2_XS`/`IQ2_S` downs. Bit-exact on all 10 formats. Coding-agent replay ABBA: decode 142.10/142.69 → 140.90/141.09 s (−1.0%, 49/53 requests faster, all buckets faster), identical replies and drafts; standalone 16-row batches −10% to −28%. |
 | [E137](#e137--lazy-logits-download-persistent-engram-pool-and-drafter-pass-cleanups-retained) | host / drafter | retained | Deferred logits D2H downloads and added 1-row device argmax across single- and multi-session decode (materializing lazily only for host fallback, snapshots, logprobs or cache capture), replaced per-step `std::async`/`std::thread` Engram spawns with a persistent FIFO worker pool, added `ds41_v41_init_hc` to replace 4× `copy_rows` + `one_hot` upload, and cleaned up the DSpark drafter (`q_a`+`kv` `gemv_pair`, side-stream `hc_mix`, coalesced pinned staging). AR greedy ABBA: 57.17/57.10 → 56.95/56.92 s (−0.35%, −0.20 ms/tok); traced drafter pass 7.93 → 7.79 ms; DSpark agent/greedy within cache/policy noise, identical replies; 2-session `conversation`/`batch`/`logprobs`/`cache` suites pass. |
+| [E138](#e138--split-decode-attention-10-splits-to-halve-attn_partial-writeback-retained) | decode kernels | retained | Reduced `kAttnSplits` from 20 to 10 (pure FP32, `4 × 10 = 40` blocks matching Strix Halo's 40 CUs), halving `attn_partial` writeback (`2.64 → 1.32 MB/row`, freeing 21.1 MiB scratch) while keeping DSpark == AR bit-identical and passing `deepseek41flash.attention` at `1e-5` unchanged. 3K decode-path quality gate: PPL 7.159 → 7.123 (`mean_dnll = −0.0050 ± 0.0045`, top-1 0.5695 → 0.5709; FP16 partials rejected after `pos=0` outlier drift). Coding-agent replay ABBA: 19/20 matched-reply requests faster (−2.2%), `routes` wait 7.04 → 6.89 ms/tok; AR greedy 57.23/56.97 → 55.78/55.49 s (−2.6%); 16-row `attn + 28.8 MB` bench −12.5 ms/cycle. |
 
 ## Milestones
 
@@ -5540,6 +5541,74 @@ faster than both base runs).
 - **Functional verification (`--sessions 2`):** `conversation`, `batch`,
   `logprobs` and `cache` (all 14 sub-cases including disk restart) passed.
 Retained. [Runs](artifacts/2026-11-24-host-drafter-cleanups/runs.json).
+
+## E138 — split decode attention: 10 splits to halve `attn_partial` writeback (retained)
+
+Revisits [BACKLOG.md](BACKLOG.md) item 33 / E65 (`attn_partial` dirty L2
+writeback delaying `attn_output_a` and `attn_output_b`) with a full 3K
+decode-path quality gate.
+
+In standalone benchmarks (`attention_split + attention_combine + 28.8 MB`
+DRAM-cold read, `k = 512` compressed rows + 128 SWA rows), reducing
+`kAttnSplits` from 20 to 10 (keeping `kAttnSplitHeads = 16`, so `4 × 10 = 40`
+blocks still fill all 40 CUs at 1 token) halves `attn_partial` from 2.64 to
+1.32 MB/row (freeing 21.1 MiB of GPU scratch) and saves 8.9 / 16.3 / 35.0 /
+312.9 µs/layer at 2 / 4 / 6 / 16 rows (−1.4 ms/cycle at 6 rows, −12.5 ms/cycle
+at 16 rows). Dropping below 10 splits (`S = 5..8`) slowed 1–4-row decode by
+leaving CUs idle; single-pass attention (`S = 1`, `H = 2..8`) was 1.3–2.3×
+slower.
+
+Scaled FP16 partials (`S10_F16`, 0.66 MB/row) were also tested: they were
+another −12 µs/layer faster at 6 rows (−3.6% on matched agent requests), but
+failed the 3K decode-path quality gate because outlier channels in DeepSeek
+V4.1's attention heads lost precision (`pos=0` drift −4.99 nats with a single
+512-element scale, +1.04 nats even with per-32-element block scales; 3K PPL
+rose 7.159 → 7.204, `mean_dnll = +0.0063 ± 0.0043`). FP16 partials were
+therefore rejected.
+
+Pure FP32 `kAttnSplits = 10` (`S10_F32`) passes all 19 shapes of
+`deepseek41flash.attention` at the original `1e-5` tolerance unchanged, keeps
+DSpark == AR bit-identical (`24/24` rows, `max |diff| 0`), and passes the 3K
+token-by-token decode-path quality gate on `UD-IQ2_XXS` (`ds41_load_probe
+--stream-experts --score`, 2,999 positions of `DECODE.md`):
+
+| Variant | 3K NLL | 3K PPL | Top-1 | `mean_dnll ± block100 SE` | `pos=0` ΔNLL |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Base (`S20_F32`) | 1.96835 | 7.1589 | 0.5695 | — | 0.0000 |
+| `S10_F32` (retained) | 1.96340 | 7.1235 | 0.5709 | −0.0050 ± 0.0045 | 0.0000 |
+| `S10_F16` (rejected) | 1.97464 | 7.2040 | 0.5715 | +0.0063 ± 0.0043 | −4.9879 |
+
+Built with `nix build` at Gufo `60c48924` (base E137 `52094d8`). Streamed
+`UD-IQ2_XXS` with `MXFP8` Engram and vision, fresh server per arm, order base,
+candidate, candidate, base:
+
+- **AR greedy (`--speculative off`, chat + 3.5K code, 512 tokens each):**
+
+| Run | Arm | Chat (s) | Code (s) | Total decode (s) | Route hits | Cache (GiB) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| r1 | base | 29.06 | 28.17 | 57.23 | 92.3% | 106.58 |
+| r2 | candidate | 29.05 | 26.73 | 55.78 | 92.4% | 106.63 |
+| r3 | candidate | 28.79 | 26.70 | 55.49 | 92.2% | 106.71 |
+| r4 | base | 29.01 | 27.96 | 56.97 | 92.2% | 106.69 |
+
+Self-deterministic (`r2` == `r3`, 2/2); decode is −2.6% overall (note the code
+reply diverged after rounding; 3K teacher-forced steady AR confirms the pure
+kernel saving).
+
+- **Coding-agent replay (DSpark, 53 requests, default sampling, seed 1234):**
+
+| Run | Arm | Decode (s) | Decode (tok/s) | Tokens | Drafts | `routes` wait (ms/tok) | Cache (GiB) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| r1 | base | 139.87 | 39.38 | 5,509 | 2,939/3,519 | 7.02 | 99.87 |
+| r2 | candidate | 139.03 | 39.42 | 5,481 | 2,980/3,617 | 6.91 | 101.95 |
+| r3 | candidate | 139.24 | 39.36 | 5,481 | 2,980/3,617 | 6.87 | 99.99 |
+| r4 | base | 139.92 | 39.37 | 5,509 | 2,939/3,519 | 7.06 | 101.76 |
+
+Self-deterministic (`r2` == `r3`, 53/53). Across the 20/53 requests with
+identical replies and draft counts (1,448 tokens), 19/20 are faster: 26.39 →
+25.82 s (−2.2%, 54.87 → 56.08 tok/s), and `routes` GPU wait falls 7.04 →
+6.89 ms/token across the full replay. Retained.
+[Runs](artifacts/2026-11-24-attn-partial-splits/runs.json).
 
 ## Backlog measurements without an E-number
 

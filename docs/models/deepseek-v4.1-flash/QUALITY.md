@@ -699,6 +699,31 @@ IQ4_NL-Engram ones above as the reference for this build:
 ([scores](artifacts/2026-11-10-prefill-kernels/oracle/),
 [E114](EXPERIMENTS.md#e114--fp16-prefill-kernels-sum-order-by-weight-row-retained)).
 
+## Ten-way split decode attention (E138)
+
+The same texts and oracles, scored token by token on the decode path
+(`ds41_load_probe --stream-experts --decode IDS --out DIR`), before and after
+split decode attention went from 20 to 10 FP32 splits:
+
+| Positions | Run | Perplexity | Top-1 | Argmax agreement with the oracle | Mean ΔNLL against the oracle | Mean \|ΔNLL\| against the oracle |
+|---:|---|---:|---:|---:|---:|---:|
+| 2,999 | oracle | 6.194 | 58.6% | — | — | — |
+| 2,999 | 20 splits | 6.156 | 58.7% | 94.0% | −0.0060 ± 0.0046 | 0.1247 |
+| 2,999 | 10 splits | 6.151 | 59.0% | 93.4% | −0.0069 ± 0.0048 | 0.1212 |
+| 18,499 | oracle | 5.708 | 60.9% | — | — | — |
+| 18,499 | 20 splits | 5.697 | 61.0% | 94.8% | −0.0020 ± 0.0015 | 0.1005 |
+| 18,499 | 10 splits | 5.706 | 61.1% | 94.7% | −0.0004 ± 0.0014 | 0.1009 |
+
+Against the 20-split logits the mean ΔNLL is −0.0008 ± 0.0039 on the 3K
+text and +0.0016 ± 0.0015 on the 18.5K one, and the argmax agrees at 93.2%
+and 94.8% of positions. Neither order is closer to the oracle: the
+perplexity moves within noise and in opposite directions on the two texts,
+as on E138's own 3K gate (7.159 → 7.123). The change moves outputs without
+changing quality. The 20-split runs reproduce the decode row of the E114
+table, so the decode path is deterministic
+([scores](artifacts/2026-11-24-attn-partial-splits/against-oracle.txt),
+[E138](EXPERIMENTS.md#e138--split-decode-attention-10-splits-to-halve-attn_partial-writeback-retained)).
+
 ## Expert-pruned GSQ-RCO Coder
 
 ISTA-DASLab's

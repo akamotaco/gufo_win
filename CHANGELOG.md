@@ -7,6 +7,14 @@ Notable user-facing changes are recorded here. Versions follow `version` in
 
 ### Performance
 
+* **decode:** split decode attention now uses 10 FP32 splits instead of 20,
+  halving `attn_partial` L2 writeback (2.64 → 1.32 MB/row) and freeing 21.1 MiB
+  of GPU scratch. The shorter FP32 combine changes outputs slightly: 3K
+  decode-path perplexity moves within noise (7.159 → 7.123), and DSpark still
+  matches AR bit for bit. Matched coding-agent requests are 2.2%
+  faster (19/20 faster), AR greedy decode 2.6% faster, and 16-row attention +
+  output passes 12.5 ms/cycle faster
+  ([E138](docs/models/deepseek-v4.1-flash/EXPERIMENTS.md#e138--split-decode-attention-10-splits-to-halve-attn_partial-writeback-retained)).
 * **decode:** single- and multi-session decode now defers logits downloads until
   host sampling, logprobs, snapshots or cache capture need them, computes 1-row
   argmax on the device, reads Engram rows on a persistent FIFO worker pool,

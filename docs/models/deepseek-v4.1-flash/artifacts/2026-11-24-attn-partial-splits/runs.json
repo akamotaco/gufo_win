@@ -1,0 +1,43 @@
+{
+  "experiment": "E138",
+  "date": "2026-11-24",
+  "title": "Split decode attention: 10 splits (FP32) to halve attn_partial writeback",
+  "gufo_rev": "60c48924",
+  "base_rev": "52094d8",
+  "model": "UD-IQ2_XXS streamed + MXFP8 Engram + DSpark Q2_K/Q4_K + mmproj BF16",
+  "microbench_attn_plus_28mb_us": {
+    "k_comp": 512,
+    "S20_F32_base": {"n1": 161.8, "n2": 194.2, "n4": 257.1, "n6": 328.6, "n16": 891.7},
+    "S10_F32":      {"n1": 162.0, "n2": 185.3, "n4": 240.8, "n6": 293.6, "n16": 578.8},
+    "S10_F16_rejected": {"n1": 160.3, "n2": 177.5, "n4": 232.0, "n6": 281.4, "n16": 525.5}
+  },
+  "quality_3k_decode_path": {
+    "positions": 2999,
+    "base_S20_F32": {"nll": 1.968353, "ppl": 7.15887, "top1": 0.5695},
+    "cand_S10_F32": {"nll": 1.963395, "ppl": 7.12347, "top1": 0.5709, "mean_dnll": -0.004957, "block100_se": 0.004484, "mean_abs_dnll": 0.125319, "argmax_agree": 0.9310, "pos0_dnll": 0.0},
+    "rejected_S10_F16_global": {"nll": 1.974640, "ppl": 7.20403, "top1": 0.5715, "mean_dnll": 0.006288, "block100_se": 0.004301, "mean_abs_dnll": 0.139755, "argmax_agree": 0.9246, "pos0_dnll": -4.987872}
+  },
+  "ar_greedy_abba": {
+    "prompts": ["chat (41 -> 512)", "code (3514 -> 512)"],
+    "self_deterministic": "2/2",
+    "order": ["base", "candidate", "candidate", "base"],
+    "runs": [
+      {"run": "r1", "arm": "base",      "chat_s": 29.056, "code_s": 28.173, "decode_s": 57.23, "decode_tps": 17.89, "route_hit_pct": 92.3, "cache_gib": 106.58},
+      {"run": "r2", "arm": "candidate", "chat_s": 29.045, "code_s": 26.731, "decode_s": 55.78, "decode_tps": 18.36, "route_hit_pct": 92.4, "cache_gib": 106.63},
+      {"run": "r3", "arm": "candidate", "chat_s": 28.792, "code_s": 26.697, "decode_s": 55.49, "decode_tps": 18.45, "route_hit_pct": 92.2, "cache_gib": 106.71},
+      {"run": "r4", "arm": "base",      "chat_s": 29.011, "code_s": 27.962, "decode_s": 56.97, "decode_tps": 17.97, "route_hit_pct": 92.2, "cache_gib": 106.69}
+    ]
+  },
+  "agent_replay_abba": {
+    "requests": 53,
+    "self_deterministic": "53/53",
+    "matched_subset": {"requests": 20, "tokens": 1448, "wins": "19/20", "base_s": 26.39, "cand_s": 25.82, "delta_pct": -2.17},
+    "order": ["base", "candidate", "candidate", "base"],
+    "runs": [
+      {"run": "r1", "arm": "base",      "decode_s": 139.87, "decode_tps": 39.38, "gen": 5509, "draft_accepted": 2939, "draft_n": 3519, "routes_wait_ms": 7.02, "cache_gib": 99.87},
+      {"run": "r2", "arm": "candidate", "decode_s": 139.03, "decode_tps": 39.42, "gen": 5481, "draft_accepted": 2980, "draft_n": 3617, "routes_wait_ms": 6.91, "cache_gib": 101.95},
+      {"run": "r3", "arm": "candidate", "decode_s": 139.24, "decode_tps": 39.36, "gen": 5481, "draft_accepted": 2980, "draft_n": 3617, "routes_wait_ms": 6.87, "cache_gib": 99.99},
+      {"run": "r4", "arm": "base",      "decode_s": 139.92, "decode_tps": 39.37, "gen": 5509, "draft_accepted": 2939, "draft_n": 3519, "routes_wait_ms": 7.06, "cache_gib": 101.76}
+    ]
+  }
+}

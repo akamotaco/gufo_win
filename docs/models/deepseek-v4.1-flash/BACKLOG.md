@@ -318,10 +318,13 @@ loop's instruction stream before and after with `isa_mix.py`.
 
 ### 33. Attention partials written back during the dense GEMVs
 
-Split attention writes 2.64 MB of partials per row and layer; their
-writeback slows the following `attn_output_b` (135-193 GB/s in the model
-against 198-216 alone, E65). FP16 partials or a merge without the buffer
-could reach ~1.5% AR and ~3% at 6 rows, also with changed rounding.
+E138 cut `kAttnSplits` from 20 to 10 in pure FP32, halving `attn_partial`
+(`2.64 → 1.32 MB/row`, freeing 21.1 MiB scratch) with no quality loss on the
+3K decode-path PPL gate (7.159 → 7.123) and −2.2% on matched coding-agent
+requests (−12.5 ms/cycle at 16 rows in the bench). Scaled FP16 partials
+(0.66 MB/row) were rejected in E138 after outlier channels caused `pos=0`
+drift and a 3K PPL regression. Remaining writeback (~1.32 MB/row) would need
+an FP32 merge without the partial buffer.
 Item 34 (E66) has the same constraint: retain only with reassociation-free
 kernels for both AR and verification.
 
@@ -439,6 +442,7 @@ in EXPERIMENTS.md.
 
 | Item | Result | Ref |
 | --- | --- | --- |
+| Split decode attention 20 → 10 splits (item 33 part) | Halves `attn_partial` (`2.64 → 1.32 MB/row`, frees 21.1 MiB) in pure FP32; 3K decode PPL 7.159 → 7.123, DSpark == AR bit-identical; matched agent requests −2.2% (19/20 faster), AR greedy −2.6%, 16-row bench −12.5 ms/cycle | E138 |
 | Lazy logits download, 1-row device argmax, persistent Engram pool, `init_hc`, drafter pass cleanups (item 19/38 part) | Skips logits D2H/H2H on greedy and device-sampled decode, removes per-step Engram thread spawns, pairs drafter `q_a`+`kv` and overlaps drafter `hc_mix`; AR greedy −0.35% (−0.20 ms/tok), drafter −0.14 ms/draft, identical replies | E137 |
 | Grouped expert GEMV: uniform SGPR offsets, selective decode hoisting, task-major dispatch (item 17 part) | Zero spills across 2–16 rows, single launch up to 8 rows, task-major scalar-`x` kernel for 9–16 rows and `IQ1`/`IQ2_XS`/`IQ2_S` downs; coding-agent replay decode −1.0% (49/53 faster, identical replies), 16-row grouped passes −10 to −28% | E136 |
 | Two-wave decode overlap (resident `down` during SSD reads + single `expert_plan`) | Resident experts' `down` runs behind their `gate+up` during read stalls on 1–16-row batches; coding-agent replay decode −1.1% (−3.1 to −5.4% on warming turns), AR greedy −0.8%, identical replies | E135 |
