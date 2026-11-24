@@ -311,6 +311,22 @@ typedef void (*ds41_decoder_layer_fn)(void* ctx, uint32_t layer,
 ds41_decoder* ds41_decoder_create(ds41_engine* engine, uint32_t context);
 void ds41_decoder_destroy(ds41_decoder* decoder);
 uint32_t ds41_decoder_batch_capacity(const ds41_decoder* decoder);
+/* Wide prefill rows. A streamed engine at the default batch reserves its
+ * batch scratch for DS41_MAX_PREFILL_BATCH rows and backs the rows past the
+ * default batch, and their pinned Engram and embedding rows, only between
+ * ds41_decoder_map_wide and ds41_decoder_release_wide; meanwhile the batch
+ * capacity is DS41_MAX_PREFILL_BATCH. The scratch is shared by every decoder
+ * of the engine and context. wide_bytes is the memory a map takes (0: no
+ * wide rows). prefill_width is the batch a prompt with `remaining` uncached
+ * tokens runs at once its rows are mapped. map returns 0 on success; release
+ * waits for the device. */
+uint64_t ds41_decoder_wide_bytes(const ds41_decoder* decoder);
+uint32_t ds41_decoder_prefill_width(const ds41_decoder* decoder,
+                                    uint64_t remaining);
+int ds41_decoder_map_wide(ds41_decoder* decoder);
+void ds41_decoder_release_wide(ds41_decoder* decoder);
+/* Releases the wide rows of every decoder of the engine. */
+void ds41_engine_release_wide(ds41_engine* engine);
 /* Evaluates `n` tokens (n <= batch capacity) at the next positions. Writes
  * vocabulary logits for the last `logit_rows` tokens (0 to n) to `logits`,
  * row-major; logits may be NULL when logit_rows is 0. */

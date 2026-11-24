@@ -167,6 +167,7 @@ Measurements first recorded in the backlog, without an E-number, are in
 | [E131](#e131--masked-device-draws-under-a-grammar-retained) | sampling | retained | A selection under a JSON grammar (tool calls) draws on the device like a plain one, from the row with the excluded tokens at -inf through Gufo's cached packed mask (gufo-org/gufo#1321), instead of building the 129,280-entry distribution on the host. Coding-agent replay A B B A, identical replies and drafts: decode 163.4/164.1 → 162.5/161.1 s (−1.2%), all of it in the tool-call replies (110.4/111.0 → 109.1/108.1 s); text replies unchanged. |
 | [E132](#e132--swar-sign-helpers-and-the-llamacpp-kernel-fixes-retained) | vendored kernels | retained | Gufo #1295's SWAR `__vcmpne4`/`__vsub4` in the vendored helpers: bit-identical (exhaustive check), 8-14% fewer instructions in the IQ1_M, IQ2_XS and IQ2_S MMQ tiles and 29% in 60 mmvq kernels. Kernel traces of streamed `UD-IQ2_XXS` and resident `IQ1_M` with DSpark launch none of them, so served speed cannot change. llama.cpp's MMQ out-of-bounds and few-row fixes do not apply to the vendored code; its Q8_1 sum change alters rounding in paths production does not run, and is not taken. |
 | [E133](#e133--q8_0-matrix-cores-at-verification-widths-rejected) | decode kernels | rejected | Gufo #1321's packed-K16 Q8_0 WMMA for small batches, as a ceiling first: the split GEMV's Q8_0 decode shapes cost 1.00/1.03/1.07/1.10 × one token's time at 2/4/6/8 rows (bit-exact, DRAM-cold) and 1.27/1.40 × at 12/16. Over the sampled 1-6-row cycle mix a kernel at the read bound saves at most ~0.5% of decode, and int8 activations change rounding. Not built. |
+| [E134](#e134--wide-prefill-passes-on-demand-retained) | prefill / streaming | retained | A streamed engine runs prompts with at least 8,192 uncached tokens in 4,096-row passes, mapping the extra rows (1.47 GB with pinned host rows) after the expert cache releases room, and returning them at the prompt's end. Fresh 17.7K/21K prompts −5.1%/−4.8%, everything else and the expert cache at parity, identical replies; `--prefill-batch` is removed. |
 
 ## Milestones
 
@@ -5309,6 +5310,76 @@ matrix-core kernel would recover part of that ceiling and changes rounding
 agreement gates of its own. Not built; the 12-16-row cost stays a lever for
 multi-session batches.
 [Sweep](artifacts/2026-11-23-q8-verify-widths/q8_0-width-sweep.txt).
+
+## E134 — Wide prefill passes on demand (retained)
+
+`--prefill-batch 4096` was 5-7% faster on fresh 14-24K-token prompts but
+cost the streamed build 1.2-1.7 GiB of expert cache for good (E115, backlog
+item 42). Gufo's expert store can give memory back and regrow
+(`Store::Release`/`Restore`), so the wide rows can be held only while a long
+prompt runs.
+
+**Design.** A streamed engine at the default batch reserves address space
+for 4,096 rows of every batch buffer whose extra rows take at least one
+2 MiB page (`h`, `xn`, the candidate mask, top-k, and the attention, FFN and
+Engram phase buffers). The pages of the first 2,048 rows are held for good,
+those of the rest mapped only while a long prompt runs; the three phases
+share pages in both pools, as they share the region. ROCm's `hipMemMap`
+takes no offset into a physical allocation (`invalid argument`), so each
+pool is one allocation per segment between the buffers' boundaries. The
+smaller buffers (`pre`/`post`/`comb`, `ik`, `iw`, `rope`, the route and
+plan buffers) are allocated at 4,096 rows; with the page rounding this
+holds about 5-10 MiB more than before at a 1M-token context. The Engram host
+rows past 2,048 and the embedding staging are pinned at map time; Engram
+uploads in two parts.
+
+When a prompt with at least 8,192 uncached tokens to the prompt's end
+starts, the runner releases what the map needs beyond the store's floor
+and a 512 MiB margin, maps the rows (cleared, as all scratch is), and runs
+4,096-token passes; when the prompt ends, fails or its request ends, or at
+idle, it unmaps them and lets the cache regrow. Without the margin after
+the release the prompt keeps 2,048-row passes for its remainder. The
+threshold leaves at least two wide passes to repay the release and the
+map. The prompt cache's plan keeps 2,048-token passes, since the runner
+decides on wide ones only when the prompt runs; wide passes end on every
+second of its boundaries. Prompt-cache captures every 2,048 tokens still
+cut a prompt's steps, so a 12K prompt whose remainder after the last
+capture is under 8,192 tokens stays narrow.
+
+ABBA against the previous build, fresh `--cache-disk` per run, documents
+and the recorded agent session, identical replies and drafts in every run:
+
+| | Before | Wide | Change |
+| --- | ---: | ---: | ---: |
+| 2,182-token prompt | 2.90 s | 2.90 s | 0.0% |
+| 12,060-token prompt | 11.04 s | 11.06 s | +0.2% (not wide) |
+| 17,703-token prompt | 15.54 s | 14.74 s | −5.1% |
+| 21,063-token prompt | 18.26 s | 17.38 s | −4.8% |
+| Agent replay prefill / decode | 36.8 / 153.2 s | 36.3 / 151.8 s | noise |
+| Expert seed | 101.07 GiB | 100.88 GiB | within spread |
+
+The runs predate the final layout (buffers rounded to pages, which moved
+the candidate mask's extra rows to the mapped pages); one run of the final
+build gave the same replies and drafts, 14.62 s and 17.24 s on the long
+prompts and a 100.95 GiB seed.
+
+The first long prompt released 1.3-1.8 GB in 175-245 ms (the store moves
+the experts of the freed chunks) and mapped in 78-110 ms; the next one
+released 0-0.25 GB; unmapping took 27-34 ms. In a probe build the map was
+device pages 30-126 ms, pinned host rows 34-75 ms and clearing 9 ms: most of
+it is the system supplying fresh pages, which a store that lends its own
+pages (gufo-org/gufo#1286) would avoid, as it would the release's copies.
+
+Two earlier layouts were measured the same way. Wide rows behind each
+buffer's narrow rows in one range, without page sharing between phases:
+−6.4%/−5.4%, but 0.6-0.8 GiB less expert cache for good and decode +0.9%. A
+separate wide copy of every buffer: no cache loss, but 2.9 GB per map (3.1 GB
+released in 426 ms), −2.4%/−4.1%.
+
+With wide passes on demand, `--prefill-batch` is removed: its other values
+served only experiments, and builds without `--stream-experts` keep 2,048
+rows (fewer when memory is short).
+[Runs](artifacts/2026-11-24-wide-prefill/summary.txt).
 
 ## Backlog measurements without an E-number
 

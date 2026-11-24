@@ -1,0 +1,328 @@
+{
+ "f1": {
+  "arm": "wide",
+  "docs": [
+   {
+    "name": "warm",
+    "prompt_tokens": 35,
+    "prompt_ms": 921.418858,
+    "predicted_ms": 113.771807,
+    "draft_n": 2,
+    "draft_accepted": 2
+   },
+   {
+    "name": "p2k",
+    "prompt_tokens": 2182,
+    "prompt_ms": 2903.090995,
+    "predicted_ms": 0.14399699999999999,
+    "draft_n": 0,
+    "draft_accepted": 0
+   },
+   {
+    "name": "p14k",
+    "prompt_tokens": 12060,
+    "prompt_ms": 11091.396452,
+    "predicted_ms": 0.211651,
+    "draft_n": 0,
+    "draft_accepted": 0
+   },
+   {
+    "name": "p20k",
+    "prompt_tokens": 17703,
+    "prompt_ms": 14786.12802,
+    "predicted_ms": 0.126427,
+    "draft_n": 0,
+    "draft_accepted": 0
+   },
+   {
+    "name": "p24k",
+    "prompt_tokens": 21063,
+    "prompt_ms": 17264.127801,
+    "predicted_ms": 0.120477,
+    "draft_n": 0,
+    "draft_accepted": 0
+   },
+   {
+    "name": "p24k-again",
+    "prompt_tokens": 21063,
+    "prompt_ms": 0,
+    "predicted_ms": 0.093615,
+    "draft_n": 0,
+    "draft_accepted": 0
+   },
+   {
+    "name": "chat",
+    "prompt_tokens": 48,
+    "prompt_ms": 1859.652169,
+    "predicted_ms": 26078.473306000004,
+    "draft_n": 311,
+    "draft_accepted": 182
+   },
+   {
+    "name": "code",
+    "prompt_tokens": 55,
+    "prompt_ms": 1035.062279,
+    "predicted_ms": 16724.011094,
+    "draft_n": 450,
+    "draft_accepted": 350
+   }
+  ],
+  "docs_reply_md5": "4cf0ee6d",
+  "replay": {
+   "requests": 53,
+   "prefill_s": 36.34,
+   "decode_s": 151.6,
+   "drafts": 3527,
+   "content_md5": "39a920f6"
+  },
+  "expert_seed_gib": 100.81,
+  "wide_events": [
+   "event=wide_prefill_acquire mapped=1 remaining_tokens=17703 wide_bytes=1434517504 released_bytes=1303603200 release_ms=175.355687 map_ms=110.251483 available_before_bytes=1835421696 available_after_release_bytes=3140276224",
+   "event=wide_prefill_release unmap_ms=29.537099 restored_bytes=1303865344",
+   "event=wide_prefill_acquire mapped=1 remaining_tokens=21063 wide_bytes=1434517504 released_bytes=249384960 release_ms=33.315587 map_ms=143.779981 available_before_bytes=2918273024 available_after_release_bytes=3168497664",
+   "event=wide_prefill_release unmap_ms=29.826404 restored_bytes=1553250304"
+  ]
+ },
+ "f2": {
+  "arm": "head",
+  "docs": [
+   {
+    "name": "warm",
+    "prompt_tokens": 35,
+    "prompt_ms": 853.630143,
+    "predicted_ms": 116.799065,
+    "draft_n": 2,
+    "draft_accepted": 2
+   },
+   {
+    "name": "p2k",
+    "prompt_tokens": 2182,
+    "prompt_ms": 2902.488605,
+    "predicted_ms": 0.147187,
+    "draft_n": 0,
+    "draft_accepted": 0
+   },
+   {
+    "name": "p14k",
+    "prompt_tokens": 12060,
+    "prompt_ms": 11010.734062,
+    "predicted_ms": 0.213562,
+    "draft_n": 0,
+    "draft_accepted": 0
+   },
+   {
+    "name": "p20k",
+    "prompt_tokens": 17703,
+    "prompt_ms": 15577.194230999998,
+    "predicted_ms": 0.172218,
+    "draft_n": 0,
+    "draft_accepted": 0
+   },
+   {
+    "name": "p24k",
+    "prompt_tokens": 21063,
+    "prompt_ms": 18272.700302,
+    "predicted_ms": 0.158059,
+    "draft_n": 0,
+    "draft_accepted": 0
+   },
+   {
+    "name": "p24k-again",
+    "prompt_tokens": 21063,
+    "prompt_ms": 0,
+    "predicted_ms": 0.088586,
+    "draft_n": 0,
+    "draft_accepted": 0
+   },
+   {
+    "name": "chat",
+    "prompt_tokens": 48,
+    "prompt_ms": 1150.7212650000001,
+    "predicted_ms": 25766.306094999985,
+    "draft_n": 307,
+    "draft_accepted": 181
+   },
+   {
+    "name": "code",
+    "prompt_tokens": 55,
+    "prompt_ms": 1166.211007,
+    "predicted_ms": 16526.342499000006,
+    "draft_n": 443,
+    "draft_accepted": 354
+   }
+  ],
+  "docs_reply_md5": "4cf0ee6d",
+  "replay": {
+   "requests": 53,
+   "prefill_s": 36.68,
+   "decode_s": 152.71,
+   "drafts": 3527,
+   "content_md5": "39a920f6"
+  },
+  "expert_seed_gib": 101.02,
+  "wide_events": []
+ },
+ "f3": {
+  "arm": "head",
+  "docs": [
+   {
+    "name": "warm",
+    "prompt_tokens": 35,
+    "prompt_ms": 806.88909,
+    "predicted_ms": 116.076688,
+    "draft_n": 2,
+    "draft_accepted": 2
+   },
+   {
+    "name": "p2k",
+    "prompt_tokens": 2182,
+    "prompt_ms": 2890.55683,
+    "predicted_ms": 0.159638,
+    "draft_n": 0,
+    "draft_accepted": 0
+   },
+   {
+    "name": "p14k",
+    "prompt_tokens": 12060,
+    "prompt_ms": 11069.77076,
+    "predicted_ms": 0.18003000000000002,
+    "draft_n": 0,
+    "draft_accepted": 0
+   },
+   {
+    "name": "p20k",
+    "prompt_tokens": 17703,
+    "prompt_ms": 15495.399463000002,
+    "predicted_ms": 0.220092,
+    "draft_n": 0,
+    "draft_accepted": 0
+   },
+   {
+    "name": "p24k",
+    "prompt_tokens": 21063,
+    "prompt_ms": 18247.862405999997,
+    "predicted_ms": 0.146588,
+    "draft_n": 0,
+    "draft_accepted": 0
+   },
+   {
+    "name": "p24k-again",
+    "prompt_tokens": 21063,
+    "prompt_ms": 0,
+    "predicted_ms": 0.090224,
+    "draft_n": 0,
+    "draft_accepted": 0
+   },
+   {
+    "name": "chat",
+    "prompt_tokens": 48,
+    "prompt_ms": 1129.898214,
+    "predicted_ms": 25687.31940299999,
+    "draft_n": 324,
+    "draft_accepted": 187
+   },
+   {
+    "name": "code",
+    "prompt_tokens": 55,
+    "prompt_ms": 1026.032955,
+    "predicted_ms": 16673.131212999993,
+    "draft_n": 449,
+    "draft_accepted": 350
+   }
+  ],
+  "docs_reply_md5": "4cf0ee6d",
+  "replay": {
+   "requests": 53,
+   "prefill_s": 36.8,
+   "decode_s": 153.63,
+   "drafts": 3527,
+   "content_md5": "39a920f6"
+  },
+  "expert_seed_gib": 101.12,
+  "wide_events": []
+ },
+ "f4": {
+  "arm": "wide",
+  "docs": [
+   {
+    "name": "warm",
+    "prompt_tokens": 35,
+    "prompt_ms": 814.890071,
+    "predicted_ms": 114.279803,
+    "draft_n": 2,
+    "draft_accepted": 2
+   },
+   {
+    "name": "p2k",
+    "prompt_tokens": 2182,
+    "prompt_ms": 2904.1654240000003,
+    "predicted_ms": 0.16902899999999998,
+    "draft_n": 0,
+    "draft_accepted": 0
+   },
+   {
+    "name": "p14k",
+    "prompt_tokens": 12060,
+    "prompt_ms": 11019.780734999998,
+    "predicted_ms": 0.204821,
+    "draft_n": 0,
+    "draft_accepted": 0
+   },
+   {
+    "name": "p20k",
+    "prompt_tokens": 17703,
+    "prompt_ms": 14694.320234,
+    "predicted_ms": 0.13782699999999998,
+    "draft_n": 0,
+    "draft_accepted": 0
+   },
+   {
+    "name": "p24k",
+    "prompt_tokens": 21063,
+    "prompt_ms": 17496.944596999998,
+    "predicted_ms": 0.121716,
+    "draft_n": 0,
+    "draft_accepted": 0
+   },
+   {
+    "name": "p24k-again",
+    "prompt_tokens": 21063,
+    "prompt_ms": 0,
+    "predicted_ms": 0.090384,
+    "draft_n": 0,
+    "draft_accepted": 0
+   },
+   {
+    "name": "chat",
+    "prompt_tokens": 48,
+    "prompt_ms": 1687.713684,
+    "predicted_ms": 25568.739671000003,
+    "draft_n": 310,
+    "draft_accepted": 181
+   },
+   {
+    "name": "code",
+    "prompt_tokens": 55,
+    "prompt_ms": 995.1819370000001,
+    "predicted_ms": 16747.27307099999,
+    "draft_n": 446,
+    "draft_accepted": 349
+   }
+  ],
+  "docs_reply_md5": "4cf0ee6d",
+  "replay": {
+   "requests": 53,
+   "prefill_s": 36.27,
+   "decode_s": 152.01,
+   "drafts": 3527,
+   "content_md5": "39a920f6"
+  },
+  "expert_seed_gib": 100.95,
+  "wide_events": [
+   "event=wide_prefill_acquire mapped=1 remaining_tokens=17703 wide_bytes=1434517504 released_bytes=1833062400 release_ms=245.233973 map_ms=77.805497 available_before_bytes=1335111680 available_after_release_bytes=3178418176",
+   "event=wide_prefill_release unmap_ms=26.688334 restored_bytes=1833742336",
+   "event=wide_prefill_acquire mapped=1 remaining_tokens=21063 wide_bytes=1434517504 released_bytes=0 release_ms=0.044063 map_ms=77.365459 available_before_bytes=3343585280 available_after_release_bytes=3343585280",
+   "event=wide_prefill_release unmap_ms=34.134276 restored_bytes=0"
+  ]
+ }
+}

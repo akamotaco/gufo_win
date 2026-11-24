@@ -87,11 +87,10 @@ only the resident tensors, so the dense weights go through the device heap.
   the rest as its limit and fills it once from the ranking (about 25 s for
   101 GiB), so the first prompt does not grow the cache. `gufo prompt`,
   `gufo bench` and the load probe size it themselves right after loading
-  (`ds41_expert_store_fit_available`), leaving 4 GiB free, more for prefill
-  batches over 2,048 tokens. The RAM prompt cache keeps what its backing
-  committed by then: growing it later needs 4 GiB of device heap free, which
-  the fitted expert cache does not leave (E126); the disk cache serves the
-  rest.
+  (`ds41_expert_store_fit_available`), leaving 4 GiB free. The RAM prompt
+  cache keeps what its backing committed by then: growing it later needs
+  4 GiB of device heap free, which the fitted expert cache does not leave
+  (E126); the disk cache serves the rest.
 - **Host pressure.** The fitted cache leaves about 2 GiB free on purpose, so
   while experts stream Gufo measures host pressure against the store's
   1 GiB floor rather than its 4 GiB host reserve. Below the floor, the idle
@@ -100,6 +99,13 @@ only the resident tensors, so the dense weights go through the device heap.
   refuses new requests below half the floor. Once the floor, the
   released bytes and 256 MiB are available again, the cache may regrow to
   its grant (E127).
+- **Wide prefill.** A prompt with at least 8,192 uncached tokens runs in
+  4,096-token passes: before it, the server releases from the cache what the
+  rows past 2,048 need (1.47 GB with their pinned host rows) beyond the
+  floor and a 512 MiB margin, and restores it when the prompt ends,
+  fails or is cancelled, or at idle; the cache regrows as experts miss.
+  One prompt holds the rows at a time, and one that cannot get them stays
+  narrow without releasing more of the cache (E134).
 
 ## A layer's prepare
 

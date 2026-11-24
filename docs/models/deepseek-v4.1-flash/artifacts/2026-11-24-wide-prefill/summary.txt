@@ -1,0 +1,47 @@
+E134: wide prefill passes on demand (streamed UD-IQ2_XXS, MXFP8 Engram, DSpark, vision)
+
+Build: Gufo 60c48924 (#1318) with this extension; head = perf/upstream-integration
+ae39133, wide = the E134 change. Host: tuned accelerator-performance, fans
+under PWM control. One fresh `gufo serve --sessions 1 --stream-experts
+--speculative dspark --mmproj ... --cache-disk <empty dir>` per run, ABBA
+order (wide, head, head, wide), default prefill batch (2048).
+
+Per run: "Hi" warm-up; four fresh documents (disjoint Gufo source files,
+2,182 / 12,060 / 17,703 / 21,063 tokens, 1 output token); the 21K document
+again (cached); two 512-token chat/code replies at temperature 0; then the
+53-request recorded agent session (artifacts/2026-11-09-agent-replay).
+
+Replies: identical in all four runs (documents and replay content hashes in
+runs.json); replay drafts 3,527 in every run.
+
+Prompt time (s)       head f2   head f3   wide f1   wide f4   change
+  2,182 tokens          2.90      2.89      2.90      2.90      0.0%
+ 12,060 tokens         11.01     11.07     11.09     11.02     +0.2% (not wide)
+ 17,703 tokens         15.58     15.50     14.79     14.69     -5.1%
+ 21,063 tokens         18.27     18.25     17.26     17.50     -4.8%
+Replay prefill (s)     36.7      36.8      36.3      36.3      -1.2% (noise)
+Replay decode (s)     152.7     153.6     151.6     152.0      -0.9% (noise)
+Expert seed (GiB)     101.02    101.12    100.81    100.95     -0.19 (spread)
+
+Wide events (wide runs): each long prompt maps 1,368 MiB of device rows plus
+pinned host rows (1.43 GB in all).
+  f1 17,703: released 1.30 GB in 175 ms, map 110 ms; 21,063: 0.25 GB in 33 ms, map 144 ms; unmap 30 / 30 ms
+  f4 17,703: released 1.83 GB in 245 ms, map 78 ms;  21,063: 0 GB, map 77 ms;            unmap 27 / 34 ms
+
+Map breakdown (a probe build, two runs): device pages 30-126 ms, pinned
+host rows 34-75 ms, clearing the device rows 9 ms.
+
+Earlier layouts, same driver and order (two runs per arm):
+  wide rows behind the narrow rows of every buffer (one address range,
+    phases no longer sharing their narrow pages): 17,703 -6.4%, 21,063 -5.4%,
+    but 0.6-0.8 GiB less expert cache for good and decode +0.9%.
+  a separate wide copy of every batch buffer: no cache loss, 2.9 GB per map,
+    first release 3.1 GB in 426 ms; 17,703 -2.4%, 21,063 -4.1%.
+  the retained aliased layout before its final cleanup: 17,703 -4.0%,
+    21,063 -4.4%, replay and expert seed at parity.
+
+Final layout (buffers rounded to pages, any buffer with a page of extra rows
+shared), one wide run after the ABBA: replies and drafts identical to the
+runs above; maps 1,400 MiB (1.47 GB) per long prompt; 17,703 14.62 s,
+21,063 17.24 s; expert seed 100.95 GiB; first release 1.82 GB in 240 ms,
+map 77 / 91 ms.

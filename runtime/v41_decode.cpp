@@ -238,6 +238,10 @@ struct LayerState {
  * reported free memory runs about 1 GiB below MemAvailable, so this keeps
  * about 2 GiB of RAM for the MMQ scratch and the rest of the system. */
 constexpr uint32_t kMaxBatch = DS41_MAX_PREFILL_BATCH;
+/* A prompt with at least this many uncached tokens runs kMaxBatch-row passes
+ * when its engine has wide rows (ds41_decoder_map_wide): two or more wide
+ * passes, whose gain covers the expert-cache release and the map. */
+constexpr uint64_t kWidePrefillTokens = 8192;
 constexpr uint64_t kDeviceReserve = 1ull << 30;
 
 /* Indexer score rows (context + 1 floats per token) run in groups of up to
@@ -301,6 +305,101 @@ struct EngramAhead {
   int set = 0;                // the buffer set holding the rows
 };
 
+/* Pinned host rows of a batch's Engram layer: rows below split in lo, the
+ * rest in hi (a wide batch's extra rows, allocated while it runs). */
+struct HostRows {
+  float* lo = nullptr;
+  float* hi = nullptr;
+  uint64_t split = UINT64_MAX;
+  float* row(uint64_t t) const {
+    return t < split ? lo + t * kEngramIn : hi + (t - split) * kEngramIn;
+  }
+};
+
+/* Device pages mapped at chosen addresses; ranges whose buffers are never
+ * live together share pages. ROCm's hipMemMap takes no offset into a
+ * physical allocation, so the pool is one allocation per segment between
+ * the ranges' boundaries. */
+constexpr uint64_t kAliasPage = 2ull << 20;
+
+class AliasPool {
+public:
+  AliasPool() = default;
+  AliasPool(const AliasPool&) = delete;
+  AliasPool& operator=(const AliasPool&) = delete;
+  ~AliasPool() { Unmap(); }
+  /* Maps [va, va + bytes) onto the pool's [offset, offset + bytes). */
+  void Add(char* va, uint64_t offset, uint64_t bytes) {
+    ranges_.push_back({va, offset, bytes});
+  }
+  uint64_t bytes() const {
+    uint64_t end = 0;
+    for (const Range& r : ranges_)
+      end = std::max(end, r.offset + r.bytes);
+    return end;
+  }
+  bool Map() {
+    if (!handles_.empty())
+      return true;
+    int device = 0;
+    if (hipGetDevice(&device) != hipSuccess)
+      return false;
+    hipMemAllocationProp prop = {};
+    prop.type = hipMemAllocationTypePinned;
+    prop.location.type = hipMemLocationTypeDevice;
+    prop.location.id = device;
+    hipMemAccessDesc access = {};
+    access.location = prop.location;
+    access.flags = hipMemAccessFlagsProtReadWrite;
+    std::vector<uint64_t> cuts;
+    for (const Range& r : ranges_)
+      cuts.insert(cuts.end(), {r.offset, r.offset + r.bytes});
+    std::sort(cuts.begin(), cuts.end());
+    cuts.erase(std::unique(cuts.begin(), cuts.end()), cuts.end());
+    bool ok = true;
+    for (size_t i = 0; i + 1 < cuts.size() && ok; i++) {
+      hipMemGenericAllocationHandle_t handle{};
+      ok = hipMemCreate(&handle, cuts[i + 1] - cuts[i], &prop, 0) == hipSuccess;
+      if (ok)
+        handles_.push_back(handle);
+    }
+    for (const Range& r : ranges_) {
+      size_t i =
+          std::lower_bound(cuts.begin(), cuts.end(), r.offset) - cuts.begin();
+      for (; ok && cuts[i] < r.offset + r.bytes; i++) {
+        char* at = r.va + (cuts[i] - r.offset);
+        const uint64_t len = cuts[i + 1] - cuts[i];
+        ok = hipMemMap(at, len, 0, handles_[i], 0) == hipSuccess;
+        if (ok)
+          maps_.emplace_back(at, len);
+        ok = ok && hipMemSetAccess(at, len, &access, 1) == hipSuccess;
+      }
+    }
+    if (!ok) {
+      (void)hipGetLastError();
+      Unmap();
+    }
+    return ok;
+  }
+  void Unmap() {
+    for (const auto& [at, len] : maps_)
+      (void)hipMemUnmap(at, len);
+    for (hipMemGenericAllocationHandle_t handle : handles_)
+      (void)hipMemRelease(handle);
+    maps_.clear();
+    handles_.clear();
+  }
+
+private:
+  struct Range {
+    char* va;
+    uint64_t offset, bytes;
+  };
+  std::vector<Range> ranges_;
+  std::vector<hipMemGenericAllocationHandle_t> handles_;
+  std::vector<std::pair<char*, uint64_t>> maps_;
+};
+
 struct SharedActivations {
   ds41_engine* engine = nullptr;
   uint32_t context = 0;
@@ -311,14 +410,41 @@ struct SharedActivations {
    * while the next batch's rows land in the other. */
   float* engram_ahead[DS41_N_ENGRAM_LAYER] = {};
   EngramAhead ahead;
+  /* views is narrow, or wide while a long prompt runs (ds41_decoder_map_wide):
+   * the same device buffers, wide's extra rows mapped. gen counts the
+   * switches, so decoders refresh their copy of views. */
+  Activations narrow, wide;
+  uint64_t gen = 0;
+  /* The address range of the buffers with wide rows (null without), the
+   * pages of their first narrow rows and those of the rest. */
+  char* wide_va = nullptr;
+  uint64_t wide_va_bytes = 0;
+  AliasPool narrow_pages, tail_pages;
+  std::vector<std::pair<char*, uint64_t>>
+      wide_rows;  // the ranges tail_pages backs, cleared after each map
+  /* Pinned host rows past narrow.capacity for each Engram buffer set and
+   * slot, allocated while mapped. */
+  float* engram_wide[2][DS41_N_ENGRAM_LAYER] = {};
+  bool wide_mapped = false;
   ~SharedActivations() {
     if (ahead.read.valid()) ahead.read.wait();
+    for (auto& set : engram_wide)
+      for (float* p : set)
+        if (p)
+          (void)hipHostFree(p);
+    if (wide.embd_pinned)
+      (void)hipHostFree(wide.embd_pinned);
     for (float* p : engram_ahead)
       if (p) (void)hipHostFree(p);
     for (void* p : device) (void)hipFree(p);
-    for (float* p : views.engram_pinned)
+    for (float* p : narrow.engram_pinned)
       if (p) (void)hipHostFree(p);
-    if (views.embd_pinned) (void)hipHostFree(views.embd_pinned);
+    if (narrow.embd_pinned)
+      (void)hipHostFree(narrow.embd_pinned);
+    tail_pages.Unmap();
+    narrow_pages.Unmap();
+    if (wide_va)
+      (void)hipMemAddressFree(wide_va, wide_va_bytes);
   }
 };
 
@@ -326,6 +452,23 @@ struct SharedActivations {
 void join_engram_ahead(SharedActivations& sh) {
   if (sh.ahead.read.valid()) (void)sh.ahead.read.get();
   sh.ahead.owner = nullptr;
+}
+
+/* Bytes a wide pass maps beyond the narrow scratch: device rows and pinned
+ * host rows. */
+uint64_t wide_extra_bytes(const SharedActivations& sh) {
+  if (!sh.wide_va)
+    return 0;
+  const uint64_t extra = sh.wide.capacity - sh.narrow.capacity;
+  return sh.tail_pages.bytes() +
+         2 * DS41_N_ENGRAM_LAYER * extra * kEngramIn * sizeof(float) +
+         (uint64_t)sh.wide.capacity * (kDim + kHc) * sizeof(float);
+}
+
+/* An Engram buffer set's host rows for slot (set 1 is the lookahead's). */
+HostRows engram_host_rows(const SharedActivations& sh, int set, uint32_t slot) {
+  return {set ? sh.engram_ahead[slot] : sh.narrow.engram_pinned[slot],
+          sh.engram_wide[set][slot], sh.narrow.capacity};
 }
 
 std::mutex g_shared_mutex;
@@ -337,6 +480,8 @@ struct ds41_decoder : Activations {
   ds41_engine* engine = nullptr;
   uint32_t context = 0;
   uint32_t pos = 0;
+  uint64_t views_gen =
+      0;  // the SharedActivations::gen of this copy of its views
   uint64_t score_stride = 0;
   uint64_t block_stride = 0;
   uint64_t mask_words = 0;
@@ -621,7 +766,8 @@ bool engram_tail_matches(const int64_t* tail, const std::vector<int64_t>& histor
  * is exactly zero, as the official masked gate. Reads run on parallel threads: each is a small random read, so
  * throughput comes from queue depth. Touches only immutable engine state, so
  * it can run while the GPU works on earlier layers. */
-bool engram_read(const ds41_engine* engine, const int64_t* rows, uint32_t n, float* out) {
+bool engram_read(const ds41_engine* engine, const int64_t* rows, uint32_t n,
+                 HostRows out) {
   const ds41_engram_tables* e = engine->engram;
   const ds41_tensor* table = e->table;
   const uint64_t base = table->abs_offset - e->file.shard_offset[0];
@@ -632,12 +778,18 @@ bool engram_read(const ds41_engine* engine, const int64_t* rows, uint32_t n, flo
     std::vector<uint8_t> raw(e->row_bytes);
     for (uint64_t i = next++; i < count && ok; i = next++) {
       if (rows[i] < 0) {
-        std::fill_n(out + i * DS41_ENGRAM_HEAD_DIM, DS41_ENGRAM_HEAD_DIM, 0.0f);
+        std::fill_n(out.row(i / DS41_ENGRAM_COLS) +
+                        i % DS41_ENGRAM_COLS * DS41_ENGRAM_HEAD_DIM,
+                    DS41_ENGRAM_HEAD_DIM, 0.0f);
         continue;
       }
       const off_t at = (off_t)(base + (uint64_t)rows[i] * e->row_bytes);
-      if (pread(e->file.shard_fd[0], raw.data(), raw.size(), at) != (ssize_t)raw.size() ||
-          !dequant_row(table->type, raw.data(), out + i * DS41_ENGRAM_HEAD_DIM, DS41_ENGRAM_HEAD_DIM))
+      if (pread(e->file.shard_fd[0], raw.data(), raw.size(), at) !=
+              (ssize_t)raw.size() ||
+          !dequant_row(table->type, raw.data(),
+                       out.row(i / DS41_ENGRAM_COLS) +
+                           i % DS41_ENGRAM_COLS * DS41_ENGRAM_HEAD_DIM,
+                       DS41_ENGRAM_HEAD_DIM))
         ok = false;
     }
   };
@@ -651,10 +803,16 @@ bool engram_read(const ds41_engine* engine, const int64_t* rows, uint32_t n, flo
 }
 
 /* Adds layer il's Engram term from rows read by engram_read. */
-bool engram(ds41_decoder* d, uint32_t il, const float* rows, uint32_t n) {
+bool engram(ds41_decoder* d, uint32_t il, HostRows rows, uint32_t n) {
   const ds41_layer_weights* l = &d->engine->weights->layer[il];
-  const uint64_t bytes = (uint64_t)n * DS41_ENGRAM_COLS * DS41_ENGRAM_HEAD_DIM * sizeof(float);
-  if (hipMemcpyAsync(d->engram_in, rows, bytes, hipMemcpyHostToDevice, 0) != hipSuccess) return false;
+  const uint64_t lo = std::min<uint64_t>(n, rows.split),
+                 row_bytes = (uint64_t)kEngramIn * sizeof(float);
+  if (hipMemcpyAsync(d->engram_in, rows.lo, lo * row_bytes,
+                     hipMemcpyHostToDevice, 0) != hipSuccess ||
+      (n > lo && hipMemcpyAsync(d->engram_in + lo * kEngramIn, rows.hi,
+                                (n - lo) * row_bytes, hipMemcpyHostToDevice,
+                                0) != hipSuccess))
+    return false;
   if (!linear(d, l->engram_kv, d->engram_in, d->engram_kv, n)) return false;
   return ds41_v41_engram_gate(d->h, d->engram_kv, f32(d, l->engram_gate), kHc, kDim, DS41_RMS_EPS, n) == 0;
 }
@@ -1756,39 +1914,137 @@ std::shared_ptr<SharedActivations> make_activations(ds41_engine* engine, uint32_
                                                      engine->prefill_batch / 16 * 16);
   a.score_rows = std::min(rows, a.capacity);
   const uint64_t cap = a.capacity;
-  uint64_t region_floats = 0;
-  (void)counts(cap, a.score_rows, &region_floats);
-  float* region = ok ? alloc<float>(sh->device, region_floats) : nullptr;
-  ok = ok && region;
-  uint64_t offset[kPhases] = {};
-  for (const Buf& b : float_buffers(cap, a.score_rows)) {
+  /* A streamed engine at its full default batch can run a long prompt in
+   * kMaxBatch-row passes once the expert cache has made room
+   * (ds41_decoder_map_wide). A buffer whose kMaxBatch rows take at least a
+   * page more than its cap rows then lives in an address range sized for
+   * kMaxBatch rows: the pages of its first cap rows are held for good, the
+   * rest mapped only while a long prompt runs wide. Phase buffers share pages
+   * in both pools, as they share the region. The batch's smaller buffers are
+   * allocated wide; the score groups stay narrow. */
+  const bool wide = ok && engine->expert_store &&
+                    cap == engine->prefill_batch / 16 * 16 && cap < kMaxBatch;
+  const uint64_t wcap = wide ? kMaxBatch : cap;
+  struct Plan {
+    void** p;
+    uint64_t narrow, wide;
+    Phase phase;
+    bool alias = false;
+  };
+  std::vector<Plan> plans;
+  {
+    const std::vector<Buf> nb = float_buffers(cap, a.score_rows),
+                           wb = float_buffers(wcap, a.score_rows);
+    for (size_t i = 0; i < nb.size(); i++)
+      plans.push_back({reinterpret_cast<void**>(nb[i].p),
+                       nb[i].n * sizeof(float), wb[i].n * sizeof(float),
+                       nb[i].phase});
+    const uint64_t mask = (block_stride + 31) / 32 * sizeof(uint32_t);
+    plans.push_back({reinterpret_cast<void**>(&a.candidates), cap * mask,
+                     wcap * mask, kOwn});
+    plans.push_back({reinterpret_cast<void**>(&a.topk),
+                     cap * DS41_N_INDEXER_TOP_K * sizeof(uint32_t),
+                     wcap * DS41_N_INDEXER_TOP_K * sizeof(uint32_t), kOwn});
+    plans.push_back({reinterpret_cast<void**>(&a.route_ids),
+                     cap * DS41_N_EXPERT_USED * sizeof(int32_t),
+                     wcap * DS41_N_EXPERT_USED * sizeof(int32_t), kOwn});
+    plans.push_back({reinterpret_cast<void**>(&a.routed_plan),
+                     routed_plan_ints(cap) * sizeof(int32_t),
+                     routed_plan_ints(wcap) * sizeof(int32_t), kOwn});
+  }
+  const auto pages = [](uint64_t bytes) {
+    return (bytes + kAliasPage - 1) / kAliasPage * kAliasPage;
+  };
+  for (Plan& b : plans)
+    if (wide && pages(b.wide) >= pages(b.narrow) + kAliasPage) {
+      b.alias = true;
+      b.narrow = pages(b.narrow);
+      b.wide = pages(b.wide);
+    }
+  const auto padded_bytes = [](uint64_t bytes) {
+    return (bytes + 255) / 256 * 256;
+  };
+  uint64_t phase_bytes[kPhases] = {}, va_bytes = 0, own_narrow = 0,
+           own_tail = 0;
+  for (const Plan& b : plans)
+    if (b.alias) {
+      va_bytes += b.wide;
+      if (b.phase == kOwn)
+        own_narrow += b.narrow, own_tail += b.wide - b.narrow;
+    } else if (b.phase != kOwn) {
+      phase_bytes[b.phase] += padded_bytes(b.wide);
+    }
+  const uint64_t region_bytes = std::max(
+      {phase_bytes[kAttention], phase_bytes[kFfn], phase_bytes[kEngram]});
+  uint8_t* region =
+      ok && region_bytes ? alloc<uint8_t>(sh->device, region_bytes) : nullptr;
+  ok = ok && (region || !region_bytes);
+  if (ok && va_bytes) {
+    ok = hipMemAddressReserve(reinterpret_cast<void**>(&sh->wide_va), va_bytes,
+                              kAliasPage, nullptr, 0) == hipSuccess;
+    if (ok)
+      sh->wide_va_bytes = va_bytes;
+  }
+  uint64_t va_off = 0, region_off[kPhases] = {}, own_n = 0, own_t = 0,
+           phase_n[kPhases] = {}, phase_t[kPhases] = {};
+  for (const Plan& b : plans) {
     if (!ok) break;
-    if (b.phase == kOwn) {
-      *b.p = alloc<float>(sh->device, b.n);
+    if (b.alias) {
+      char* p = sh->wide_va + va_off;
+      va_off += b.wide;
+      *b.p = p;
+      uint64_t* n_off = b.phase == kOwn ? &own_n : &phase_n[b.phase];
+      uint64_t* t_off = b.phase == kOwn ? &own_t : &phase_t[b.phase];
+      const uint64_t n_base = b.phase == kOwn ? 0 : own_narrow,
+                     t_base = b.phase == kOwn ? 0 : own_tail;
+      sh->narrow_pages.Add(p, n_base + *n_off, b.narrow);
+      sh->tail_pages.Add(p + b.narrow, t_base + *t_off, b.wide - b.narrow);
+      sh->wide_rows.emplace_back(p + b.narrow, b.wide - b.narrow);
+      *n_off += b.narrow;
+      *t_off += b.wide - b.narrow;
+    } else if (b.phase == kOwn) {
+      *b.p = alloc<uint8_t>(sh->device, b.wide);
       ok = *b.p != nullptr;
     } else {
-      *b.p = region + offset[b.phase];
-      offset[b.phase] += padded(b.n);
+      *b.p = region + region_off[b.phase];
+      region_off[b.phase] += padded_bytes(b.wide);
     }
   }
+  /* Cleared, as alloc clears the other scratch. */
+  if (ok && va_bytes) {
+    ok = sh->narrow_pages.Map();
+    for (const Plan& b : plans)
+      if (ok && b.alias)
+        ok = hipMemset(*b.p, 0, b.narrow) == hipSuccess;
+  }
   if (ok) {
-    a.candidates = alloc<uint32_t>(sh->device, cap * ((block_stride + 31) / 32));
-    a.topk = alloc<uint32_t>(sh->device, cap * DS41_N_INDEXER_TOP_K);
-    a.block_select = alloc<uint32_t>(sh->device, (uint64_t)a.score_rows * DS41_CANDIDATE_TOPK_BLOCKS);
-    a.route_ids = alloc<int32_t>(sh->device, cap * DS41_N_EXPERT_USED);
+    a.block_select = alloc<uint32_t>(
+        sh->device, (uint64_t)a.score_rows * DS41_CANDIDATE_TOPK_BLOCKS);
     a.expert_class = alloc<uint8_t>(sh->device, DS41_MAX_EXPERT);
-    a.routed_plan = alloc<int32_t>(sh->device, routed_plan_ints(cap));
     a.expert_plan = alloc<int32_t>(sh->device, DS41_V41_EXPERT_PLAN_INTS(DS41_V41_EXPERT_PLAN_SLOTS));
     a.expert_plan_split[0] = alloc<int32_t>(sh->device, DS41_V41_EXPERT_PLAN_INTS(DS41_V41_EXPERT_PLAN_SLOTS));
     a.expert_plan_split[1] = alloc<int32_t>(sh->device, DS41_V41_EXPERT_PLAN_INTS(DS41_V41_EXPERT_PLAN_SLOTS));
-    ok = a.candidates && a.topk && a.block_select && a.route_ids && a.expert_class && a.routed_plan &&
-         a.expert_plan && a.expert_plan_split[0] && a.expert_plan_split[1];
+    ok = a.block_select && a.expert_class && a.expert_plan &&
+         a.expert_plan_split[0] && a.expert_plan_split[1];
   }
   for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER && ok; slot++)
     ok = hipHostMalloc(&a.engram_pinned[slot], cap * kEngramIn * sizeof(float)) == hipSuccess &&
          hipHostMalloc(&sh->engram_ahead[slot], cap * kEngramIn * sizeof(float)) == hipSuccess;
   ok = ok && hipHostMalloc(&a.embd_pinned, cap * (kDim + kHc) * sizeof(float)) == hipSuccess;
-  return ok ? sh : nullptr;
+  sh->narrow = a;
+  if (!ok)
+    return nullptr;
+  if (wide) {
+    sh->wide = a;
+    sh->wide.capacity = (uint32_t)wcap;
+    sh->wide.embd_pinned = nullptr;  // allocated while mapped
+    fprintf(stderr,
+            "ds41: batch scratch %u rows, %u for long prompts (%llu MiB while "
+            "they run)\n",
+            a.capacity, sh->wide.capacity,
+            (unsigned long long)(wide_extra_bytes(*sh) >> 20));
+  }
+  return sh;
 }
 
 /* The scratch of a live decoder with this engine and context, or a new one. */
@@ -1854,8 +2110,10 @@ ds41_decoder* ds41_decoder_create(ds41_engine* engine, uint32_t context) {
     return nullptr;
   }
   static_cast<Activations&>(*d) = d->shared->views;
+  d->views_gen = d->shared->gen;
   if (engine->expert_store) {
-    const uint64_t rows = d->capacity;
+    const uint64_t rows =
+        std::max(d->shared->narrow.capacity, d->shared->wide.capacity);
     d->pred_ids = alloc<int32_t>(d->allocations, rows * DS41_N_EXPERT_USED);
     d->pred_w = alloc<float>(d->allocations, rows * DS41_N_EXPERT_USED);
     ok = d->pred_ids && d->pred_w &&
@@ -1909,7 +2167,97 @@ void ds41_decoder_destroy(ds41_decoder* d) {
   delete d;
 }
 
-uint32_t ds41_decoder_batch_capacity(const ds41_decoder* d) { return d ? d->capacity : 0; }
+uint32_t ds41_decoder_batch_capacity(const ds41_decoder* d) {
+  return d && d->shared ? d->shared->views.capacity : 0;
+}
+
+uint64_t ds41_decoder_wide_bytes(const ds41_decoder* d) {
+  return d && d->shared ? wide_extra_bytes(*d->shared) : 0;
+}
+
+uint32_t ds41_decoder_prefill_width(const ds41_decoder* d, uint64_t remaining) {
+  if (!d)
+    return 0;
+  return ds41_decoder_wide_bytes(d) && remaining >= kWidePrefillTokens
+             ? d->shared->wide.capacity
+             : ds41_decoder_batch_capacity(d);
+}
+
+namespace {
+void release_wide(SharedActivations& sh) {
+  if (!sh.wide_mapped)
+    return;
+  /* Nothing may still read the wide rows when they are unmapped. */
+  join_engram_ahead(sh);
+  (void)hipDeviceSynchronize();
+  sh.views = sh.narrow;
+  sh.gen++;
+  for (auto& set : sh.engram_wide)
+    for (float*& p : set) {
+      if (p)
+        (void)hipHostFree(p);
+      p = nullptr;
+    }
+  if (sh.wide.embd_pinned)
+    (void)hipHostFree(sh.wide.embd_pinned);
+  sh.wide.embd_pinned = nullptr;
+  sh.tail_pages.Unmap();
+  sh.wide_mapped = false;
+}
+
+/* Refreshes a decoder's copy of the shared views after a switch. */
+void sync_views(ds41_decoder* d) {
+  if (d->views_gen == d->shared->gen)
+    return;
+  static_cast<Activations&>(*d) = d->shared->views;
+  d->views_gen = d->shared->gen;
+}
+}  // namespace
+
+int ds41_decoder_map_wide(ds41_decoder* d) {
+  if (!d || !d->shared || !d->shared->wide_va)
+    return 1;
+  SharedActivations& sh = *d->shared;
+  if (sh.wide_mapped)
+    return 0;
+  /* A pending lookahead read writes the Engram host rows. */
+  join_engram_ahead(sh);
+  sh.wide_mapped = true;
+  const uint64_t extra = sh.wide.capacity - sh.narrow.capacity;
+  bool ok = sh.tail_pages.Map();
+  for (auto& set : sh.engram_wide)
+    for (float*& p : set)
+      ok = ok &&
+           hipHostMalloc(&p, extra * kEngramIn * sizeof(float)) == hipSuccess;
+  ok = ok && hipHostMalloc(&sh.wide.embd_pinned,
+                           sh.wide.capacity * (kDim + kHc) * sizeof(float)) ==
+                 hipSuccess;
+  for (const auto& [p, bytes] : sh.wide_rows)
+    ok = ok && hipMemset(p, 0, bytes) == hipSuccess;
+  ok = hipDeviceSynchronize() == hipSuccess && ok;
+  if (!ok) {
+    (void)hipGetLastError();
+    fprintf(stderr, "ds41: wide batch rows not mapped\n");
+    release_wide(sh);
+    return 1;
+  }
+  sh.views = sh.wide;
+  sh.gen++;
+  sync_views(d);
+  return 0;
+}
+
+void ds41_decoder_release_wide(ds41_decoder* d) {
+  if (d && d->shared)
+    release_wide(*d->shared);
+}
+
+void ds41_engine_release_wide(ds41_engine* engine) {
+  const std::lock_guard<std::mutex> lock(g_shared_mutex);
+  for (const auto& w : g_shared)
+    if (auto sh = w.lock(); sh && sh->engine == engine)
+      release_wide(*sh);
+}
 
 uint32_t ds41_decoder_pos(const ds41_decoder* d) { return d ? d->pos : 0; }
 
@@ -2111,9 +2459,11 @@ bool replay_boundary(ds41_decoder* d, uint32_t il, int prev, uint32_t skip, uint
  * on (bounded replay; 0 runs every row), whose windows start there. */
 int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from, float* logits,
               uint32_t logit_rows, ds41_decoder_layer_fn layer_fn, void* ctx) {
-  if (!d || !tokens || n == 0 || n > d->capacity || logit_rows > n || (logit_rows && !logits) ||
-      d->pos + n > d->context || d->spec_n)
+  if (!d || !tokens || n == 0 || n > ds41_decoder_batch_capacity(d) ||
+      logit_rows > n || (logit_rows && !logits) || d->pos + n > d->context ||
+      d->spec_n)
     return 1;
+  sync_views(d);
   d->resident_logits = 0;
   d->pass_missed = false;
   const uint32_t pos0 = d->pos;
@@ -2158,9 +2508,9 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
   std::future<bool> pending = std::move(ahead.read);
   const std::vector<int64_t> pending_rows = std::move(ahead.rows);
   ahead.owner = nullptr;
-  float* engram_src[DS41_N_ENGRAM_LAYER];
+  HostRows engram_src[DS41_N_ENGRAM_LAYER];
   for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER; slot++)
-    engram_src[slot] = set ? sh.engram_ahead[slot] : sh.views.engram_pinned[slot];
+    engram_src[slot] = engram_host_rows(sh, set, slot);
 
   /* Otherwise every Engram layer's rows are read while the GPU runs the
    * layers before it, one layer after the other in layer order: the first
@@ -2179,7 +2529,8 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
   });
   /* The next prompt batch's rows are read into the other buffer set once
    * this batch's are in, so its first Engram layer does not wait for them. */
-  if (!d->lookahead.empty() && d->images.empty() && d->lookahead.size() <= d->capacity) {
+  if (!d->lookahead.empty() && d->images.empty() &&
+      d->lookahead.size() <= ds41_decoder_batch_capacity(d)) {
     const uint32_t m = (uint32_t)d->lookahead.size();
     std::vector<int64_t> hist = d->engram_history;
     ahead.rows.assign((uint64_t)DS41_N_ENGRAM_LAYER * m * DS41_ENGRAM_COLS, 0);
@@ -2195,9 +2546,9 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
     engram_tail(d->engram_history, ahead.history, ahead.tail);
     ahead.tokens = d->lookahead;
     ahead.set = set ^ 1;
-    std::array<float*, DS41_N_ENGRAM_LAYER> targets;
+    std::array<HostRows, DS41_N_ENGRAM_LAYER> targets;
     for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER; slot++)
-      targets[slot] = ahead.set ? sh.engram_ahead[slot] : sh.views.engram_pinned[slot];
+      targets[slot] = engram_host_rows(sh, ahead.set, slot);
     ahead.read = std::async(std::launch::async, [after = engram_reads[DS41_N_ENGRAM_LAYER - 1], engine = d->engine,
                                                  rows = ahead.rows.data(), m, targets] {
       after.wait();
@@ -2239,9 +2590,10 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
       ok = hipMemcpyAsync(d->xn + (uint64_t)(first - pos0) * kDim, image.data + (uint64_t)(first - image.pos) * kDim,
                           (uint64_t)(end - first) * kDim * sizeof(float), hipMemcpyDeviceToDevice, 0) == hipSuccess;
   }
+  /* A kernel, not hipMemcpy2DAsync: a wide batch's rows span two mappings
+   * (ds41_decoder_map_wide), which a 2D copy refuses. */
   for (uint32_t c = 0; c < kHc && ok; c++)
-    ok = hipMemcpy2DAsync(d->h + c * kDim, hd * sizeof(float), d->xn, kDim * sizeof(float), kDim * sizeof(float), n,
-                          hipMemcpyDeviceToDevice, 0) == hipSuccess;
+    ok = ds41_v41_copy_rows(d->h + c * kDim, hd, d->xn, kDim, n, kDim) == 0;
   ok = ok && hipMemcpyAsync(d->pre[0], one_hot, (uint64_t)n * kHc * sizeof(float), hipMemcpyHostToDevice, 0) ==
                  hipSuccess;
   d->pass_end = kept ? DS41_N_LAYER : DS41_FIRST_DECODER_LAYER;
@@ -2381,7 +2733,9 @@ int ds41_decoder_eval_joint(ds41_decoder* const* ds, const int* const* tokens, c
       if (is_image(d, tokens[i][t])) return 2;
     total += ns[i];
   }
-  if (total > DS41_DECODER_MAX_JOINT || total > lead->capacity) return 2;
+  if (total > DS41_DECODER_MAX_JOINT)
+    return 2;
+  sync_views(lead);
   const ds41_weights* w = lead->engine->weights;
   const uint64_t hd = (uint64_t)kHc * kDim;
 
@@ -2406,9 +2760,10 @@ int ds41_decoder_eval_joint(ds41_decoder* const* ds, const int* const* tokens, c
   for (uint32_t il = 0; il < DS41_N_LAYER; il++) {
     const int slot = ds41_layer_engram_slot(il);
     if (slot >= 0)
-      engram_reads[slot] = std::async(std::launch::async, engram_read, lead->engine,
-                                      &engram_rows[(uint64_t)slot * total * DS41_ENGRAM_COLS], total,
-                                      lead->engram_pinned[slot]);
+      engram_reads[slot] =
+          std::async(std::launch::async, engram_read, lead->engine,
+                     &engram_rows[(uint64_t)slot * total * DS41_ENGRAM_COLS],
+                     total, HostRows{lead->engram_pinned[slot]});
   }
 
   /* Embedding, replicated over the hc residual streams; layer 0 pre-mix is one-hot. */
@@ -2449,7 +2804,9 @@ int ds41_decoder_eval_joint(ds41_decoder* const* ds, const int* const* tokens, c
   bool mixed = false;  // the previous block made this layer's attention mixes
   for (uint32_t il = 0; il < DS41_N_LAYER && ok; il++) {
     const int slot = ds41_layer_engram_slot(il);
-    if (slot >= 0) ok = engram_reads[slot].get() && engram(lead, il, lead->engram_pinned[slot], total);
+    if (slot >= 0)
+      ok = engram_reads[slot].get() &&
+           engram(lead, il, HostRows{lead->engram_pinned[slot]}, total);
     for (uint32_t i = 0; i < count && ok; i++) {
       ds41_decoder* d = ds[i];
       const uint32_t feature_rows = std::min(ns[i], DS41_DSPARK_FEATURE_ROWS);

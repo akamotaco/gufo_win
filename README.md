@@ -138,7 +138,6 @@ Add `--mmproj mmproj-DeepSeek-V4.1-Flash-1017-BF16.gguf` for image input.
 | `--stream-experts` | Keep dense weights resident and stream routed experts from the SSD |
 | `--expert-cache-bytes N` | Cap the expert cache; see [Leaving memory for other work](#leaving-memory-for-other-work) |
 | `--dspark-model PATH` | DSpark drafter for `--speculative dspark` |
-| `--prefill-batch N` | Most prompt tokens per prefill batch, 16 to 4096 (default: 2048) |
 | `--exact-prefill` | Run the decoder layers over every prompt token, at about half the prefill speed |
 
 Useful Gufo options: `--context N` per session (default: the native 1M tokens),

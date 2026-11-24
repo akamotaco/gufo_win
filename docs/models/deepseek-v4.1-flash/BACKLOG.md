@@ -309,15 +309,6 @@ against an uncached prompt.
   ~8.6 GiB; the cache is fitted only after they exist (E93). `-c 4096`
   starts reliably.
 
-### 42. 4,096-token prefill batches for streamed builds
-
-`--prefill-batch 4096` keeps its prompt cache (E113) and gives the logits
-of 2,048 (E114), and is 5-7% faster on fresh 14-24K-token prompts, but as
-the streamed default it slowed a 2.3K prompt by 3% and decode by 0.2-2.1%
-through 1.2-1.7 GiB less expert cache (E115): an option. It becomes a
-default candidate again if the batch scratch stops costing cache, e.g.
-allocated for the first long prompt and returned after it.
-
 ### 43. Dense FP16 kernel after the operand swap
 
 Since E114 `attn_q_b`, `attn_output_b`, `attn_output_a` and the shared
@@ -450,6 +441,7 @@ in EXPERIMENTS.md.
 
 | Item | Result | Ref |
 | --- | --- | --- |
+| 4,096-token prefill batches for streamed builds (item 42) | Wide passes on demand: the rows past 2,048 are mapped after the expert cache releases room and returned at the prompt's end; fresh 17.7K/21K prompts −5.1%/−4.8%, the expert cache and everything else at parity; `--prefill-batch` removed | E134 |
 | Streamed expert-pruned builds (item 41) | Coder streams with the kept experts' ranking; scores byte-identical to resident; default cache at resident speed, 30 GiB cache tg128 14.5 → 21.8 tok/s as it warms | E96 |
 | Higher-precision Engram tables (item 14) | MXFP8 reads cost the same as IQ4_NL (one random read per row); host dequantization 9× faster, bit-identical; served gaps follow the text; Q5_K/Q6_K tables untested | E107 |
 | LoRA adapters (item 26): `--adapter` on `attn_output_b`, `ffn_down_shexp`, `ffn_down_exps` | Bit-identical without one; L22 LoRA 3K KL 0.012, heretic 0.018; decode −1.6 to −3.2% | E98 |

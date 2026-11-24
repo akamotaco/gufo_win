@@ -324,8 +324,9 @@ of served requests shows no other host idle time.
 Prefill runs the decoder layers (20–39) over each prompt's last 140 tokens
 only (decoder SWA bounded replay, [QUALITY.md](QUALITY.md));
 `--exact-prefill` runs every decoder row at about half the prefill speed.
-`--prefill-batch 4096` gains 2–3% natively but leaves the prompt cache no
-memory in the default resident setup (E16), so 2048 stays the default.
+4,096-token batches gain 2–3% natively but leave the prompt cache no
+memory in the default resident setup (E16), so 2048 stays the batch; a
+streamed build runs long prompts in 4,096-token passes on demand (E134).
 
 ## Vision encoder
 

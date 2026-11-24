@@ -12,6 +12,13 @@ Notable user-facing changes are recorded here. Versions follow `version` in
   on the host; outputs are unchanged. On a coding-agent replay decode is
   1.2% faster, 1.9% in the replies that call tools
   ([E131](docs/models/deepseek-v4.1-flash/EXPERIMENTS.md#e131--masked-device-draws-under-a-grammar-retained)).
+* **prefill:** a streamed build runs prompts with at least 8,192 uncached
+  tokens in 4,096-token passes: the expert cache gives up the memory for the
+  extra rows while the prompt runs and gets it back afterwards. Fresh
+  17.7K- and 21K-token prompts prefill 5.1% and 4.8% faster; shorter prompts,
+  decode and the expert cache size are unchanged. `--prefill-batch` is
+  removed: commands that pass it fail with an unknown option
+  ([E134](docs/models/deepseek-v4.1-flash/EXPERIMENTS.md#e134--wide-prefill-passes-on-demand-retained)).
 
 ## 0.5.0 (2026-11-24)
 

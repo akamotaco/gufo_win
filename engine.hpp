@@ -108,13 +108,15 @@ public:
   [[nodiscard]] std::uint32_t MaxContext() const noexcept;
   [[nodiscard]] bool HasDspark() const;
   [[nodiscard]] bool ExactPrefill() const;
-  /// Most prompt tokens one prefill batch evaluates (`--prefill-batch`).
+  /// Most prompt tokens one prefill batch evaluates beside other work.
   [[nodiscard]] std::uint32_t PrefillBatch() const noexcept;
   /// Routed experts stream from the SSD through a bounded cache.
   [[nodiscard]] bool StreamsExperts() const noexcept;
   /// The streamed expert store serving sizes once the sessions exist; null
   /// for a resident model.
   [[nodiscard]] gufo::expert_stream::Store* ExpertStore() const noexcept;
+  /// Unmaps the wide prefill rows of every session (Session::MapWideScratch).
+  void ReleaseWideScratch() const;
   /// Without serving (`gufo prompt`, `gufo bench`): sizes and fills the
   /// streamed expert cache from the memory available now, leaving headroom
   /// for the sessions; call right after Load. Serving sizes it through
@@ -218,6 +220,13 @@ public:
   [[nodiscard]] int Position() const;
   [[nodiscard]] int ContextSize() const;
   [[nodiscard]] std::uint32_t PrefillCapacity() const;
+  /// Wide prefill rows (ds41_decoder_map_wide): the bytes a map takes (0:
+  /// none), whether a prompt with `remaining` uncached tokens runs wider
+  /// passes once they are mapped, and mapping and releasing them.
+  [[nodiscard]] std::uint64_t WideScratchBytes() const;
+  [[nodiscard]] bool WantsWidePrefill(std::uint64_t remaining) const;
+  [[nodiscard]] bool MapWideScratch();
+  void ReleaseWideScratch();
   [[nodiscard]] std::uint64_t PayloadBytes() const;
 
 private:

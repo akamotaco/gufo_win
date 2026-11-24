@@ -7,7 +7,9 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <gufo/ext/component_cache_resources.hpp>
+#include <gufo/ext/experimental/expert_stream.hpp>
 #include <gufo/ext/gguf_identity.hpp>
 #include <gufo/ext/host.hpp>
 #include <gufo/ext/host_budget.hpp>
@@ -16,6 +18,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <sstream>
@@ -55,6 +58,10 @@ constexpr std::size_t kDiskRamFloorBytes = std::size_t{1} << 30;
 // 2 and 4 sessions), transient prefill peaks (~0.3-0.6 GiB) and margin
 // against swap.
 constexpr std::size_t kExpertHeadroomBytes = std::size_t{2} << 30;
+// Free memory a wide prefill keeps beside its rows and the expert store's
+// floor: the routed kernels' per-pass temporaries, which double with the
+// batch, and the dense kernels' scratch growing to the wide batch.
+constexpr std::uint64_t kWidePrefillMarginBytes = std::uint64_t{512} << 20;
 // Prompt-cache transfer streams besides each session's own: one capture or
 // restore batch leases at most this many. Gufo's default of 64 holds about
 // 0.4 GiB more GPU memory, which streamed builds lose from the expert cache.
@@ -134,18 +141,123 @@ std::vector<std::uint8_t> ProcessIdentity(const void* model,
   return {canonical.begin(), canonical.end()};
 }
 
+// The wide prefill rows of one long prompt (E134). One session holds them at
+// a time; they are released when its prompt ends, fails or its request ends,
+// and at idle. A session whose acquire failed does not retry, and so does not
+// release more of the expert cache, until its prompt ends.
+class WidePrefill {
+public:
+  explicit WidePrefill(std::shared_ptr<Model> model)
+      : model_(std::move(model)) {}
+
+  // Makes room for the wide rows in the expert cache and maps them. Without
+  // room or a mapping the prompt keeps the default batch.
+  void Acquire(Session& session, std::size_t remaining) {
+    const std::lock_guard lock(mutex_);
+    auto* store = model_->ExpertStore();
+    const std::uint64_t bytes = session.WideScratchBytes();
+    if (owner_ || refused_ == &session || !store || !bytes)
+      return;
+    const auto start = std::chrono::steady_clock::now();
+    const std::uint64_t need =
+        bytes + store->FloorBytes() + kWidePrefillMarginBytes;
+    const std::uint64_t available = ext::HostAvailableBytes();
+    const std::uint64_t released =
+        available < need ? store->Release(need - available) : 0;
+    const bool held = available < need;
+    const auto mapping = std::chrono::steady_clock::now();
+    const std::uint64_t after = ext::HostAvailableBytes();
+    const bool mapped = after >= need && session.MapWideScratch();
+    const auto end = std::chrono::steady_clock::now();
+    const auto ms = [](auto from, auto to) {
+      return std::to_string(
+          std::chrono::duration<double, std::milli>(to - from).count());
+    };
+    if (!mapped && held)
+      (void)store->Restore();
+    owner_ = mapped ? &session : nullptr;
+    refused_ = mapped ? nullptr : &session;
+    store_held_ = mapped && held;
+    server::Logger::Info(
+        "prefill",
+        std::string("event=wide_prefill_acquire mapped=") +
+            (mapped ? "1" : "0") + " remaining_tokens=" +
+            std::to_string(remaining) + " wide_bytes=" + std::to_string(bytes) +
+            " released_bytes=" + std::to_string(released) + " release_ms=" +
+            ms(start, mapping) + " map_ms=" + ms(mapping, end) +
+            " available_before_bytes=" + std::to_string(available) +
+            " available_after_release_bytes=" + std::to_string(after));
+  }
+
+  // Ends `session`'s prompt: releases the rows if it holds them.
+  void End(const Session& session) noexcept {
+    const std::lock_guard lock(mutex_);
+    if (refused_ == &session)
+      refused_ = nullptr;
+    if (owner_ == &session)
+      ReleaseLocked();
+  }
+
+  // Releases the rows whoever holds them.
+  void Idle() noexcept {
+    const std::lock_guard lock(mutex_);
+    refused_ = nullptr;
+    if (owner_)
+      ReleaseLocked();
+  }
+
+private:
+  // Unmaps the wide rows and lets the expert cache grow back.
+  // Runs on request teardown, so it never throws.
+  void ReleaseLocked() noexcept {
+    const bool store_held = store_held_;
+    owner_ = nullptr;
+    store_held_ = false;
+    try {
+      const auto start = std::chrono::steady_clock::now();
+      model_->ReleaseWideScratch();
+      const auto unmapped = std::chrono::steady_clock::now();
+      std::uint64_t raised = 0;
+      if (auto* store = model_->ExpertStore(); store && store_held)
+        raised = store->Restore();
+      server::Logger::Info(
+          "prefill",
+          "event=wide_prefill_release unmap_ms=" +
+              std::to_string(
+                  std::chrono::duration<double, std::milli>(unmapped - start)
+                      .count()) +
+              " restored_bytes=" + std::to_string(raised));
+    } catch (...) {
+    }
+  }
+
+  std::shared_ptr<Model> model_;
+  std::mutex mutex_;
+  const Session* owner_{};
+  const Session* refused_{};
+  bool store_held_{false};
+};
+
 class DeepSeekTextRunnerState final : public TextRunnerState {
 public:
   DeepSeekTextRunnerState(Session& session, cache::Adapter& adapter,
-                          cache::Slot& slot)
-      : session_(&session), adapter_(&adapter), slot_(&slot) {}
+                          cache::Slot& slot, std::shared_ptr<WidePrefill> wide)
+      : session_(&session),
+        adapter_(&adapter),
+        slot_(&slot),
+        wide_(std::move(wide)) {}
 
+  // Gufo clears the check when the request ends (commit, cancel or
+  // invalidation), also one cancelled between prefill passes.
   void SetCancellationCheck(const CancellationCheck& is_cancelled) override {
     session_->SetCancellationCheck(is_cancelled);
+    if (!is_cancelled)
+      wide_->End(*session_);
   }
 
   void Invalidate() noexcept override {
     session_->SetCancellationCheck({});
+    wide_->End(*session_);
     (void)adapter_->Invalidate(*slot_);
     position_ = 0;
   }
@@ -188,6 +300,7 @@ private:
   Session* session_{};
   cache::Adapter* adapter_{};
   cache::Slot* slot_{};
+  std::shared_ptr<WidePrefill> wide_;
   std::size_t position_{0};
   std::shared_ptr<const vision::Prompt> images_;
   std::map<std::size_t, std::shared_ptr<const vision::Encoder::Embedding>>
@@ -251,6 +364,7 @@ public:
                      std::shared_ptr<vision::Encoder> vision,
                      std::size_t ram_share_bytes, std::size_t sessions)
       : model_(std::move(model)),
+        wide_(std::make_shared<WidePrefill>(model_)),
         vision_(std::move(vision)),
         max_context_(max_context),
         use_dspark_(use_dspark),
@@ -295,7 +409,7 @@ public:
       cache::Adapter& adapter, cache::Slot& slot) const override {
     auto& deepseek = dynamic_cast<ContinuationAdapter&>(adapter);
     return std::make_unique<DeepSeekTextRunnerState>(deepseek.GetSession(slot),
-                                                     adapter, slot);
+                                                     adapter, slot, wide_);
   }
   void ReconcileComponentState(TextRunnerState& state,
                                std::size_t position) const override {
@@ -512,6 +626,25 @@ public:
       deepseek.session().BeginRequest();
     }
 
+    // A long prompt that runs alone takes wider passes: the expert cache
+    // gives back the memory of their rows for the prompt (WidePrefill).
+    // `prompt` ends at the next capture; the whole prompt ends here.
+    const std::size_t whole_end =
+        std::max(prompt.size(), state.prefill_prompt_end());
+    if (max_input_tokens > model_->PrefillBatch() &&
+        deepseek.session().WantsWidePrefill(whole_end - offset)) {
+      wide_->Acquire(deepseek.session(), whole_end - offset);
+    }
+    // A prompt that fails ends here, as one that reaches its end.
+    struct EndOnThrow {
+      WidePrefill& wide;
+      const Session& session;
+      int exceptions = std::uncaught_exceptions();
+      ~EndOnThrow() {
+        if (std::uncaught_exceptions() > exceptions)
+          wide.End(session);
+      }
+    } end_on_throw{*wide_, deepseek.session()};
     const std::size_t consumed =
         std::min<std::size_t>({max_input_tokens, prompt.size() - offset,
                                deepseek.session().PrefillCapacity()});
@@ -539,13 +672,14 @@ public:
     // The decoder layers run over the whole prompt's last tokens only, also
     // when this step ends at a cache boundary: a capture there continues only
     // prompts whose replay starts within the rows it holds (CanContinue).
-    const std::size_t prompt_end =
-        std::max(prompt.size(), state.prefill_prompt_end());
-    if (!deepseek.session().Sync(prefix, &error, prompt_end, spans)) {
+    if (!deepseek.session().Sync(prefix, &error, whole_end, spans)) {
       deepseek.set_position(0);
       throw std::runtime_error("DeepSeek prefill failed: " + error);
     }
     deepseek.set_position(next_position);
+    if (next_position >= whole_end) {
+      wide_->End(deepseek.session());
+    }
     return {
         .consumed_tokens = consumed,
         .decode_ready = next_position == prompt.size(),
@@ -829,6 +963,8 @@ public:
     return RequireDeepSeekState(state).position();
   }
 
+  void Idle() const override { wide_->Idle(); }
+
 private:
   struct DeepSeekChatInput {
     std::vector<ChatMessage> messages;
@@ -973,6 +1109,7 @@ private:
   }
 
   std::shared_ptr<Model> model_;
+  std::shared_ptr<WidePrefill> wide_;
   std::shared_ptr<vision::Encoder> vision_;
   std::uint32_t max_context_;
   bool use_dspark_;

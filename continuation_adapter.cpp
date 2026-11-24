@@ -367,7 +367,9 @@ std::vector<Rows> ContinuationAdapter::PlanPrefill(const cache::Slot& slot,
   const auto& state = As(slot);
   if (!state.IsValid() || first > end || end > context_)
     throw std::invalid_argument("invalid DeepSeek V4.1 prefill plan");
-  // Session::Sync evaluates in decoder batches from the frontier.
+  // Session::Sync evaluates in decoder batches from the frontier. A long
+  // prompt may run in wide ones, which the runner decides only when it runs;
+  // their ends are every second default boundary, so this plan holds both.
   const Rows batch = std::max<Rows>(
       ds41_decoder_batch_capacity(ds41_session_decoder(state.Native())), 1);
   std::vector<Rows> result;

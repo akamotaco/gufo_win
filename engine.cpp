@@ -334,6 +334,10 @@ bool Model::StreamsExperts() const noexcept {
   return options_.stream_experts;
 }
 
+void Model::ReleaseWideScratch() const {
+  ds41_engine_release_wide(engine_);
+}
+
 gufo::expert_stream::Store* Model::ExpertStore() const noexcept {
   return options_.stream_experts ? ds41_engine_expert_store(engine_) : nullptr;
 }
@@ -567,6 +571,24 @@ int Session::ContextSize() const {
 
 std::uint32_t Session::PrefillCapacity() const {
   return ds41_session_prefill_capacity(session_);
+}
+
+std::uint64_t Session::WideScratchBytes() const {
+  return ds41_decoder_wide_bytes(ds41_session_decoder(session_));
+}
+
+bool Session::WantsWidePrefill(std::uint64_t remaining) const {
+  const auto* decoder = ds41_session_decoder(session_);
+  return ds41_decoder_prefill_width(decoder, remaining) >
+         ds41_decoder_batch_capacity(decoder);
+}
+
+bool Session::MapWideScratch() {
+  return ds41_decoder_map_wide(ds41_session_decoder(session_)) == 0;
+}
+
+void Session::ReleaseWideScratch() {
+  ds41_decoder_release_wide(ds41_session_decoder(session_));
 }
 
 std::uint64_t Session::PayloadBytes() const {

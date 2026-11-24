@@ -226,7 +226,7 @@ not change with tile width, and cross-expert groups would raise decode work
 |---|---|---|
 | 32-slot tiles | No gain; code generation trap with an ownership early return | E8 |
 | 128-slot tiles | 19% fewer weight decodes, no faster | E35 |
-| 4,096-token batches | +2-3% natively, memory cost; kept as an option | E16 |
+| 4,096-token batches | +2-3% natively, memory cost (E16); on a streamed build, wide passes for long prompts only: fresh 17.7K/21K prompts −5.1%/−4.8% | E16, E134 |
 | Staging, LDS lookups, conflict-free codebook | Retained (IQ2_XXS 24.5 → 20.4 ms in bench) | E25 |
 | Rolled weight loop (I-cache) | Retained | `EXPERIMENTS.md` table |
 | Nontemporal weight loads | Worse (refetches) | `EXPERIMENTS.md` table |

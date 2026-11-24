@@ -46,19 +46,6 @@
       "help": "DSpark drafter GGUF for --speculative dspark"
     },
     {
-      "name": "--prefill-batch",
-      "type": "integer",
-      "commands": [
-        "serve",
-        "bench",
-        "prompt"
-      ],
-      "providers": [
-        "deepseek41"
-      ],
-      "help": "Most prompt tokens per prefill batch, 16 to 4096 (default: 2048)"
-    },
-    {
       "name": "--exact-prefill",
       "type": "boolean",
       "commands": [
