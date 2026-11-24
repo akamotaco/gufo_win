@@ -31,6 +31,13 @@ Needs extension API 0.3.43 (Gufo's experimental expert store, gufo-org/gufo#1318
   about a second instead of up to a minute
   ([E127](docs/models/deepseek-v4.1-flash/EXPERIMENTS.md#e127--the-expert-store-as-proposed-to-gufo-retained)).
 
+### Fixes
+
+* **security:** the GGUF loader rejects a tensor or metadata count that
+  cannot fit in the file before it sizes a table. Before, a crafted model file
+  could overflow the tensor table's size and write past it on the heap, which
+  can lead to code execution. Reported by eversinc33.
+
 ## 0.4.0 (2026-11-23)
 
 Built on upstream Gufo `e7e38411`; needs extension API 0.3.3 or later.

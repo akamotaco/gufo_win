@@ -201,6 +201,17 @@ static bool cursor_has(ds41_cursor* c, uint64_t n) {
   return true;
 }
 
+/* Rejects a count of `n` records, each at least `min_bytes` long, that
+ * cannot fit in the bytes left, before the count sizes a table. */
+static bool cursor_has_records(ds41_cursor* c, uint64_t n,
+                               uint64_t min_bytes) {
+  if (n > (c->size - c->pos) / min_bytes) {
+    cursor_error(c, "GGUF record count exceeds the file");
+    return false;
+  }
+  return true;
+}
+
 static bool cursor_read(ds41_cursor* c, void* dst, uint64_t n) {
   if (!cursor_has(c, n))
     return false;
@@ -563,6 +574,9 @@ static void model_close(ds41_model* m) {
  * first shard's keys are kept, the others carry split bookkeeping. */
 static void parse_metadata(ds41_model* m, ds41_cursor* c, uint64_t n_kv,
                            bool keep) {
+  /* A key/value pair takes a key length, a value type and one value byte. */
+  if (!cursor_has_records(c, n_kv, 8 + 4 + 1))
+    ds41_die(c->error);
   if (keep) {
     m->kv = static_cast<ds41_kv*>(
         calloc(static_cast<size_t>(n_kv), sizeof(m->kv[0])));
@@ -602,15 +616,21 @@ static void parse_metadata(ds41_model* m, ds41_cursor* c, uint64_t n_kv,
 static void parse_tensors(ds41_model* m, ds41_cursor* c, uint32_t shard,
                           uint64_t n_tensors) {
   const uint64_t first = m->n_tensors;
+  /* An entry takes a name length, a rank, one dimension, a type and an
+   * offset. The bound keeps the table size below the mapping's. */
+  if (!cursor_has_records(c, n_tensors, 8 + 4 + 8 + 4 + 8))
+    ds41_die(c->error);
+  const uint64_t total = first + n_tensors;
+  if (total < first || total > SIZE_MAX / sizeof(m->tensors[0]))
+    ds41_die("GGUF tensor count overflow");
   ds41_tensor* grown = static_cast<ds41_tensor*>(
-      realloc(m->tensors,
-              static_cast<size_t>(first + n_tensors) * sizeof(m->tensors[0])));
+      realloc(m->tensors, static_cast<size_t>(total) * sizeof(m->tensors[0])));
   if (!grown)
     ds41_die("out of memory while allocating tensor table");
   m->tensors = grown;
   memset(m->tensors + first, 0,
          static_cast<size_t>(n_tensors) * sizeof(m->tensors[0]));
-  m->n_tensors = first + n_tensors;
+  m->n_tensors = total;
 
   for (uint64_t i = first; i < m->n_tensors; i++) {
     ds41_tensor* t = &m->tensors[i];
@@ -752,6 +772,20 @@ static void model_open(ds41_model* m, const std::vector<std::string>& paths) {
     parse_metadata(m, &c, n_kv, i == 0);
     parse_tensors(m, &c, i, n_tensors);
   }
+}
+
+void ds41_model_open(ds41_model* m, const char* path) {
+  const std::vector<std::string> paths = model_shard_paths(path);
+  try {
+    model_open(m, paths);
+  } catch (...) {
+    model_close(m);
+    throw;
+  }
+}
+
+void ds41_model_close(ds41_model* m) {
+  model_close(m);
 }
 
 static ds41_tensor* model_find_tensor(const ds41_model* m, const char* name) {

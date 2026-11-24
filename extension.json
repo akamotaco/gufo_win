@@ -168,6 +168,12 @@
       ],
       "role": "test"
     },
+    "deepseek41flash_gguf_loader_test": {
+      "requires": [
+        "testing"
+      ],
+      "role": "test"
+    },
     "deepseek41flash_checkpoint_size_test": {
       "requires": [
         "testing"

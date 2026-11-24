@@ -54,6 +54,12 @@ struct ds41_engine {
   uint32_t lora_max_rank;
 };
 
+/* Maps the GGUF at `path` (the first shard of a split build) and parses its
+ * metadata and tensor directory; throws std::runtime_error when the file is
+ * invalid, leaving `model` closed. */
+void ds41_model_open(ds41_model* model, const char* path);
+void ds41_model_close(ds41_model* model);
+
 bool ds41_model_string_array_begin(const ds41_model* model, const char* key,
                                    ds41_string_iterator* iterator);
 bool ds41_model_string_array_next(ds41_string_iterator* iterator,
