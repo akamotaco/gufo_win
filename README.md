@@ -176,12 +176,14 @@ Same power setting as before (Balance, 120 W):
   Prefill 2,996 / 3,187 / 2,620 / 1,312 tok/s (2.1K / 8.5K / 31.8K / 160K), decode 50-53
   (37.8 at 160K).
 - Orca Q4Mix and AtomicChat Q5_K_M: same draft acceptance as November 22-23 (identical outputs);
-  tool calls, images and copy test at 411 and 75,620 tokens pass. Prefill is 3-6% lower
-  (Q4Mix 1,552-1,574 / 1,549-1,600 / 1,597-1,618 / 1,530-1,547; AtomicChat 1,571 / 1,596 /
-  1,573 / 1,486 tok/s) and decode 2-3% lower. `gufo bench --speculative none` on AtomicChat
-  shows the same in the kernels: pp512/2K/8K/32K 1,154 / 1,667 / 1,758 / 1,685 tok/s
-  (November 23: 1,239 / 1,763 / 1,840 / 1,784), tg256 29.0 (29.5). Q4Mix, which takes no
-  AtomicChat path, slowed as much, so the cause is likely upstream; it was not bisected.
+  tool calls, images and copy test at 411 and 75,620 tokens pass.
+- Speed: measured after the tests above, the server and `gufo bench` showed 3-7% lower
+  Flash-Next prefill than November 22-23. Interleaved runs with a 60 s idle before each found
+  no such regression: on Orca Q4Mix (`--speculative none`, two rounds) upstream before and
+  after the merge gives pp2048 1,754 / 1,755, pp8192 1,738-1,831 / 1,803-1,811 and tg128
+  29.1-29.4 / 29.1-29.2 tok/s, and this branch before and after the merge 1,759 / 1,726-1,733,
+  1,806-1,829 / 1,789-1,820 and 29.1-29.4 / 29.2-29.4. The earlier gap came from heat and run
+  order: one build measured 1,621 to 1,754 tok/s at pp2048 depending on what ran before it.
 
 | Model | Sessions x context | Prompt | Prefill (tok/s) | Decode, MTP (tok/s) |
 | --- | --- | --- | ---: | ---: |
