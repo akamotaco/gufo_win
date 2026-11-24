@@ -279,8 +279,12 @@ add_subdirectory(src/mem)
 if (ENGINE_ENABLE_HIP)
   add_library(gufo_mem_hip STATIC src/core/hip/state_page_pool.cpp
     src/core/hip/state_lendable_range.cpp src/core/hip/state_region.cpp
-    src/core/hip/state_shared_page.cpp src/core/hip/scratch_arena.cpp)
+    src/core/hip/state_shared_page.cpp src/core/hip/scratch_arena.cpp
+    src/core/hip/session_state.cpp)
   target_link_libraries(gufo_mem_hip PUBLIC gufo_mem hip::host Threads::Threads)
+  # SessionState places fixed buffers like other session state
+  # (src/core/hip/managed_alloc.hpp, HIP builds only).
+  target_compile_definitions(gufo_mem_hip PRIVATE ENGINE_ENABLE_HIP=1)
   if (BUILD_TESTING)
     target_compile_options(gufo_mem_hip PRIVATE -UNDEBUG)
   endif()
@@ -331,6 +335,15 @@ if (ENGINE_ENABLE_HIP)
     add_executable(cache_streaming_bench tests/cache/streaming_bench.cpp)
     target_link_libraries(cache_streaming_bench PRIVATE gufo_cache_hip)
   endif()
+  # Experimental: streams mixture-of-experts weights from files into a bounded
+  # device cache for extensions (include/gufo/ext/experimental/expert_stream.hpp).
+  add_library(gufo_expert_stream_hip STATIC
+    src/core/hip/expert_stream/store.cpp)
+  target_compile_definitions(gufo_expert_stream_hip PRIVATE _GNU_SOURCE
+    ENGINE_ENABLE_HIP=1)
+  target_link_libraries(gufo_expert_stream_hip PUBLIC gufo_hip_host
+    gufo_platform gufo_logging hip::host Threads::Threads
+    PRIVATE gufo_ext_runtime)
 endif()
 
 # json::parse (src/core/json.hpp), which builds its values from the events of
@@ -453,7 +466,7 @@ if (ENGINE_ENABLE_HIP)
     ${ROCPRIM_INCLUDE_DIR})
   # `hip_utils.hpp` in the public surface includes hipBLAS.
   target_link_libraries(gufo_ext_hip INTERFACE $<LINK_ONLY:gufo_hip_host>
-    hip::host roc::hipblas)
+    $<LINK_ONLY:gufo_expert_stream_hip> hip::host roc::hipblas)
 else()
   target_link_libraries(gufo_ext_cache INTERFACE $<LINK_ONLY:gufo_cache>)
 endif()
@@ -504,7 +517,8 @@ if (BUILD_TESTING)
   endif()
 endif()
 if (ENGINE_ENABLE_HIP)
-  target_link_libraries(gufo_serving PUBLIC gufo_cache_hip hip::host)
+  target_link_libraries(gufo_serving PUBLIC gufo_cache_hip
+    gufo_expert_stream_hip hip::host)
 endif()
 
 add_library(gufo_http STATIC
@@ -558,15 +572,18 @@ gufo_target_extensions(gufo LOAD_MODULES EXTENSIONS ${gufo_selected_extensions})
 set(GUFO_EXTENSION_MODULE_HOST gufo)
 gufo_extension_modules(EXTENSIONS ${GUFO_EXTENSION_MODULES})
 gufo_extension_build_id(gufo_extension_build_id)
+gufo_extension_host_identities(gufo_extension_host_extensions)
 include(cmake/GufoExtensionSdk.cmake)
 gufo_extension_sdk(gufo)
 target_sources(gufo PRIVATE src/cli/extension/modules.cpp
   src/cli/extension/store.cpp src/cli/extension/extension.cpp
   src/cli/extension/registry.cpp src/cli/model/catalog.cpp
-  src/cli/model/download.cpp src/cli/model/model.cpp src/cli/model/store.cpp)
+  src/cli/model/download.cpp src/cli/model/model.cpp src/cli/model/source.cpp
+  src/cli/model/store.cpp)
 set_property(SOURCE src/cli/extension/modules.cpp
   src/cli/extension/store.cpp APPEND PROPERTY
   COMPILE_DEFINITIONS GUFO_EXTENSION_BUILD_ID="${gufo_extension_build_id}"
+  GUFO_EXTENSION_HOST_EXTENSIONS="${gufo_extension_host_extensions}"
   GUFO_EXECUTABLE_FILE_NAME="$<TARGET_FILE_NAME:gufo>")
 include(cmake/GufoExtensionHost.cmake)
 gufo_extension_host(gufo)
@@ -706,6 +723,40 @@ if (BUILD_TESTING)
       endif()
     endforeach()
   endif()
+
+# The Loom runner's host sampling and package resolution, against a fake
+# libloom_text_embed: no GPU and no Loom runtime.
+function(gufo_loom_register_tests)
+  if (NOT TARGET gufo_loom)
+    return()
+  endif()
+  set(root ${PROJECT_SOURCE_DIR}/src/models/loom)
+  add_executable(loom_package_test ${root}/tests/package_test.cpp)
+  # The runner's include path, with its generated provider constants.
+  target_include_directories(loom_package_test PRIVATE
+    ${PROJECT_SOURCE_DIR} $<TARGET_PROPERTY:gufo_loom,INCLUDE_DIRECTORIES>)
+  target_link_libraries(loom_package_test PRIVATE
+    gufo_loom gufo_ext_runtime gufo_core gufo_platform)
+  # A private temporary folder: the test counts the directories left in it.
+  set(tmp ${CMAKE_CURRENT_BINARY_DIR}/loom_package_test_tmp)
+  file(MAKE_DIRECTORY ${tmp})
+  add_test(NAME loom_package_test COMMAND loom_package_test)
+  set_tests_properties(loom_package_test PROPERTIES LABELS "cpu;models;loom"
+    ENVIRONMENT "TMPDIR=${tmp};TMP=${tmp};TEMP=${tmp}")
+
+  # The test compiles the runner itself (its types are file-local) and takes
+  # the rest from gufo_loom.
+  add_executable(loom_runner_logits_test ${root}/tests/runner_logits_test.cpp
+    ${root}/tests/fake_embed.cpp)
+  target_include_directories(loom_runner_logits_test PRIVATE
+    ${PROJECT_SOURCE_DIR} $<TARGET_PROPERTY:gufo_loom,INCLUDE_DIRECTORIES>)
+  target_compile_definitions(loom_runner_logits_test PRIVATE GUFO_LOOM_LINKED=1)
+  target_link_libraries(loom_runner_logits_test PRIVATE
+    gufo_loom gufo_ext_runtime gufo_core gufo_cache gufo_platform)
+  add_test(NAME loom_runner_logits_test COMMAND loom_runner_logits_test)
+  set_tests_properties(loom_runner_logits_test PROPERTIES
+    LABELS "cpu;models;loom")
+endfunction()
 
 function(gufo_qwen3_asr_register_tests)
   if (NOT TARGET gufo_qwen3_asr)
@@ -847,6 +898,7 @@ endfunction()
   add_subdirectory(tests/families/qwen)
   add_subdirectory(tests/models/qwen)
   add_subdirectory(tests/models/qwen27b)
+  gufo_loom_register_tests()
   gufo_qwen3_asr_register_tests()
   gufo_qwen_image_21_register_tests()
 
@@ -1923,6 +1975,12 @@ endfunction()
     target_link_libraries(hip_weight_upload_test PRIVATE gufo_core)
     add_test(NAME hip_weight_upload_test COMMAND hip_weight_upload_test)
     set_tests_properties(hip_weight_upload_test PROPERTIES LABELS "hip;gpu;gfx1151")
+
+    add_executable(expert_stream_test tests/core/expert_stream_test.cpp)
+    target_link_libraries(expert_stream_test PRIVATE gufo_expert_stream_hip)
+    add_test(NAME expert_stream_test COMMAND expert_stream_test)
+    set_tests_properties(expert_stream_test PROPERTIES
+      LABELS "hip;gpu;gfx1151" SKIP_RETURN_CODE 77)
 
     add_executable(hipblaslt_runtime_cache_test
       tests/kernels/hipblaslt_runtime_cache_test.cpp)

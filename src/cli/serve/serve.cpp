@@ -1787,11 +1787,8 @@ int RunServe(std::span<const char* const> args) {
       std::cerr << "Error: " << exception.what() << '\n';
       return 2;
     }
-    if (speculative_config.backend == server::TextSpeculativeBackend::kDFlash &&
-        dflash_model_path.empty()) {
-      std::cerr << "Error: DFlash2 requires --dflash-model\n";
-      return 2;
-    }
+    // A missing draft model is the runner's to reject: a checkpoint may carry
+    // its own draft.
     speculative_config.draft_model_path =
         speculative_config.backend == server::TextSpeculativeBackend::kDSpark
             ? dspark_model_path
@@ -1805,6 +1802,10 @@ int RunServe(std::span<const char* const> args) {
     std::string err;
     ModelLoadLog load_log("text", model);
     server::TextSpeculativeConfig loaded_speculative = speculative_config;
+    // A provider that declares `serving.hip: false` drives the GPU through its
+    // own runtime, which cannot share the device with HIP in one process: the
+    // server then makes no HIP call at all.
+    bool provider_uses_hip = true;
     backend = std::make_shared<server::InferenceBackend>();
     // The disk snapshot tier is walked during load, which can take minutes.
     // Answer 503 `Loading model` on the port meanwhile, as llama-server does,
@@ -1840,6 +1841,10 @@ int RunServe(std::span<const char* const> args) {
             ext::TextRunnerOptions* options, std::string* error) {
           try {
             options->provider_options = provider_options.Select(provider.id);
+            for (const auto& info : registry.Providers()) {
+              if (info.id == provider.id)
+                provider_uses_hip = info.uses_hip;
+            }
             ApplySpeculativeSettings(
                 ResolveSpeculativeSettings(provider, speculative_backend, {}),
                 &options->speculative);
@@ -1907,14 +1912,16 @@ int RunServe(std::span<const char* const> args) {
     }
     load_log.Complete(
         "model=" + backend->model_id() +
-        " sessions=" + std::to_string(session_count) + " context_tokens=" +
-        std::to_string(backend->max_context()) + " speculative=" + speculation +
-        " draft_limit=" + std::to_string(loaded_speculative.max_draft_tokens) +
-        (loaded_speculative.draft_policy.empty()
-             ? std::string()
-             : " draft_policy=" + loaded_speculative.draft_policy) +
-        " disk_cache=" + (cache_disk_directory.empty() ? "off" : "enabled") +
-        served_names);
+            " sessions=" + std::to_string(session_count) +
+            " context_tokens=" + std::to_string(backend->max_context()) +
+            " speculative=" + speculation + " draft_limit=" +
+            std::to_string(loaded_speculative.max_draft_tokens) +
+            (loaded_speculative.draft_policy.empty()
+                 ? std::string()
+                 : " draft_policy=" + loaded_speculative.draft_policy) +
+            " disk_cache=" +
+            (cache_disk_directory.empty() ? "off" : "enabled") + served_names,
+        provider_uses_hip);
   }
 
   // run() joins every request thread, so no hook call outlives it.

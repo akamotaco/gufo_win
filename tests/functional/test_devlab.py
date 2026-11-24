@@ -103,12 +103,48 @@ class PlanTest(unittest.TestCase):
     def models(self, *paths, **kwargs):
         return {item['id'] for item in self.plan(*paths, **kwargs)['models']}
 
+    def test_loom_runs_its_smoke_check(self):
+        plan = self.plan('src/models/loom/loom_runner.cpp')
+        self.assertEqual({item['id'] for item in plan['models']}, {'loom-qwen3.5-2b'})
+        self.assertEqual([(group['profile'], group['suites']) for group in plan['groups']],
+                         [('loom-qwen3.5-2b/native', ['loom-smoke'])])
+        self.assertEqual(devlab_models.asset_keys(plan, self.registry),
+                         ['loom-qwen35-2b', 'loom-qwen35-2b-gguf'])
+
     def test_shared_llm_covers_every_llm(self):
         for path in ('src/core/sampling.cpp', 'src/cache/cache.cpp',
-                     'src/families/qwen/text/tokenizer.cpp', 'src/families/qwen/vision/encoder.hip',
                      'src/cli/serve/text_model_runner.cpp'):
             with self.subTest(path=path):
                 self.assertEqual(self.models(path), {'flash-next-q4', 'qwen27-q4', 'deepseek4'})
+
+    def test_shared_qwen_covers_its_consumers(self):
+        # DeepSeek has its own tokenizer and template, and no shared-Qwen profile.
+        # Qwen-Image takes the tokenizer and Qwen3-TTS the control tokens.
+        text = {'flash-next-q4', 'qwen27-q4'}
+        tts = {'qwen3-tts-base', 'qwen3-tts-custom', 'qwen3-tts-design', 'qwen3-tts-custom-npu'}
+        for path, expected in [('src/families/qwen/text/chat_template.hpp', text),
+                               ('src/families/qwen/vision/encoder.hip', text),
+                               ('src/families/qwen/text/tokenizer.cpp', text | {'qwen-image-turbo'} | tts),
+                               ('src/families/qwen/control_tokens/control_tokens.hpp',
+                                text | {'qwen-image-turbo'} | tts)]:
+            with self.subTest(path=path):
+                self.assertEqual(self.models(path), expected)
+
+    def test_every_selected_llm_has_correctness_suites(self):
+        # A selected text model without a planned suite reports missing correctness.
+        # Sample both registries' patterns, so a narrow suite rule under a broad
+        # selection rule is planned too.
+        manifest = json.loads((devlab_models.HERE / 'impact.json').read_text())
+        patterns = {pattern for rules in (self.data['rules'], manifest['rules'])
+                    for rule in rules for pattern in rule['paths']}
+        for pattern in sorted(patterns):
+            path = pattern.replace('**', 'x').replace('*', 'x')
+            plan = self.plan(path)
+            planned = {group['profile'].split('/')[0] for group in plan['groups']}
+            for model in plan['models']:
+                if model['category'] == 'llm':
+                    with self.subTest(path=path, model=model['id']):
+                        self.assertIn(model['id'], planned)
 
     def test_private_model_and_mixed_paths_preserve_both(self):
         private = 'src/models/deepseek_v4_flash/model.cpp'
@@ -351,6 +387,11 @@ class ShardTest(unittest.TestCase):
     def parts(shards, model):
         return [part for row in shards for part in row['parts'] if part['model'] == model]
 
+    def test_loom_has_no_timing_arm(self):
+        shards = devlab_plan.shard(self.plan('src/models/loom/loom_runner.cpp'), self.TABLE)
+        parts = self.parts(shards, 'loom-qwen3.5-2b')
+        self.assertEqual([part['timing'] for part in parts], [False])
+
     def test_every_suite_runs_once_within_budget(self):
         plan = self.plan('src/models/qwen38_flash_next/engine.cpp', 'src/models/qwen3_asr/model.cpp',
                          'src/models/embedding_gemma2/model.cpp', tier='pr')
@@ -511,6 +552,25 @@ class ShardTest(unittest.TestCase):
             merged = devlab_merge.merge(plan, root / 'results', root / 'out')
         self.assertEqual(merged['status'], 'passed')
         self.assertEqual(set(merged['shards'].values()), {'passed'})
+
+    def test_an_untimed_model_passes_without_speed_evidence(self):
+        import devlab_merge
+        plan = self.plan('src/models/loom/loom_runner.cpp')
+        plan['shards'] = devlab_plan.shard(plan, self.TABLE)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for row in plan['shards']:
+                self.write_shard(root / 'in', row)
+            merged = devlab_merge.merge(plan, root / 'in', root / 'out')
+            self.assertEqual(merged['status'], 'passed')
+            args = SimpleNamespace(authorize='success', smoke='success', benchmark=False,
+                                   results=root / 'out', run_url='https://run')
+            state, _, comment = report.render_models(args, plan, merged)
+            self.assertEqual(state, 'success')
+            self.assertIn('| not timed |', comment)
+            # Correctness still gates it.
+            merged['models'][0]['correctness'] = 'error'
+            self.assertEqual(report.render_models(args, plan, merged)[0], 'error')
 
 
 class GpuTestsTest(unittest.TestCase):

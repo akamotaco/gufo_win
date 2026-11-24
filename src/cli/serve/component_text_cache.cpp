@@ -8,7 +8,9 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <new>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -21,6 +23,9 @@
 #include "src/core/crypto/sha256.hpp"
 #include "src/core/platform/os_info.hpp"
 #include "src/mem/ledger.hpp"
+#if defined(ENGINE_ENABLE_HIP)
+#include "src/core/hip/expert_stream/store.hpp"
+#endif
 
 namespace gufo::server {
 namespace {
@@ -373,10 +378,69 @@ struct ComponentTextCache::Impl {
   bool host_pressure_reported{};
   cache::ResourceCharge metadata;
 
+  // Sizes a streamed model's expert cache once the sessions exist and the
+  // prompt cache committed its backing: what the cache holds plus the host
+  // memory available now, less the runner's headroom and the prompt-cache
+  // budget still to commit (`backing_bytes` beyond what was prepared). The
+  // backing may hold less than it prepares: the log reports what it
+  // committed.
+  void FitExpertCache(const TextRunnerExpertCacheClaim& claim,
+                      std::size_t backing_bytes) const {
+    if (!claim.store)
+      return;
+#if defined(ENGINE_ENABLE_HIP)
+    // Commit the whole budget before the grant. Where registered pages are
+    // charged to the device heap, later growth must also leave the heap's
+    // dispatch reserve, which the filled expert cache does not leave: a
+    // budget kept back for that growth would stay unused by either cache.
+    const bool whole = resources->commit_backing &&
+                       resources->prepare_capture &&
+                       backing_bytes > cache::kPreparedBackingBytes;
+    if (whole) {
+      resources->prepare_capture(backing_bytes);
+      if (resources->await_capture)
+        resources->await_capture();
+    }
+    std::size_t prepared = 0;
+    if (whole)
+      prepared = backing_bytes;
+    else if (resources->commit_backing)
+      prepared = std::min(backing_bytes, cache::kPreparedBackingBytes);
+    const std::uint64_t pending = backing_bytes - prepared;
+    const std::uint64_t committed = resources->committed_backing_bytes
+                                        ? resources->committed_backing_bytes()
+                                        : prepared;
+    const std::uint64_t cached = claim.store->GetStats().cache_bytes;
+    const std::uint64_t available = ext::HostAvailableBytes();
+    const std::uint64_t keep = claim.headroom_bytes + pending;
+    const std::uint64_t grant =
+        available > keep ? cached + (available - keep)
+                         : cached - std::min(cached, keep - available);
+    Logger::Info(
+        "cache",
+        "schema=component-cache-v1 event=expert_cache_grant "
+        "cached_bytes=" +
+            std::to_string(cached) +
+            " available_bytes=" + std::to_string(available) +
+            " headroom_bytes=" + std::to_string(claim.headroom_bytes) +
+            " prompt_cache_budget_bytes=" + std::to_string(budget) +
+            " prompt_cache_committed_bytes=" + std::to_string(committed) +
+            " prompt_cache_pending_bytes=" + std::to_string(pending) +
+            " grant_bytes=" + std::to_string(grant));
+    if (!claim.store->Fit(grant))
+      Logger::Warn("cache",
+                   "schema=component-cache-v1 event=expert_cache_fit_failed "
+                   "grant_bytes=" +
+                       std::to_string(grant));
+#else
+    (void)backing_bytes;
+#endif
+  }
+
   Impl(std::shared_ptr<TextModelRunner> runner, std::size_t count,
        std::size_t ram, std::size_t slot_ceiling,
        const std::optional<TextRunnerDiskCacheOptions>& options,
-       bool automatic_ram, bool ram_on)
+       bool automatic_ram, bool ram_on, TextRunnerExpertCacheClaim experts)
       : runner(std::move(runner)),
         // Disk transfers lease one fixed pinned staging buffer: one piece for
         // writes, whose speed a larger piece does not change (#562), and
@@ -468,7 +532,7 @@ struct ComponentTextCache::Impl {
       // converted overhead estimates establish materialized storage.
       pinned = resources->pinned_bytes ? resources->pinned_bytes() : 0;
       owned_manifest_bytes = disk ? disk->OwnedManifestBytes() : 0;
-      const auto measured = claim.retained_snapshot_capacity_bytes.value_or(0);
+      const auto measured = AutomaticRetainedBytes(claim, count);
       const auto owned = SaturatingAdd(pinned, owned_manifest_bytes);
       // Promised but unwritten session state the cache may borrow; its
       // pages go back to the sessions on demand. Zero without lending.
@@ -586,6 +650,7 @@ struct ComponentTextCache::Impl {
       ledger.ConstrainLimits({ram + staging, ram, staging, ram});
     }
     budget = ram_enabled ? ram : 0;
+    FitExpertCache(experts, ram);
     if (options) {
       catalog = std::make_unique<cache::DiskCatalog>(ledger, *disk, index,
                                                      options->capacity_bytes);
@@ -1074,9 +1139,20 @@ struct ComponentTextCache::Impl {
       capture->sources.clear();
       return 0;
     }
-    auto job = cache::PersistenceJob(
-        ledger, File(1, capture->manifest.checkpoint.value), capture->manifest,
-        std::move(capture->sources));
+    // The job's metadata is optional too: a full ledger refuses the write,
+    // not the request that captured it.
+    std::optional<cache::PersistenceJob> job;
+    try {
+      job.emplace(ledger, File(1, capture->manifest.checkpoint.value),
+                  capture->manifest, std::move(capture->sources));
+    } catch (const std::bad_alloc&) {
+      capture->sources.clear();
+      Logger::Info("cache",
+                   "schema=component-cache-v1 event=persistence_refused "
+                   "reason=allocation tokens=" +
+                       std::to_string(capture->manifest.tokens.size()));
+      return 0;
+    }
     std::size_t pending_slot;
     {
       const std::lock_guard lock(mutex);
@@ -1089,7 +1165,7 @@ struct ComponentTextCache::Impl {
       pending_slot = position - pending_durable.begin();
       *position = capture;
     }
-    if (!queue->TrySubmit(std::move(job))) {
+    if (!queue->TrySubmit(std::move(*job))) {
       const std::lock_guard lock(mutex);
       if (pending_durable[pending_slot] == capture)
         pending_durable[pending_slot].reset();
@@ -1495,10 +1571,10 @@ ComponentTextCache::Lease::Impl::CaptureDurable() {
 ComponentTextCache::ComponentTextCache(
     std::shared_ptr<TextModelRunner> runner, std::size_t count, std::size_t ram,
     const std::optional<TextRunnerDiskCacheOptions>& disk, bool automatic_ram,
-    std::size_t ceiling, bool ram_enabled)
+    std::size_t ceiling, bool ram_enabled, TextRunnerExpertCacheClaim experts)
     : impl_(std::make_unique<Impl>(std::move(runner), count, ram,
                                    std::max(ram, ceiling), disk, automatic_ram,
-                                   ram_enabled)) {}
+                                   ram_enabled, experts)) {}
 ComponentTextCache::~ComponentTextCache() = default;
 std::size_t ComponentTextCache::capacity() const noexcept {
   return impl_->entries.size();
@@ -2963,6 +3039,21 @@ std::size_t ComponentTextCache::Lease::Commit(
       impl_->cache->resources->adapter->Positions(impl_->slot.Execution());
   const auto location = impl_->slot.Location();
   impl_->slot.Commit();
+  // The live frontier's index record is optional: a session without one
+  // restores from a retained checkpoint, if any. A failed allocation, such as
+  // a full ledger, reclaims retained records until the record fits, then
+  // leaves the frontier unindexed rather than failing the reply.
+  const auto index_live = [&] {
+    try {
+      impl_->entry->live = impl_->cache->index.Insert(cache::LiveFrontier{
+          location, impl_->entry->live_tokens, impl_->cache->identity,
+          impl_->entry->live_input, positions});
+      return true;
+    } catch (const std::bad_alloc&) {
+      return false;
+    }
+  };
+  bool indexed;
   {
     const std::lock_guard lock(impl_->cache->mutex);
     auto& starts = impl_->entry->reply_starts;
@@ -2979,10 +3070,35 @@ std::size_t ComponentTextCache::Lease::Commit(
     if (impl_->account)
       (void)impl_->account->SetNeed(live.size());
     impl_->entry->live_input = At(impl_->input, impl_->prompt.size());
-    impl_->entry->live = impl_->cache->index.Insert(cache::LiveFrontier{
-        location, std::move(live), impl_->cache->identity,
-        At(impl_->input, impl_->prompt.size()), std::move(positions)});
-    impl_->entry->busy = false;
+    indexed = index_live();
+    if (indexed)
+      impl_->entry->busy = false;
+  }
+  if (!indexed) {
+    auto& cache = *impl_->cache;
+    // Retry under the reclaim's lock, before draining its demotion: the
+    // demotion's disk job charges the metadata the reclaim just freed. Queued
+    // disk writes are kept, since one may be this turn's frontier checkpoint.
+    for (bool reclaimed = true; !indexed && reclaimed;) {
+      try {
+        const std::lock_guard lock(cache.mutex);
+        reclaimed = cache.retention.Reclaim(cache::RetentionRequest{});
+        indexed = reclaimed && index_live();
+      } catch (const std::exception&) {
+        // The reply stands; only the frontier's index record is lost.
+        reclaimed = false;
+      }
+      cache.DrainDemotion();
+    }
+    {
+      const std::lock_guard lock(cache.mutex);
+      impl_->entry->busy = false;
+    }
+    if (!indexed)
+      Logger::Info("cache",
+                   "schema=component-cache-v1 event=live_frontier_refused "
+                   "reason=allocation tokens=" +
+                       std::to_string(live.size()));
   }
   impl_->active = false;
   if (async_frontier) {
@@ -3162,12 +3278,14 @@ std::size_t ComponentTextCache::ReclaimableStateBytes() const {
 }
 
 std::size_t ComponentTextCache::RelieveHostPressure(
-    const ext::HostMemorySample& sample) {
+    const ext::HostMemorySample& sample, std::optional<std::uint64_t> reserve) {
   auto& impl = *impl_;
   // Idle: nothing is in flight, so what waits for the device costs nothing.
   if (impl.resources->settle)
     impl.resources->settle();
-  const auto shortfall = ext::HostReserveShortfallBytes(sample);
+  const auto shortfall =
+      reserve ? (sample.available < *reserve ? *reserve - sample.available : 0)
+              : ext::HostReserveShortfallBytes(sample);
   if (!shortfall) {
     impl.host_pressure_reported = false;
     return 0;
