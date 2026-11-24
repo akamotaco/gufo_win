@@ -169,6 +169,7 @@ Measurements first recorded in the backlog, without an E-number, are in
 | [E133](#e133--q8_0-matrix-cores-at-verification-widths-rejected) | decode kernels | rejected | Gufo #1321's packed-K16 Q8_0 WMMA for small batches, as a ceiling first: the split GEMV's Q8_0 decode shapes cost 1.00/1.03/1.07/1.10 × one token's time at 2/4/6/8 rows (bit-exact, DRAM-cold) and 1.27/1.40 × at 12/16. Over the sampled 1-6-row cycle mix a kernel at the read bound saves at most ~0.5% of decode, and int8 activations change rounding. Not built. |
 | [E134](#e134--wide-prefill-passes-on-demand-retained) | prefill / streaming | retained | A streamed engine runs prompts with at least 8,192 uncached tokens in 4,096-row passes, mapping the extra rows (1.47 GB with pinned host rows) after the expert cache releases room, and returning them at the prompt's end. Fresh 17.7K/21K prompts −5.1%/−4.8%, everything else and the expert cache at parity, identical replies; `--prefill-batch` is removed. |
 | [E135](#e135--two-wave-decode-overlap-resident-experts-down-during-ssd-reads-retained) | decode / streaming | retained | On streamed decode and verification batches (1–16 rows), resident experts' `down` projection runs during the SSD read stall behind their `gate+up` (matching E84 on prefill), leaving only missed slots' `down` after the reads and dropping the redundant second `expert_plan` on grouped layers. Coding-agent replay ABBA: decode 144.05/144.62 → 143.10/142.44 s (−1.1%, −3.1 to −5.4% on warming turns); AR greedy chat+code 57.70/57.53 → 57.14/57.21 s (−0.8%), identical replies and drafts. |
+| [E136](#e136--grouped-expert-gemv-uniform-sgpr-offsets-hoisted-decode-and-task-major-dispatch-retained) | decode kernels | retained | Replaced per-column 64-bit pointer arrays in the grouped expert GEMV with uniform SGPR `x_off[kCols]`, eliminating spills at 6–8 columns so 2–8-row `gate+up` runs in one launch without splitting, and added a task-major kernel (`expert_group_task_kernel`, scalar activation loads, hoisted weight decode, LDS xor-tree reduction) for 9–16-row batches and `IQ1`/`IQ2_XS`/`IQ2_S` downs. Bit-exact on all 10 formats. Coding-agent replay ABBA: decode 142.10/142.69 → 140.90/141.09 s (−1.0%, 49/53 requests faster, all buckets faster), identical replies and drafts; standalone 16-row batches −10% to −28%. |
 
 ## Milestones
 
@@ -5428,6 +5429,64 @@ cache) and −3.1% to −5.4% on the early cache-warming turns.
 Replies are identical; AR decode is −0.8% (−0.9% on the cold chat turn,
 −0.6% on the code turn). Retained.
 [Runs](artifacts/2026-11-24-decode-down-overlap/runs.json).
+
+## E136 — grouped expert GEMV: uniform SGPR offsets, hoisted decode and task-major dispatch (retained)
+
+The grouped routed-expert GEMV (`kernels/rocm/ds41_expert_gemv.hip.cpp`) held a
+per-column array of 64-bit activation pointers (`const float* x_col[kCols]`),
+which pushed 6–8-column fused `gate+up` kernels to spill registers (228 VGPRs,
+6 waves/SIMD) and forced `dispatch_group_widths` to split 5–16-row passes into
+2–3 launches (2-column lane pass plus a 16-column pass, plus an ungrouped peel
+on `IQ1`).
+
+Two changes keep every slot bit-identical to `expert_gemv_kernel` with zero
+spills:
+
+1. **Lane-major kernel (`expert_group_lane_kernel`) with uniform SGPR
+   `x_off[kCols]`:** replaces `x_col[kCols]` with uniform 32-bit offsets so
+   2–8-row launches fit in 58–124 VGPRs without splitting. An initial build
+   that hoisted weight decode (`F::Decode`) unconditionally into a 32-float
+   buffer won on dense 6-row groups but regressed single-slot-heavy 2–4-row
+   `IQ1_S`/`IQ2_XXS` `gate+up` (where 60–81% of active experts appear in only
+   one slot, so decoded weights have no reuse), yielding only −0.4% on the
+   coding-agent replay (with 3–4-row turns +0.4%). Making hoisting a template
+   switch (`kHoist`) keeps streaming `F::Acc` on single-slot-heavy widths and
+   hoists only where it wins (`IQ2_S` `gate+up` at ≤ 6 rows, `IQ1` downs at
+   ≤ 2–4 rows).
+2. **Task-major kernel (`expert_group_task_kernel`):** assigns each of the 8
+   waves to one 32-element task across 32 rows (`lane = row`), so activation
+   loads move to the scalar unit (`s_load`), weights decode once across columns,
+   and the 8 tasks reduce in xor-tree order through a `union` LDS buffer shared
+   with the codebook. Selected for all 9–16-row batches (with 1-slot `gate+up`
+   experts peeled onto the coalesced ungrouped kernel) and for `IQ1`/`IQ2_XS`/
+   `IQ2_S` downs from 3–5 rows.
+
+In standalone DRAM-cold benchmarks (`memcmp` bit-exact on all 10 formats),
+realistic sparsity (10.1 / 16.9 / 23.4 distinct experts at 2 / 4 / 6 rows)
+improves `IQ1_S` `gate+up` −3.0% / −6.7% / −6.7%, `IQ2_XXS` `gate+up`
+−1.7% / +1.6% / −5.6%, `IQ2_S` `gate+up` −2.7% / −3.4% / −7.2%, and 6-row
+downs −4.1% to −9.1%; dense 16-row batches improve −10.3% to −27.5% across all
+formats and 5-row drafter `Q2_K` improves −6.5% (`gate+up`) / −10.6% (`down`).
+
+Built with `nix build` at Gufo `60c48924` (base E135 `f4e53c7`). Streamed
+`UD-IQ2_XXS` with `MXFP8` Engram, DSpark and vision, one session, context
+65,536, fresh server per arm, order base, candidate, candidate, base:
+
+- **Coding-agent replay (53 requests, default sampling, seed 1234):**
+
+| Run | Arm | Decode (s) | Decode (tok/s) | Prefill (s) | Route hits | Cache (GiB) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| r1 | base | 142.10 | 38.77 | 34.47 | 98.7% | 101.65 |
+| r2 | candidate | 140.90 | 39.10 | 35.12 | 98.6% | 99.75 |
+| r3 | candidate | 141.09 | 39.05 | 34.82 | 98.7% | 101.69 |
+| r4 | base | 142.69 | 38.61 | 35.03 | 98.6% | 99.99 |
+
+All 53 replies, 5,509 generated tokens and 2,939 / 3,519 drafted/accepted
+counts match across every run. Decode is −1.0% (−1.40 s; 49/53 requests faster;
+both cache-matched pairs faster: `r1` vs `r3` −1.01 s, `r4` vs `r2` −1.79 s),
+with gains in every batch-width bucket (1–2 rows −1.2%, 2–3 rows −1.3%, 3–4
+rows −0.2%, 4–5 rows −0.9%, 5+ rows −1.5%). Retained.
+[Runs](artifacts/2026-11-24-grouped-expert-gemv/runs.json).
 
 ## Backlog measurements without an E-number
 

@@ -249,9 +249,9 @@ The routed GEMVs read 205-220 GB/s against 197-236 for the dense ones
 keep a fixed per-launch floor, while a plain read of the same experts
 streams at 230-238 GB/s
 ([resident data](EXPERIMENTS.md#item-17-resident-single-row-routed-gemvs-2026-10-29)). More tiles,
-deeper unrolls and LDS group sums were slower (E46, E59, E60). Check the
-VALU share with `tools/prof/isa_mix.py`, and whether `expert_group_kernel`
-variants still spill (80-540 bytes per lane before E37).
+deeper unrolls and LDS group sums were slower (E46, E59, E60). Grouped-kernel
+spills were eliminated in E136; remaining single-row work is checking the VALU
+share with `tools/prof/isa_mix.py`.
 
 ### 28. Split-read head share from measured drive speeds
 
@@ -441,6 +441,7 @@ in EXPERIMENTS.md.
 
 | Item | Result | Ref |
 | --- | --- | --- |
+| Grouped expert GEMV: uniform SGPR offsets, selective decode hoisting, task-major dispatch (item 17 part) | Zero spills across 2–16 rows, single launch up to 8 rows, task-major scalar-`x` kernel for 9–16 rows and `IQ1`/`IQ2_XS`/`IQ2_S` downs; coding-agent replay decode −1.0% (49/53 faster, identical replies), 16-row grouped passes −10 to −28% | E136 |
 | Two-wave decode overlap (resident `down` during SSD reads + single `expert_plan`) | Resident experts' `down` runs behind their `gate+up` during read stalls on 1–16-row batches; coding-agent replay decode −1.1% (−3.1 to −5.4% on warming turns), AR greedy −0.8%, identical replies | E135 |
 | 4,096-token prefill batches for streamed builds (item 42) | Wide passes on demand: the rows past 2,048 are mapped after the expert cache releases room and returned at the prompt's end; fresh 17.7K/21K prompts −5.1%/−4.8%, the expert cache and everything else at parity; `--prefill-batch` removed | E134 |
 | Streamed expert-pruned builds (item 41) | Coder streams with the kept experts' ranking; scores byte-identical to resident; default cache at resident speed, 30 GiB cache tg128 14.5 → 21.8 tok/s as it warms | E96 |

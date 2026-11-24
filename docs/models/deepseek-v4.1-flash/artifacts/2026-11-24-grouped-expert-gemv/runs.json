@@ -1,0 +1,95 @@
+{
+  "experiment": "E136",
+  "date": "2026-11-24",
+  "title": "Grouped expert GEMV: uniform SGPR offsets, hoisted weight decode and task-major dispatch",
+  "gufo_rev": "60c48924",
+  "base_rev": "f4e53c7",
+  "model": "UD-IQ2_XXS streamed + MXFP8 Engram + DSpark Q2_K/Q4_K + mmproj BF16",
+  "microbench_realistic_sparsity_us": {
+    "workloads": {
+      "2tok": "2 tok x 6 = 12 slots, mean 10.1 distinct (81% single-slot)",
+      "4tok": "4 tok x 6 = 24 slots, mean 16.9 distinct (66% single-slot)",
+      "6tok": "6 tok x 6 = 36 slots, mean 23.4 distinct (60% single-slot)"
+    },
+    "iq1s_gu":   {"base": [259.6, 467.3, 667.2], "cand": [251.7, 436.0, 622.6]},
+    "iq2xxs_gu": {"base": [309.4, 527.1, 796.9], "cand": [304.0, 535.5, 752.1]},
+    "iq2s_gu":   {"base": [423.5, 732.9, 1061.4], "cand": [412.1, 707.7, 985.1]},
+    "iq2xxs_dn": {"base": [164.0, 287.9, 448.6], "cand": [164.8, 287.4, 407.6]},
+    "iq2xs_dn":  {"base": [177.2, 312.5, 444.1], "cand": [176.1, 296.8, 415.5]},
+    "iq2s_dn":   {"base": [188.2, 331.7, 468.9], "cand": [195.2, 322.4, 449.9]},
+    "iq3xxs_dn": {"base": [216.4, 360.6, 523.6], "cand": [216.1, 359.4, 500.5]}
+  },
+  "microbench_dense_us": {
+    "workloads": {
+      "6tok": "6 tok x 6 = 36 slots, mean 17.8 distinct",
+      "16tok": "16 tok x 6 = 96 slots, mean 38.9 distinct",
+      "5drf": "5 tok x 3 = 15 slots, mean 7.7 distinct"
+    },
+    "bit_exact": true,
+    "iq1s_gu":    {"6tok": 534.2, "16tok": 1180.2, "5drf": 237.3},
+    "iq2xxs_gu":  {"6tok": 631.8, "16tok": 1554.0, "5drf": 278.0},
+    "iq2s_gu":    {"6tok": 808.3, "16tok": 1872.6, "5drf": 356.7},
+    "iq1s_dn":    {"6tok": 276.4, "16tok": 699.4,  "5drf": 129.1},
+    "iq2xxs_dn":  {"6tok": 346.9, "16tok": 890.7,  "5drf": 152.0},
+    "iq2xs_dn":   {"6tok": 366.9, "16tok": 820.4,  "5drf": 159.8},
+    "iq2s_dn":    {"6tok": 385.3, "16tok": 944.2,  "5drf": 171.6},
+    "iq3xxs_dn":  {"6tok": 405.0, "16tok": 944.9,  "5drf": 182.7},
+    "q2k_gu_drf": {"6tok": 676.0, "16tok": 1633.5, "5drf": 294.5},
+    "q2k_dn_drf": {"6tok": 352.1, "16tok": 986.5,  "5drf": 157.3}
+  },
+  "agent_replay_abba": {
+    "requests": 53,
+    "gen_tokens": 5509,
+    "draft_accepted": 2939,
+    "draft_n": 3519,
+    "all_replies_match": true,
+    "per_request_wins": "49/53",
+    "order": ["base", "candidate", "candidate", "base"],
+    "runs": [
+      {
+        "run": "r1",
+        "arm": "base",
+        "decode_s": 142.10,
+        "decode_tps": 38.77,
+        "prefill_s": 34.47,
+        "route_hit_pct": 98.7,
+        "read_mib_per_tok": 23.51,
+        "host_wait_ms_per_tok": 9.03,
+        "cache_gib": 101.65
+      },
+      {
+        "run": "r2",
+        "arm": "candidate",
+        "decode_s": 140.90,
+        "decode_tps": 39.10,
+        "prefill_s": 35.12,
+        "route_hit_pct": 98.6,
+        "read_mib_per_tok": 24.70,
+        "host_wait_ms_per_tok": 8.96,
+        "cache_gib": 99.75
+      },
+      {
+        "run": "r3",
+        "arm": "candidate",
+        "decode_s": 141.09,
+        "decode_tps": 39.05,
+        "prefill_s": 34.82,
+        "route_hit_pct": 98.7,
+        "read_mib_per_tok": 23.50,
+        "host_wait_ms_per_tok": 8.93,
+        "cache_gib": 101.69
+      },
+      {
+        "run": "r4",
+        "arm": "base",
+        "decode_s": 142.69,
+        "decode_tps": 38.61,
+        "prefill_s": 35.03,
+        "route_hit_pct": 98.6,
+        "read_mib_per_tok": 24.57,
+        "host_wait_ms_per_tok": 9.05,
+        "cache_gib": 99.99
+      }
+    ]
+  }
+}

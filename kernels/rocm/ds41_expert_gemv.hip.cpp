@@ -96,6 +96,37 @@ __device__ __forceinline__ float Iq1Dot(uint32_t grid, float c, const float* x) 
   return __builtin_fmaf(c, sum, dot);
 }
 
+/* Iq1Dot over pre-converted grid nibbles n[0..7] (exact same FMA chain). */
+__device__ __forceinline__ float Iq1DotF(const float* n, float c,
+                                         const float* x) {
+#pragma clang fp reassociate(off)
+  const float4 a = *reinterpret_cast<const float4*>(x);
+  const float4 b = *reinterpret_cast<const float4*>(x + 4);
+  float dot = n[0] * a.x;
+  dot = __builtin_fmaf(n[1], a.y, dot);
+  dot = __builtin_fmaf(n[2], a.z, dot);
+  dot = __builtin_fmaf(n[3], a.w, dot);
+  dot = __builtin_fmaf(n[4], b.x, dot);
+  dot = __builtin_fmaf(n[5], b.y, dot);
+  dot = __builtin_fmaf(n[6], b.z, dot);
+  dot = __builtin_fmaf(n[7], b.w, dot);
+  const float sum = ((a.x + a.y) + (a.z + a.w)) + ((b.x + b.y) + (b.z + b.w));
+  return __builtin_fmaf(c, sum, dot);
+}
+
+__device__ __forceinline__ void Iq1Unpack8(uint32_t grid, float* out) {
+  const uint32_t lo = grid & 0x0F0F0F0F;
+  const uint32_t hi = (grid >> 4) & 0x0F0F0F0F;
+  out[0] = UByte<0>(lo);
+  out[1] = UByte<1>(lo);
+  out[2] = UByte<2>(lo);
+  out[3] = UByte<3>(lo);
+  out[4] = UByte<0>(hi);
+  out[5] = UByte<1>(hi);
+  out[6] = UByte<2>(hi);
+  out[7] = UByte<3>(hi);
+}
+
 /* Iq1Dot over a register-resident slice of x (same FMA chain, scalar reads). */
 __device__ __forceinline__ float Iq1DotR(uint32_t grid, float c, const float (&xr)[32], int base) {
 #pragma clang fp reassociate(off)
@@ -183,6 +214,34 @@ struct Format<19> {
       dot += Iq1Dot(grid[((qs >> (8 * l)) & 0xFF) | (((qh >> (3 * l)) & 7) << 8)], c, x + 8 * l);
     return __builtin_fmaf(scale, dot, acc);
   }
+  struct Decoded {
+    float scale, c;
+    float n[32];
+  };
+  static __device__ __forceinline__ Decoded Decode(const Raw& a, int,
+                                                   const uint32_t* grid,
+                                                   const Iq2Tab&) {
+    Decoded r;
+    const float d = HalfBits(a.d);
+    const uint32_t qs = a.qs, qh = a.qh;
+    r.scale = d * static_cast<float>(2 * ((qh >> 12) & 7) + 1);
+    r.c = (qh & 0x8000 ? -IQ1S_DELTA : IQ1S_DELTA) - 1.0f;
+#pragma unroll
+    for (int l = 0; l < 4; ++l)
+      Iq1Unpack8(grid[((qs >> (8 * l)) & 0xFF) | (((qh >> (3 * l)) & 7) << 8)],
+                 r.n + 8 * l);
+    return r;
+  }
+  static __device__ __forceinline__ float AccDecoded(float acc,
+                                                     const Decoded& r, int,
+                                                     const float* x) {
+#pragma clang fp reassociate(off)
+    float dot = 0.0f;
+#pragma unroll
+    for (int l = 0; l < 4; ++l)
+      dot += Iq1DotF(r.n + 8 * l, r.c, x + 8 * l);
+    return __builtin_fmaf(r.scale, dot, acc);
+  }
   static __device__ __forceinline__ float AccR(float acc, const Raw& a, int, const float (&xr)[32],
                                                const uint32_t* grid, const Iq2Tab&) {
 #pragma clang fp reassociate(off)
@@ -240,6 +299,45 @@ struct Format<29> {
                       x + 8 * l);
     return acc + __builtin_fmaf(s1, dot[0] + dot[1], s2 * (dot[2] + dot[3]));
   }
+  struct Decoded {
+    float s1, s2;
+    float c[4];
+    float n[32];
+  };
+  static __device__ __forceinline__ Decoded Decode(const Raw& a, int t,
+                                                   const uint32_t* grid,
+                                                   const Iq2Tab&) {
+    Decoded r;
+    const uint32_t qs = a.qs;
+    const uint32_t sc0 = a.s0 & 0xFFFF, sc1 = a.s0 >> 16, sc2 = a.s1 & 0xFFFF,
+                   sc3 = a.s1 >> 16;
+    const float d = HalfBits((sc0 >> 12) | ((sc1 >> 8) & 0x00F0) |
+                             ((sc2 >> 4) & 0x0F00) | (sc3 & 0xF000));
+    const uint32_t sw[4] = {sc0, sc1, sc2, sc3};
+    const uint32_t word = sw[t >> 1] >> (6 * (t & 1));
+    r.s1 = d * static_cast<float>(2 * (word & 7) + 1);
+    r.s2 = d * static_cast<float>(2 * ((word >> 3) & 7) + 1);
+    const uint32_t qh0 = a.qh & 0xFF, qh1 = a.qh >> 8;
+    const uint32_t high[4] = {(qh0 << 8) & 0x700, (qh0 << 4) & 0x700,
+                              (qh1 << 8) & 0x700, (qh1 << 4) & 0x700};
+    const uint32_t flag[4] = {qh0 & 0x08, qh0 & 0x80, qh1 & 0x08, qh1 & 0x80};
+#pragma unroll
+    for (int l = 0; l < 4; ++l) {
+      r.c[l] = (flag[l] ? -IQ1M_DELTA : IQ1M_DELTA) - 1.0f;
+      Iq1Unpack8(grid[((qs >> (8 * l)) & 0xFF) | high[l]], r.n + 8 * l);
+    }
+    return r;
+  }
+  static __device__ __forceinline__ float AccDecoded(float acc,
+                                                     const Decoded& r, int,
+                                                     const float* x) {
+    float dot[4];
+#pragma unroll
+    for (int l = 0; l < 4; ++l)
+      dot[l] = Iq1DotF(r.n + 8 * l, r.c[l], x + 8 * l);
+    return acc +
+           __builtin_fmaf(r.s1, dot[0] + dot[1], r.s2 * (dot[2] + dot[3]));
+  }
 };
 
 /* IQ2_XXS (66 bytes): d, then per sub-block four grid bytes and a u32 with
@@ -263,21 +361,39 @@ struct Format<16> {
     r.aux = static_cast<uint32_t>(v >> 32);
     return r;
   }
-  template <bool kReg>
-  static __device__ __forceinline__ float AccT(float acc, const Raw& a, int, const float* x, const float (&xr)[32],
-                                               const uint32_t*, const Iq2Tab& tab) {
+  struct Decoded {
+    float w[32];
+  };
+  static __device__ __forceinline__ Decoded Decode(const Raw& a, int,
+                                                   const uint32_t*,
+                                                   const Iq2Tab& tab) {
+    Decoded r;
     const float d = HalfBits(a.d);
     const uint32_t qs = a.qs, aux = a.aux;
     const float scale = d * (0.5f + static_cast<float>(aux >> 28)) * 0.25f;
-    float w[32];
 #pragma unroll
     for (int l = 0; l < 4; ++l) {
       const uint32_t idx = (qs >> (8 * l)) & 0xFF;
-      Iq2Group(tab.words[2 * idx], tab.words[2 * idx + 1], tab.signs[(aux >> (7 * l)) & 127], scale, w + 8 * l);
+      Iq2Group(tab.words[2 * idx], tab.words[2 * idx + 1],
+               tab.signs[(aux >> (7 * l)) & 127], scale, r.w + 8 * l);
     }
+    return r;
+  }
+  static __device__ __forceinline__ float AccDecoded(float acc,
+                                                     const Decoded& r, int,
+                                                     const float* x) {
+    return acc + Accumulate<32>(0.0f, r.w, x);
+  }
+  template<bool kReg>
+  static __device__ __forceinline__ float AccT(float acc, const Raw& a, int,
+                                               const float* x,
+                                               const float (&xr)[32],
+                                               const uint32_t* g,
+                                               const Iq2Tab& tab) {
+    const Decoded r = Decode(a, 0, g, tab);
     if constexpr (kReg)
-      return acc + AccumulateR(0.0f, w, xr);
-    return acc + Accumulate<32>(0.0f, w, x);
+      return acc + AccumulateR(0.0f, r.w, xr);
+    return acc + Accumulate<32>(0.0f, r.w, x);
   }
   static __device__ __forceinline__ float Acc(float acc, const Raw& a, int t, const float* x, const uint32_t* g,
                                               const Iq2Tab& tab) {
@@ -311,23 +427,40 @@ struct Format<17> {
     r.s1 = static_cast<uint32_t>(v >> 32);
     return r;
   }
-  template <bool kReg>
-  static __device__ __forceinline__ float AccT(float acc, const Raw& a, int t, const float* x, const float (&xr)[32],
-                                               const uint32_t*, const Iq2Tab& tab) {
+  struct Decoded {
+    float w[32];
+  };
+  static __device__ __forceinline__ Decoded Decode(const Raw& a, int t,
+                                                   const uint32_t*,
+                                                   const Iq2Tab& tab) {
+    Decoded r;
     const float d = HalfBits(a.d);
     const uint32_t sc = (a.sc >> (8 * (t & 1))) & 0xFF;
     const float low = d * (0.5f + static_cast<float>(sc & 0xF)) * 0.25f;
     const float high = d * (0.5f + static_cast<float>(sc >> 4)) * 0.25f;
-    float w[32];
 #pragma unroll
     for (int l = 0; l < 4; ++l) {
       const uint32_t q = ((l < 2 ? a.s0 : a.s1) >> (16 * (l & 1))) & 0xFFFF;
       Iq2Group(tab.words[2 * (q & 0x1FF)], tab.words[2 * (q & 0x1FF) + 1], tab.signs[q >> 9], l < 2 ? low : high,
-               w + 8 * l);
+               r.w + 8 * l);
     }
+    return r;
+  }
+  static __device__ __forceinline__ float AccDecoded(float acc,
+                                                     const Decoded& r, int,
+                                                     const float* x) {
+    return acc + Accumulate<32>(0.0f, r.w, x);
+  }
+  template<bool kReg>
+  static __device__ __forceinline__ float AccT(float acc, const Raw& a, int t,
+                                               const float* x,
+                                               const float (&xr)[32],
+                                               const uint32_t* g,
+                                               const Iq2Tab& tab) {
+    const Decoded r = Decode(a, t, g, tab);
     if constexpr (kReg)
-      return acc + AccumulateR(0.0f, w, xr);
-    return acc + Accumulate<32>(0.0f, w, x);
+      return acc + AccumulateR(0.0f, r.w, xr);
+    return acc + Accumulate<32>(0.0f, r.w, x);
   }
   static __device__ __forceinline__ float Acc(float acc, const Raw& a, int t, const float* x, const uint32_t* g,
                                               const Iq2Tab& tab) {
@@ -360,23 +493,41 @@ struct Format<22> {
     __builtin_memcpy(&r.sc, b + 74 + 2 * (t >> 1), 2);
     return r;
   }
-  template <bool kReg>
-  static __device__ __forceinline__ float AccT(float acc, const Raw& a, int t, const float* x, const float (&xr)[32],
-                                               const uint32_t*, const Iq2Tab& tab) {
+  struct Decoded {
+    float w[32];
+  };
+  static __device__ __forceinline__ Decoded Decode(const Raw& a, int t,
+                                                   const uint32_t*,
+                                                   const Iq2Tab& tab) {
+    Decoded r;
     const float d = HalfBits(a.d);
     const uint32_t qh = (a.qh >> (8 * (t & 1))) & 0xFF;
     const uint32_t sc = (a.sc >> (8 * (t & 1))) & 0xFF;
     const float low = d * (0.5f + static_cast<float>(sc & 0xF)) * 0.25f;
     const float high = d * (0.5f + static_cast<float>(sc >> 4)) * 0.25f;
-    float w[32];
 #pragma unroll
     for (int l = 0; l < 4; ++l) {
       const uint32_t idx = ((a.qs >> (8 * l)) & 0xFF) | ((qh << (8 - 2 * l)) & 0x300);
-      Iq2Group(tab.words[2 * idx], tab.words[2 * idx + 1], (a.signs >> (8 * l)) & 0xFF, l < 2 ? low : high, w + 8 * l);
+      Iq2Group(tab.words[2 * idx], tab.words[2 * idx + 1],
+               (a.signs >> (8 * l)) & 0xFF, l < 2 ? low : high, r.w + 8 * l);
     }
+    return r;
+  }
+  static __device__ __forceinline__ float AccDecoded(float acc,
+                                                     const Decoded& r, int,
+                                                     const float* x) {
+    return acc + Accumulate<32>(0.0f, r.w, x);
+  }
+  template<bool kReg>
+  static __device__ __forceinline__ float AccT(float acc, const Raw& a, int t,
+                                               const float* x,
+                                               const float (&xr)[32],
+                                               const uint32_t* g,
+                                               const Iq2Tab& tab) {
+    const Decoded r = Decode(a, t, g, tab);
     if constexpr (kReg)
-      return acc + AccumulateR(0.0f, w, xr);
-    return acc + Accumulate<32>(0.0f, w, x);
+      return acc + AccumulateR(0.0f, r.w, xr);
+    return acc + Accumulate<32>(0.0f, r.w, x);
   }
   static __device__ __forceinline__ float Acc(float acc, const Raw& a, int t, const float* x, const uint32_t* g,
                                               const Iq2Tab& tab) {
@@ -412,22 +563,40 @@ struct Format<18> {
     __builtin_memcpy(&r.aux, b + 66 + 4 * t, 4);
     return r;
   }
-  template <bool kReg>
-  static __device__ __forceinline__ float AccT(float acc, const Raw& a, int, const float* x, const float (&xr)[32],
-                                               const uint32_t*, const Iq2Tab& tab) {
+  struct Decoded {
+    float w[32];
+  };
+  static __device__ __forceinline__ Decoded Decode(const Raw& a, int,
+                                                   const uint32_t*,
+                                                   const Iq2Tab& tab) {
+    Decoded r;
     const float d = HalfBits(a.d);
     const uint32_t aux = a.aux;
     const float scale = d * (0.5f + static_cast<float>(aux >> 28)) * 0.5f;
-    float w[32];
 #pragma unroll
     for (int l = 0; l < 4; ++l) {
       const uint32_t q = l < 2 ? a.q0 : a.q1;
       const uint32_t lo = (q >> (16 * (l & 1))) & 0xFF, hi = (q >> (16 * (l & 1) + 8)) & 0xFF;
-      Iq2Group(tab.words[lo], tab.words[hi], tab.signs[(aux >> (7 * l)) & 127], scale, w + 8 * l);
+      Iq2Group(tab.words[lo], tab.words[hi], tab.signs[(aux >> (7 * l)) & 127],
+               scale, r.w + 8 * l);
     }
+    return r;
+  }
+  static __device__ __forceinline__ float AccDecoded(float acc,
+                                                     const Decoded& r, int,
+                                                     const float* x) {
+    return acc + Accumulate<32>(0.0f, r.w, x);
+  }
+  template<bool kReg>
+  static __device__ __forceinline__ float AccT(float acc, const Raw& a, int,
+                                               const float* x,
+                                               const float (&xr)[32],
+                                               const uint32_t* g,
+                                               const Iq2Tab& tab) {
+    const Decoded r = Decode(a, 0, g, tab);
     if constexpr (kReg)
-      return acc + AccumulateR(0.0f, w, xr);
-    return acc + Accumulate<32>(0.0f, w, x);
+      return acc + AccumulateR(0.0f, r.w, xr);
+    return acc + Accumulate<32>(0.0f, r.w, x);
   }
   static __device__ __forceinline__ float Acc(float acc, const Raw& a, int t, const float* x, const uint32_t* g,
                                               const Iq2Tab& tab) {
@@ -458,13 +627,27 @@ struct Format<12> {
     const int p = t >> 1, h = t & 1;
     return {*reinterpret_cast<const uint4*>(b), *reinterpret_cast<const uint4*>(b + 16 + 32 * p + 16 * h)};
   }
-  static __device__ __forceinline__ float Acc(float acc, const Raw& a, int t, const float* x, const uint32_t*,
-                                              const Iq2Tab&) {
+  struct Decoded {
     float w[32];
-    ds41_gemv_tasks::DecodeQ45K<false>({a.header, a.q, {}}, t, w);
+  };
+  static __device__ __forceinline__ Decoded Decode(const Raw& a, int t,
+                                                   const uint32_t*,
+                                                   const Iq2Tab&) {
+    Decoded r;
+    ds41_gemv_tasks::DecodeQ45K<false>({a.header, a.q, {}}, t, r.w);
+    return r;
+  }
+  static __device__ __forceinline__ float AccDecoded(float acc,
+                                                     const Decoded& r, int t,
+                                                     const float* x) {
     /* The kernel hands the task's 32-float slice; DotQ45K offsets by the
      * task itself, so pass the block base. */
-    return acc + ds41_gemv_tasks::DotQ45K(0.0f, w, t, x - 32 * t);
+    return acc + ds41_gemv_tasks::DotQ45K(0.0f, r.w, t, x - 32 * t);
+  }
+  static __device__ __forceinline__ float Acc(float acc, const Raw& a, int t,
+                                              const float* x, const uint32_t* g,
+                                              const Iq2Tab& tab) {
+    return AccDecoded(acc, Decode(a, t, g, tab), t, x);
   }
   static __device__ __forceinline__ float AccR(float acc, const Raw& a, int t, const float (&xr)[32],
                                                const uint32_t* grid, const Iq2Tab& tab) {
@@ -493,20 +676,41 @@ struct Format<10> {
     __builtin_memcpy(r.qs, b + 16 + 32 * (t >> 2), 32);
     return r;
   }
-  static __device__ __forceinline__ float Acc(float acc, const Raw& a, int t, const float* x,
-                                              const uint32_t*, const Iq2Tab&) {
+  struct Decoded {
+    float w[32];
+  };
+  static __device__ __forceinline__ Decoded Decode(const Raw& a, int t,
+                                                   const uint32_t*,
+                                                   const Iq2Tab&) {
+    Decoded r;
     const float d = HalfBits(a.dm & 0xFFFFu), dmin = HalfBits(a.dm >> 16);
     const uint32_t shift = 2u * (t & 3);
-    float w[32];
+    const uint32_t sb0 = a.sc & 0xFFu, sb1 = (a.sc >> 8) & 0xFFu;
+    const float dsc0 = d * static_cast<float>(sb0 & 0xFu),
+                off0 = dmin * static_cast<float>(sb0 >> 4);
+    const float dsc1 = d * static_cast<float>(sb1 & 0xFu),
+                off1 = dmin * static_cast<float>(sb1 >> 4);
 #pragma unroll
-    for (int i = 0; i < 32; ++i) {
+    for (int i = 0; i < 16; ++i) {
       const uint32_t byte = (a.qs[i >> 2] >> (8 * (i & 3))) & 0xFFu;
-      const uint32_t sb = (a.sc >> (8 * (i >> 4))) & 0xFFu;
-      const float dsc = d * static_cast<float>(sb & 0xFu);
-      const float off = dmin * static_cast<float>(sb >> 4);
-      w[i] = dsc * static_cast<float>((byte >> shift) & 3u) - off;
+      r.w[i] = dsc0 * static_cast<float>((byte >> shift) & 3u) - off0;
     }
-    return acc + Accumulate<32>(0.0f, w, x);
+#pragma unroll
+    for (int i = 16; i < 32; ++i) {
+      const uint32_t byte = (a.qs[i >> 2] >> (8 * (i & 3))) & 0xFFu;
+      r.w[i] = dsc1 * static_cast<float>((byte >> shift) & 3u) - off1;
+    }
+    return r;
+  }
+  static __device__ __forceinline__ float AccDecoded(float acc,
+                                                     const Decoded& r, int,
+                                                     const float* x) {
+    return acc + Accumulate<32>(0.0f, r.w, x);
+  }
+  static __device__ __forceinline__ float Acc(float acc, const Raw& a, int t,
+                                              const float* x, const uint32_t* g,
+                                              const Iq2Tab& tab) {
+    return AccDecoded(acc, Decode(a, t, g, tab), t, x);
   }
   static __device__ __forceinline__ float AccR(float acc, const Raw& a, int t, const float (&xr)[32],
                                                const uint32_t* grid, const Iq2Tab& tab) {
@@ -726,18 +930,49 @@ __global__ void expert_plan_kernel(const int32_t* __restrict__ ids, uint32_t slo
   }
 }
 
-/* expert_gemv_kernel over the groups of a plan: block (row tile, group)
- * decodes its expert's weights once for the group's up to kCols slots, slot
- * s reading x + (s / slots_per_x) * x_slot and writing row s of y. Every
- * slot sees the arithmetic of expert_gemv_kernel. */
-template <int kType, int U, bool kSwiGLU, int kCols, bool kTable>
+/* Accumulate a decoded block across columns [0, cols); unrolled up to 8
+ * columns (where full unrolling wins without exceeding LLVM's unroll limit). */
+template <typename F, int kCols>
+__device__ __forceinline__ void AccCols(float (&acc)[kCols],
+                                        const typename F::Decoded& dec, int t,
+                                        const float* xb,
+                                        const uint32_t (&x_off)[kCols],
+                                        int cols) {
+  if constexpr (kCols <= 8) {
+#pragma unroll
+    for (int c = 0; c < kCols; ++c) {
+      if (c >= cols)
+        break;
+      acc[c] = F::AccDecoded(acc[c], dec, t, xb + x_off[c]);
+    }
+  } else {
+    for (int c = 0; c < kCols; ++c) {
+      if (c >= cols)
+        break;
+      acc[c] = F::AccDecoded(acc[c], dec, t, xb + x_off[c]);
+    }
+  }
+}
+
+/* Lane-major grouped expert GEMV over the groups of a plan: block
+ * (row tile of 32, group) assigns 4 rows x 8 tasks per wave (coalesced
+ * weight loads) and reduces tasks with wave shuffles. With kHoist, each
+ * block's weights are decoded once for all columns; without kHoist, F::Acc
+ * streams weights directly without holding a 32-float decoded buffer, keeping
+ * register pressure low when most active experts only appear in one slot.
+ * Every slot matches expert_gemv_kernel bit for bit. */
+template <int kType, int U, bool kSwiGLU, int kCols, bool kTable,
+          bool kHoist = false>
 __global__ void __launch_bounds__(kWave* kWaves)
-    expert_group_kernel(const uint8_t* __restrict__ w, const uint8_t* __restrict__ w_up,
-                        const uint8_t* const* __restrict__ w_table, const uint8_t* const* __restrict__ w_up_table,
-                        const float* __restrict__ route_w, float limit, const float* __restrict__ x,
-                        float* __restrict__ y, uint32_t m, uint32_t k, const int32_t* __restrict__ plan,
-                        uint64_t expert_bytes, uint32_t x_slot, uint32_t slots_per_x, int zero_dropped,
-                        int32_t min_count) {
+    expert_group_lane_kernel(
+        const uint8_t* __restrict__ w, const uint8_t* __restrict__ w_up,
+        const uint8_t* const* __restrict__ w_table,
+        const uint8_t* const* __restrict__ w_up_table,
+        const float* __restrict__ route_w, float limit,
+        const float* __restrict__ x, float* __restrict__ y, uint32_t m,
+        uint32_t k, const int32_t* __restrict__ plan, uint64_t expert_bytes,
+        uint32_t x_slot, uint32_t slots_per_x, int zero_dropped,
+        int32_t min_count) {
   using F = Format<kType>;
   constexpr uint32_t kRows = 4 * kWaves;
   __shared__ uint32_t grid[F::kIq1Grid ? NGRID_IQ1S : 1];
@@ -746,12 +981,11 @@ __global__ void __launch_bounds__(kWave* kWaves)
   if ((int32_t)blockIdx.y >= plan[0]) return;
   const int32_t* g = plan + 1 + blockIdx.y * kPlanGroup;
   const int32_t id = g[0];
-  /* A split launch: this pass takes the groups of min_count to kCols slots. */
-  if (min_count > 0 && (g[1] < min_count || g[1] > kCols || (id < 0 && min_count > 1))) return;
+  if (min_count > 0 &&
+      (g[1] < min_count || g[1] > kCols || (id < 0 && min_count > 1)))
+    return;
   const int cols = g[1] < kCols ? g[1] : kCols;
-  /* Slot c of the group is g[2 + c]; reading it from the plan where it is
-   * used keeps a 16-entry copy out of scratch memory. */
-  if (id < 0) {  // dropped slots
+  if (id < 0) {
     if (zero_dropped) {
       for (int c = 0; c < cols; ++c)
         for (uint32_t r = threadIdx.x; r < kRows; r += blockDim.x)
@@ -772,10 +1006,13 @@ __global__ void __launch_bounds__(kWave* kWaves)
   const int wave = threadIdx.x / kWave;
   const int t = lane % 8;
   const uint32_t row = blockIdx.x * kRows + wave * 4 + lane / 8;
-  if (row >= m) return;
-  const float* xt[kCols];
+  if (row >= m)
+    return;
+  uint32_t x_off[kCols];
 #pragma unroll
-  for (int c = 0; c < kCols; ++c) xt[c] = x + (uint64_t)((c < cols ? g[2 + c] : 0) / slots_per_x) * x_slot + 32 * t;
+  for (int c = 0; c < kCols; ++c)
+    x_off[c] = (uint32_t)((c < cols ? g[2 + c] : 0) / slots_per_x) * x_slot;
+  const float* x_lane = x + 32 * t;
   const uint32_t blocks_per_row = k / 256;
   const uint64_t row_bytes = (uint64_t)row * blocks_per_row * F::kBlockBytes;
   const uint64_t offset = (uint64_t)id * expert_bytes + row_bytes;
@@ -795,25 +1032,22 @@ __global__ void __launch_bounds__(kWave* kWaves)
     }
 #pragma unroll
     for (int u = 0; u < U; ++u) {
+      const float* xb = x_lane + (blk + u) * 256;
+      if constexpr (kHoist) {
+        AccCols<F, kCols>(acc, F::Decode(raw[u], t, grid, tab), t, xb, x_off,
+                          cols);
+        if constexpr (kSwiGLU)
+          AccCols<F, kCols>(acc_up, F::Decode(raw_up[u], t, grid, tab), t, xb,
+                            x_off, cols);
+      } else {
 #pragma unroll
-      for (int c = 0; c < kCols; ++c) {
-        if (c >= cols) break;
-        const float* xb = xt[c] + (blk + u) * 256;
-        if constexpr (kSwiGLU && F::kXReg) {
-          float xr[32];
-#pragma unroll
-          for (int i = 0; i < 32; i += 4) {
-            const float4 f = *reinterpret_cast<const float4*>(xb + i);
-            xr[i] = f.x;
-            xr[i + 1] = f.y;
-            xr[i + 2] = f.z;
-            xr[i + 3] = f.w;
-          }
-          acc[c] = F::AccR(acc[c], raw[u], t, xr, grid, tab);
-          acc_up[c] = F::AccR(acc_up[c], raw_up[u], t, xr, grid, tab);
-        } else {
-          acc[c] = F::Acc(acc[c], raw[u], t, xb, grid, tab);
-          if constexpr (kSwiGLU) acc_up[c] = F::Acc(acc_up[c], raw_up[u], t, xb, grid, tab);
+        for (int c = 0; c < kCols; ++c) {
+          if (c >= cols)
+            break;
+          acc[c] = F::Acc(acc[c], raw[u], t, xb + x_off[c], grid, tab);
+          if constexpr (kSwiGLU)
+            acc_up[c] =
+                F::Acc(acc_up[c], raw_up[u], t, xb + x_off[c], grid, tab);
         }
       }
     }
@@ -821,26 +1055,22 @@ __global__ void __launch_bounds__(kWave* kWaves)
   for (; blk < blocks_per_row; ++blk) {
     const typename F::Raw raw = F::Load(base + (uint64_t)blk * F::kBlockBytes, t);
     typename F::Raw raw_up{};
-    if constexpr (kSwiGLU) raw_up = F::Load(base_up + (uint64_t)blk * F::kBlockBytes, t);
+    if constexpr (kSwiGLU)
+      raw_up = F::Load(base_up + (uint64_t)blk * F::kBlockBytes, t);
+    const float* xb = x_lane + blk * 256;
+    if constexpr (kHoist) {
+      AccCols<F, kCols>(acc, F::Decode(raw, t, grid, tab), t, xb, x_off, cols);
+      if constexpr (kSwiGLU)
+        AccCols<F, kCols>(acc_up, F::Decode(raw_up, t, grid, tab), t, xb, x_off,
+                          cols);
+    } else {
 #pragma unroll
-    for (int c = 0; c < kCols; ++c) {
-      if (c >= cols) break;
-      const float* xb = xt[c] + blk * 256;
-      if constexpr (kSwiGLU && F::kXReg) {
-        float xr[32];
-#pragma unroll
-        for (int i = 0; i < 32; i += 4) {
-          const float4 f = *reinterpret_cast<const float4*>(xb + i);
-          xr[i] = f.x;
-          xr[i + 1] = f.y;
-          xr[i + 2] = f.z;
-          xr[i + 3] = f.w;
-        }
-        acc[c] = F::AccR(acc[c], raw, t, xr, grid, tab);
-        acc_up[c] = F::AccR(acc_up[c], raw_up, t, xr, grid, tab);
-      } else {
-        acc[c] = F::Acc(acc[c], raw, t, xb, grid, tab);
-        if constexpr (kSwiGLU) acc_up[c] = F::Acc(acc_up[c], raw_up, t, xb, grid, tab);
+      for (int c = 0; c < kCols; ++c) {
+        if (c >= cols)
+          break;
+        acc[c] = F::Acc(acc[c], raw, t, xb + x_off[c], grid, tab);
+        if constexpr (kSwiGLU)
+          acc_up[c] = F::Acc(acc_up[c], raw_up, t, xb + x_off[c], grid, tab);
       }
     }
   }
@@ -873,96 +1103,316 @@ __global__ void __launch_bounds__(kWave* kWaves)
   }
 }
 
+/* Task-major grouped expert GEMV over the groups of a plan: block
+ * (row tile of 32, group) assigns wave t (0..7) to task t of all 32 rows
+ * (lane = row), so every lane in a wave reads the same activation slice
+ * through scalar loads while the vector unit loads only weights. Each block's
+ * weights are decoded once for all columns, and the 8 tasks reduce through
+ * LDS in xor-tree order, keeping every slot bit-identical to
+ * expert_gemv_kernel. */
 template <int kType, int U, bool kSwiGLU, int kCols, bool kTable>
-int launch_group(const void* w, const void* w_up, const void* const* w_table, const void* const* w_up_table,
-                 const float* route_w, float limit, uint64_t expert_bytes, const int32_t* plan, uint32_t groups,
-                 const float* x, uint32_t x_slot, uint32_t slots_per_x, float* y, uint32_t m, uint32_t k,
-                 int zero_dropped, int32_t min_count) {
-  constexpr uint32_t kRows = 4 * kWaves;
+__global__ void __launch_bounds__(kWave* kWaves)
+    expert_group_task_kernel(
+        const uint8_t* __restrict__ w, const uint8_t* __restrict__ w_up,
+        const uint8_t* const* __restrict__ w_table,
+        const uint8_t* const* __restrict__ w_up_table,
+        const float* __restrict__ route_w, float limit,
+        const float* __restrict__ x, float* __restrict__ y, uint32_t m,
+        uint32_t k, const int32_t* __restrict__ plan, uint64_t expert_bytes,
+        uint32_t x_slot, uint32_t slots_per_x, int zero_dropped,
+        int32_t min_count) {
+  using F = Format<kType>;
+  constexpr uint32_t kRows = kWave;
+  constexpr int kMats = kSwiGLU ? 2 : 1;
+  constexpr int kRedCols = kCols < 4 ? kCols : 4;
+  __shared__ union {
+    struct {
+      uint32_t grid[F::kIq1Grid ? NGRID_IQ1S : 1];
+      uint32_t iq2_words[F::kIq2Words ? F::kIq2Words : 1];
+      uint8_t iq2_signs[F::kIq2Words ? 128 : 1];
+    } tab;
+    float red[kWaves / 2][kMats][kRedCols][kWave];
+  } smem;
+  if ((int32_t)blockIdx.y >= plan[0])
+    return;
+  const int32_t* g = plan + 1 + blockIdx.y * kPlanGroup;
+  const int32_t id = g[0];
+  /* A split launch: this pass takes the groups of min_count to kCols slots. */
+  if (min_count > 0 &&
+      (g[1] < min_count || g[1] > kCols || (id < 0 && min_count > 1)))
+    return;
+  const int cols = g[1] < kCols ? g[1] : kCols;
+  /* Slot c of the group is g[2 + c]; reading it from the plan where it is
+   * used keeps a 16-entry copy out of scratch memory. */
+  if (id < 0) {  // dropped slots
+    if (zero_dropped) {
+      for (int c = 0; c < cols; ++c)
+        for (uint32_t r = threadIdx.x; r < kRows; r += blockDim.x)
+          if (blockIdx.x * kRows + r < m)
+            y[(uint64_t)g[2 + c] * m + blockIdx.x * kRows + r] = 0.0f;
+    }
+    return;
+  }
+  if constexpr (F::kIq1Grid) {
+    for (uint32_t i = threadIdx.x; i < NGRID_IQ1S; i += blockDim.x)
+      smem.tab.grid[i] = iq1s_grid_gpu[i];
+    __syncthreads();
+  }
+  if constexpr (F::kIq2Words) {
+    StageIq2<kType>(smem.tab.iq2_words, smem.tab.iq2_signs);
+    __syncthreads();
+  }
+  const Iq2Tab tab{smem.tab.iq2_words, smem.tab.iq2_signs};
+  const int lane = threadIdx.x % kWave;
+  const int t = __builtin_amdgcn_readfirstlane(threadIdx.x / kWave);
+  const uint32_t row0 = blockIdx.x * kRows;
+  const uint32_t row = min(row0 + lane, m - 1);
+  uint32_t x_off[kCols];
+#pragma unroll
+  for (int c = 0; c < kCols; ++c)
+    x_off[c] = (uint32_t)((c < cols ? g[2 + c] : 0) / slots_per_x) * x_slot;
+  const float* x_task = x + 32 * t;
+  const uint32_t blocks_per_row = k / 256;
+  const uint64_t row_bytes = (uint64_t)row * blocks_per_row * F::kBlockBytes;
+  const uint64_t offset = (uint64_t)id * expert_bytes + row_bytes;
+  const uint8_t* base =
+      kTable ? table_row(w_table, id) + row_bytes : w + offset;
+  const uint8_t* base_up =
+      kSwiGLU ? (kTable ? table_row(w_up_table, id) + row_bytes : w_up + offset)
+              : nullptr;
+  float acc[kCols] = {};
+  float acc_up[kCols] = {};
+  uint32_t blk = 0;
+  for (; blk + U <= blocks_per_row; blk += U) {
+    typename F::Raw raw[U];
+    typename F::Raw raw_up[kSwiGLU ? U : 1];
+#pragma unroll
+    for (int u = 0; u < U; ++u) {
+      raw[u] = F::Load(base + (uint64_t)(blk + u) * F::kBlockBytes, t);
+      if constexpr (kSwiGLU)
+        raw_up[u] = F::Load(base_up + (uint64_t)(blk + u) * F::kBlockBytes, t);
+    }
+#pragma unroll
+    for (int u = 0; u < U; ++u) {
+      const float* xb = x_task + (blk + u) * 256;
+      AccCols<F, kCols>(acc, F::Decode(raw[u], t, smem.tab.grid, tab), t, xb,
+                        x_off, cols);
+      if constexpr (kSwiGLU)
+        AccCols<F, kCols>(acc_up, F::Decode(raw_up[u], t, smem.tab.grid, tab),
+                          t, xb, x_off, cols);
+    }
+  }
+  for (; blk < blocks_per_row; ++blk) {
+    const typename F::Raw raw =
+        F::Load(base + (uint64_t)blk * F::kBlockBytes, t);
+    typename F::Raw raw_up{};
+    if constexpr (kSwiGLU)
+      raw_up = F::Load(base_up + (uint64_t)blk * F::kBlockBytes, t);
+    const float* xb = x_task + blk * 256;
+    AccCols<F, kCols>(acc, F::Decode(raw, t, smem.tab.grid, tab), t, xb, x_off,
+                      cols);
+    if constexpr (kSwiGLU)
+      AccCols<F, kCols>(acc_up, F::Decode(raw_up, t, smem.tab.grid, tab), t, xb,
+                        x_off, cols);
+  }
+  /* Done with the LDS codebook; reuse the shared buffer for xor-tree reduction
+   * over the 8 task waves (partner offset 4, then 2, then 1). */
+  __syncthreads();
+  for (int c0 = 0; c0 < kCols; c0 += kRedCols) {
+    constexpr int kChunk = kRedCols;
+#pragma unroll
+    for (int offset = kWaves / 2; offset > 0; offset >>= 1) {
+      if (t >= offset && t < 2 * offset) {
+#pragma unroll
+        for (int j = 0; j < kChunk; ++j) {
+          if (c0 + j < kCols) {
+            smem.red[t - offset][0][j][lane] = acc[c0 + j];
+            if constexpr (kSwiGLU)
+              smem.red[t - offset][1][j][lane] = acc_up[c0 + j];
+          }
+        }
+      }
+      __syncthreads();
+      if (t < offset) {
+#pragma unroll
+        for (int j = 0; j < kChunk; ++j) {
+          if (c0 + j < kCols) {
+            acc[c0 + j] += smem.red[t][0][j][lane];
+            if constexpr (kSwiGLU)
+              acc_up[c0 + j] += smem.red[t][1][j][lane];
+          }
+        }
+      }
+      __syncthreads();
+    }
+  }
+  if (t != 0 || row0 + lane >= m)
+    return;
+#pragma unroll
+  for (int c = 0; c < kCols; ++c) {
+    if (c >= cols)
+      break;
+    const int32_t slot = g[2 + c];
+    float* yr = y + (uint64_t)slot * m;
+    if constexpr (kSwiGLU) {
+      float gv = acc[c];
+      float uv = acc_up[c];
+      if (limit > 0.0f) {
+        uv = fminf(fmaxf(uv, -limit), limit);
+        gv = fminf(gv, limit);
+      }
+      const float h = gv / (1.0f + expf(-gv)) * uv;
+      yr[row0 + lane] = route_w ? route_w[slot] * h : h;
+    } else {
+      yr[row0 + lane] = acc[c];
+    }
+  }
+}
+
+template <int kType, int U, bool kSwiGLU, int kCols, bool kTable, bool kTask,
+          bool kHoist>
+int launch_group_impl(const void* w, const void* w_up,
+                      const void* const* w_table, const void* const* w_up_table,
+                      const float* route_w, float limit, uint64_t expert_bytes,
+                      const int32_t* plan, uint32_t groups, const float* x,
+                      uint32_t x_slot, uint32_t slots_per_x, float* y,
+                      uint32_t m, uint32_t k, int zero_dropped,
+                      int32_t min_count) {
+  constexpr uint32_t kRows = kTask ? kWave : 4 * kWaves;
   const dim3 blocks((m + kRows - 1) / kRows, groups);
   const auto* table = reinterpret_cast<const uint8_t* const*>(w_table);
   const auto* table_up = reinterpret_cast<const uint8_t* const*>(w_up_table);
-  if constexpr (kSwiGLU)
-    expert_group_kernel<kType, U, true, kCols, kTable><<<blocks, kWave * kWaves>>>(
-        static_cast<const uint8_t*>(w), static_cast<const uint8_t*>(w_up), table, table_up, route_w, limit, x, y, m,
-        k, plan, expert_bytes, x_slot, slots_per_x, zero_dropped, min_count);
-  else
-    expert_group_kernel<kType, U, false, kCols, kTable><<<blocks, kWave * kWaves>>>(
-        static_cast<const uint8_t*>(w), nullptr, table, table_up, nullptr, 0.0f, x, y, m, k, plan, expert_bytes,
-        x_slot, slots_per_x, zero_dropped, min_count);
+  if constexpr (kTask) {
+    if constexpr (kSwiGLU)
+      expert_group_task_kernel<kType, U, true, kCols, kTable>
+          <<<blocks, kWave * kWaves>>>(
+              static_cast<const uint8_t*>(w), static_cast<const uint8_t*>(w_up),
+              table, table_up, route_w, limit, x, y, m, k, plan, expert_bytes,
+              x_slot, slots_per_x, zero_dropped, min_count);
+    else
+      expert_group_task_kernel<kType, U, false, kCols, kTable>
+          <<<blocks, kWave * kWaves>>>(
+              static_cast<const uint8_t*>(w), nullptr, table, table_up, nullptr,
+              0.0f, x, y, m, k, plan, expert_bytes, x_slot, slots_per_x,
+              zero_dropped, min_count);
+  } else {
+    if constexpr (kSwiGLU)
+      expert_group_lane_kernel<kType, U, true, kCols, kTable, kHoist>
+          <<<blocks, kWave * kWaves>>>(
+              static_cast<const uint8_t*>(w), static_cast<const uint8_t*>(w_up),
+              table, table_up, route_w, limit, x, y, m, k, plan, expert_bytes,
+              x_slot, slots_per_x, zero_dropped, min_count);
+    else
+      expert_group_lane_kernel<kType, U, false, kCols, kTable, kHoist>
+          <<<blocks, kWave * kWaves>>>(
+              static_cast<const uint8_t*>(w), nullptr, table, table_up, nullptr,
+              0.0f, x, y, m, k, plan, expert_bytes, x_slot, slots_per_x,
+              zero_dropped, min_count);
+  }
   const hipError_t err = hipGetLastError();
   if (err == hipSuccess) return 0;
   fprintf(stderr, "ds41: grouped expert gemv launch failed: %s\n", hipGetErrorString(err));
   return 1;
 }
 
-template <int kType, int U, bool kSwiGLU, int kCols>
-int launch_group(const void* w, const void* w_up, const void* const* w_table, const void* const* w_up_table,
-                 const float* route_w, float limit, uint64_t expert_bytes, const int32_t* plan, uint32_t groups,
-                 const float* x, uint32_t x_slot, uint32_t slots_per_x, float* y, uint32_t m, uint32_t k,
+template <int kType, int U, bool kSwiGLU, int kCols, bool kTask,
+          bool kHoist = false>
+int launch_group(const void* w, const void* w_up, const void* const* w_table,
+                 const void* const* w_up_table, const float* route_w,
+                 float limit, uint64_t expert_bytes, const int32_t* plan,
+                 uint32_t groups, const float* x, uint32_t x_slot,
+                 uint32_t slots_per_x, float* y, uint32_t m, uint32_t k,
                  int zero_dropped, int32_t min_count = 0) {
   if (w_table)
-    return launch_group<kType, U, kSwiGLU, kCols, true>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes,
-                                                        plan, groups, x, x_slot, slots_per_x, y, m, k, zero_dropped,
-                                                        min_count);
-  return launch_group<kType, U, kSwiGLU, kCols, false>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes,
-                                                       plan, groups, x, x_slot, slots_per_x, y, m, k, zero_dropped,
-                                                       min_count);
+    return launch_group_impl<kType, U, kSwiGLU, kCols, true, kTask, kHoist>(
+        w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan,
+        groups, x, x_slot, slots_per_x, y, m, k, zero_dropped, min_count);
+  return launch_group_impl<kType, U, kSwiGLU, kCols, false, kTask, kHoist>(
+      w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, groups,
+      x, x_slot, slots_per_x, y, m, k, zero_dropped, min_count);
 }
 
-/* Group widths for one projection: kSwiGLU is the fused gate/up pass. Only
- * the kernels a mode launches are instantiated. */
-template <int kType, int U, bool kSwiGLU>
-int dispatch_group_widths(const void* w, const void* w_up, const void* const* w_table, const void* const* w_up_table,
-                          const float* route_w, float limit, uint64_t expert_bytes, const int32_t* plan,
-                          uint32_t groups, uint32_t cols, const float* x, uint32_t x_slot, uint32_t slots_per_x,
-                          float* y, uint32_t m, uint32_t k, int zero_dropped, int32_t min_cols) {
-  /* min_cols 2 leaves single slots and dropped slots to the ungrouped kernel. */
+/* Dispatch between lane-major (coalesced weights, one launch up to 8 rows;
+ * kHoist only where hoisted weight decode beats streaming F::Acc under
+ * realistic sparsity) and task-major (scalar activation loads with hoisted
+ * weight decode: all 9..16-row batches, plus IQ1/IQ2_XS/IQ2_S downs). */
+template <int kType, int U, bool kSwiGLU, int UTask = U>
+int dispatch_group_widths(const void* w, const void* w_up,
+                          const void* const* w_table,
+                          const void* const* w_up_table, const float* route_w,
+                          float limit, uint64_t expert_bytes,
+                          const int32_t* plan, uint32_t groups, uint32_t cols,
+                          const float* x, uint32_t x_slot, uint32_t slots_per_x,
+                          float* y, uint32_t m, uint32_t k, int zero_dropped,
+                          int32_t min_cols) {
   const int32_t first = min_cols > 1 ? min_cols : 0;
-  if (cols <= 2)
-    return launch_group<kType, U, kSwiGLU, 2>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan,
-                                              groups, x, x_slot, slots_per_x, y, m, k, zero_dropped, first);
-  /* IQ1_S's fused SwiGLU also splits 3- and 4-column launches. */
-  constexpr bool split4 = kType == 19 && kSwiGLU;
-  if (cols <= 4 && !split4)
-    return launch_group<kType, U, kSwiGLU, 4>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan,
-                                              groups, x, x_slot, slots_per_x, y, m, k, zero_dropped, first);
-  /* Wider launches: groups of one or two slots (most of them when sessions
-   * route apart) take the 2-column kernel and the rest a wider one. The
-   * fused SwiGLU's 6- and 8-column kernels spill registers for every type
-   * but IQ1_M, so those wider groups take the 16-column kernel. */
-  if (launch_group<kType, U, kSwiGLU, 2>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, groups,
-                                         x, x_slot, slots_per_x, y, m, k, zero_dropped, min_cols))
-    return 1;
-  if (cols <= 4)
-    return launch_group<kType, U, kSwiGLU, 4>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan,
-                                              groups, x, x_slot, slots_per_x, y, m, k, zero_dropped, 3);
-  if constexpr (!kSwiGLU || kType == 29) {
+  if constexpr (!kSwiGLU) {
+    constexpr bool kIq1 = kType == 19 || kType == 29;
+    if (cols <= 2)
+      return launch_group<kType, U, false, 2, false, kIq1>(
+          w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan,
+          groups, x, x_slot, slots_per_x, y, m, k, zero_dropped, first);
+    if (cols <= 4) {
+      constexpr bool kUseTask = kType == 29 || kType == 17 || kType == 22;
+      constexpr bool kHoist = kType == 19;
+      return launch_group<kType, kUseTask ? UTask : U, false, 4, kUseTask,
+                          kHoist>(w, w_up, w_table, w_up_table, route_w, limit,
+                                  expert_bytes, plan, groups, x, x_slot,
+                                  slots_per_x, y, m, k, zero_dropped, first);
+    }
+    if (cols <= 6) {
+      constexpr bool kUseTask = kIq1 || kType == 17 || kType == 22;
+      return launch_group<kType, kUseTask ? UTask : U, false, 6, kUseTask>(
+          w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan,
+          groups, x, x_slot, slots_per_x, y, m, k, zero_dropped, first);
+    }
+    if (cols <= 8) {
+      constexpr bool kUseTask = kIq1 || kType == 17 || kType == 22;
+      return launch_group<kType, kUseTask ? UTask : U, false, 8, kUseTask>(
+          w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan,
+          groups, x, x_slot, slots_per_x, y, m, k, zero_dropped, first);
+    }
+    return launch_group<kType, UTask, false, kPlanCols, true>(
+        w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan,
+        groups, x, x_slot, slots_per_x, y, m, k, zero_dropped, first);
+  } else {
+    constexpr bool kHoistGu = kType == 22;
+    if (cols <= 2)
+      return launch_group<kType, U, true, 2, false, kHoistGu>(
+          w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan,
+          groups, x, x_slot, slots_per_x, y, m, k, zero_dropped, first);
+    if (cols <= 4)
+      return launch_group<kType, U, true, 4, false, kHoistGu>(
+          w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan,
+          groups, x, x_slot, slots_per_x, y, m, k, zero_dropped, first);
     if (cols <= 6)
-      return launch_group<kType, U, kSwiGLU, 6>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan,
-                                                groups, x, x_slot, slots_per_x, y, m, k, zero_dropped, 3);
+      return launch_group<kType, U, true, 6, false, kHoistGu>(
+          w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan,
+          groups, x, x_slot, slots_per_x, y, m, k, zero_dropped, first);
     if (cols <= 8)
-      return launch_group<kType, U, kSwiGLU, 8>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan,
-                                                groups, x, x_slot, slots_per_x, y, m, k, zero_dropped, 3);
+      return launch_group<kType, U, true, 8, false, false>(
+          w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan,
+          groups, x, x_slot, slots_per_x, y, m, k, zero_dropped, first);
+    return launch_group<kType, UTask, true, kPlanCols, true>(
+        w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan,
+        groups, x, x_slot, slots_per_x, y, m, k, zero_dropped, first);
   }
-  return launch_group<kType, U, kSwiGLU, kPlanCols>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan,
-                                                    groups, x, x_slot, slots_per_x, y, m, k, zero_dropped, 3);
 }
 
-/* UDown: blocks loaded ahead by the down projection. Its 2,304-value rows
- * are 9 blocks; loading a whole row at once measured faster for every group
- * width (the single-slot kernel was slower with it). */
-template <int kType, int U, int UDown = U>
-int dispatch_group(const void* w, const void* w_up, const void* const* w_table, const void* const* w_up_table,
-                   const float* route_w, float limit, uint64_t expert_bytes, const int32_t* plan, uint32_t groups,
-                   uint32_t cols, const float* x, uint32_t x_slot, uint32_t slots_per_x, float* y, uint32_t m,
+template <int kType, int U, int UDown = U, int UTask = U>
+int dispatch_group(const void* w, const void* w_up, const void* const* w_table,
+                   const void* const* w_up_table, const float* route_w,
+                   float limit, uint64_t expert_bytes, const int32_t* plan,
+                   uint32_t groups, uint32_t cols, const float* x,
+                   uint32_t x_slot, uint32_t slots_per_x, float* y, uint32_t m,
                    uint32_t k, int zero_dropped, int32_t min_cols = 1) {
   if (w_up)
-    return dispatch_group_widths<kType, U, true>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan,
-                                                 groups, cols, x, x_slot, slots_per_x, y, m, k, zero_dropped, min_cols);
-  return dispatch_group_widths<kType, UDown, false>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan,
-                                                    groups, cols, x, x_slot, slots_per_x, y, m, k, zero_dropped,
-                                                    min_cols);
+    return dispatch_group_widths<kType, U, true, UTask>(
+        w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan,
+        groups, cols, x, x_slot, slots_per_x, y, m, k, zero_dropped, min_cols);
+  return dispatch_group_widths<kType, UDown, false, UDown>(
+      w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, groups,
+      cols, x, x_slot, slots_per_x, y, m, k, zero_dropped, min_cols);
 }
 
 template <int kType, int U, bool kTable, bool kPair = false>
@@ -1088,40 +1538,50 @@ extern "C" int ds41_v41_gemv_experts_grouped(int type, const void* w, const void
   if (!plan || slots == 0 || slots > DS41_V41_EXPERT_PLAN_SLOTS || cols == 0 || cols > kPlanCols ||
       slots_per_x == 0 || m == 0 || k % 256 != 0)
     return 1;
-  /* IQ1 experts of a single slot take the ungrouped kernel, which pairs
-   * down rows and loads its expert id directly (24 slots of 4 routed-apart
-   * rows: IQ1_S 562 -> 509 us gate/up, 298 -> 271 us down). */
-  if (type == 19 || type == 29) {
+  /* Wide (> 8 rows) fused gate+up runs task-major; peel single-slot experts
+   * onto the coalesced ungrouped kernel so only count >= 2 groups run
+   * task-major. Narrower widths (<= 8 rows) stay in a single launch. */
+  const bool peel_single = w_up != nullptr && cols > 8;
+  if (peel_single) {
     if (dispatch(type, w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan + 1 + slots * kPlanGroup,
                  slots, x, x_slot, slots_per_x, y, m, k, zero_dropped))
       return 1;
     if (cols == 1) return 0;
   }
+  const int32_t min_cols = peel_single ? 2 : 1;
   switch (type) {
   case 10:
-    return dispatch_group<10, 1>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
-                                 x_slot, slots_per_x, y, m, k, zero_dropped);
+    return dispatch_group<10, 1>(w, w_up, w_table, w_up_table, route_w, limit,
+                                 expert_bytes, plan, slots, cols, x, x_slot,
+                                 slots_per_x, y, m, k, zero_dropped, min_cols);
   case 12:
-    return dispatch_group<12, 1>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
-                                 x_slot, slots_per_x, y, m, k, zero_dropped);
+    return dispatch_group<12, 1>(w, w_up, w_table, w_up_table, route_w, limit,
+                                 expert_bytes, plan, slots, cols, x, x_slot,
+                                 slots_per_x, y, m, k, zero_dropped, min_cols);
   case 19:
-    return dispatch_group<19, 2, 9>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
-                                 x_slot, slots_per_x, y, m, k, zero_dropped, 2);
+    return dispatch_group<19, 2, 9>(
+        w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots,
+        cols, x, x_slot, slots_per_x, y, m, k, zero_dropped, min_cols);
   case 29:
-    return dispatch_group<29, 1, 9>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
-                                 x_slot, slots_per_x, y, m, k, zero_dropped, 2);
+    return dispatch_group<29, 1, 9>(
+        w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots,
+        cols, x, x_slot, slots_per_x, y, m, k, zero_dropped, min_cols);
   case 16:
-    return dispatch_group<16, 2, 9>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
-                                 x_slot, slots_per_x, y, m, k, zero_dropped);
+    return dispatch_group<16, 2, 9, 1>(
+        w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots,
+        cols, x, x_slot, slots_per_x, y, m, k, zero_dropped, min_cols);
   case 17:
-    return dispatch_group<17, 2>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
-                                 x_slot, slots_per_x, y, m, k, zero_dropped);
+    return dispatch_group<17, 2>(w, w_up, w_table, w_up_table, route_w, limit,
+                                 expert_bytes, plan, slots, cols, x, x_slot,
+                                 slots_per_x, y, m, k, zero_dropped, min_cols);
   case 22:
-    return dispatch_group<22, 2>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
-                                 x_slot, slots_per_x, y, m, k, zero_dropped);
+    return dispatch_group<22, 2>(w, w_up, w_table, w_up_table, route_w, limit,
+                                 expert_bytes, plan, slots, cols, x, x_slot,
+                                 slots_per_x, y, m, k, zero_dropped, min_cols);
   case 18:
-    return dispatch_group<18, 2>(w, w_up, w_table, w_up_table, route_w, limit, expert_bytes, plan, slots, cols, x,
-                                 x_slot, slots_per_x, y, m, k, zero_dropped);
+    return dispatch_group<18, 2>(w, w_up, w_table, w_up_table, route_w, limit,
+                                 expert_bytes, plan, slots, cols, x, x_slot,
+                                 slots_per_x, y, m, k, zero_dropped, min_cols);
   default:
     return 1;
   }

@@ -7,6 +7,13 @@ Notable user-facing changes are recorded here. Versions follow `version` in
 
 ### Performance
 
+* **decode:** grouped routed-expert GEMV kernels now use uniform SGPR column
+  offsets (eliminating register spills so 2–8-row passes run in one launch) and
+  a task-major scalar-activation kernel for wide 9–16-row batches and
+  `IQ1`/`IQ2_XS`/`IQ2_S` down projections; outputs are unchanged. Coding-agent
+  replay decode is 1.0% faster (49/53 requests faster) and 16-row grouped passes
+  are 10–28% faster
+  ([E136](docs/models/deepseek-v4.1-flash/EXPERIMENTS.md#e136--grouped-expert-gemv-uniform-sgpr-offsets-hoisted-decode-and-task-major-dispatch-retained)).
 * **decode:** on streamed builds, resident experts' `down` projections now
   run alongside their `gate+up` during SSD read stalls on decode and
   verification batches, and grouped layers plan routes once instead of twice;
