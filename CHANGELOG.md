@@ -5,6 +5,46 @@ Notable user-facing changes are recorded here. Versions follow `version` in
 
 ## Unreleased
 
+## 0.2.2 (2026-11-23)
+
+Built on Gufo v0.35.0 (`0260e116`); needs extension API 0.3.20 or later.
+
+### Features
+
+* **windows:** the manifest lists Windows among the supported platforms, so a
+  Gufo `windows-release` build discovers the extension and serves Gemma 4.
+  Tested on Windows 11 with Strix Halo `gfx1151` and TheRock 10.0.0, on a Gufo
+  fork; there, Gemma 4 captures longer than about 24K tokens need 1 GiB cache
+  segments, a change in Gufo core
+  ([#9](https://github.com/franzmoca/gemma4-gufo-extension/pull/9), by
+  [@akamotaco](https://github.com/akamotaco)).
+
+### Bug Fixes
+
+* **tokenization:** special-token spellings in request text (message
+  content, thoughts, tool declarations, tool call names and arguments, and
+  tool responses) tokenize as text. Before, a message containing `<turn|>`,
+  `<|tool_call>` or another special-token spelling was tokenized as that
+  special token, so request text could end a turn or start a tool call.
+* **prompt cache:** cache copies use the gather kernel only where the device
+  address of a pointer equals the pointer, and copy the other runs with
+  `hipMemcpyAsync`. On Windows, HIP maps registered host memory at a different
+  device address, and the gather read and wrote the wrong memory. Linux takes
+  the same path as before
+  ([#9](https://github.com/franzmoca/gemma4-gufo-extension/pull/9), by
+  [@akamotaco](https://github.com/akamotaco)).
+* **prompt cache:** a failed cache copy skips its checkpoint without failing
+  the request. Before, its HIP error stayed behind, and the next kernel launch
+  check failed the request with it. The failure is logged as
+  `event=cache_copy_failed` with the error, the size and both pointers
+  ([#9](https://github.com/franzmoca/gemma4-gufo-extension/pull/9), by
+  [@akamotaco](https://github.com/akamotaco)).
+* **vision:** the padded vision MLP weights are padded on the host and uploaded
+  with one copy. On Windows, the 2D copy from the memory-mapped GGUF failed
+  while reporting success, so the weights stayed zero and answers ignored the
+  image ([#9](https://github.com/franzmoca/gemma4-gufo-extension/pull/9), by
+  [@akamotaco](https://github.com/akamotaco)).
+
 ## 0.2.1 (2026-11-20)
 
 Built on Gufo v0.35.0 (`0260e116`); needs extension API 0.3.20 or later.

@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <gufo/ext/host.hpp>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -50,12 +51,11 @@ void CopyRun(const rocm::CopyRun& run, hipStream_t stream) {
       hipMemcpyAsync(run.to, run.from, run.bytes, hipMemcpyDefault, stream);
   if (result != hipSuccess) {
     (void)hipGetLastError();
-    std::fprintf(stderr,
-                 "[gemma4] event=cache_copy_failed error=%s bytes=%zu from=%s "
-                 "to=%s\n",
-                 hipGetErrorName(result), run.bytes, Describe(run.from).c_str(),
-                 Describe(run.to).c_str());
-    std::fflush(stderr);
+    server::Logger::Warn(
+        "gemma4",
+        std::string("event=cache_copy_failed error=") +
+            hipGetErrorName(result) + " bytes=" + std::to_string(run.bytes) +
+            " from=" + Describe(run.from) + " to=" + Describe(run.to));
     throw std::runtime_error(hipGetErrorString(result));
   }
 }

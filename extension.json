@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "name": "gemma4",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "api_version": ">= 0.3.20",
   "entry": "gemma4_register",
   "registration_target": "gufo_gemma4",
