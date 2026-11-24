@@ -127,10 +127,10 @@ prefill batch, DSpark verification or a joint evaluation):
    joint rows) that both hit and miss, upload **hit and miss row arrays**.
    Each keeps the route positions with −1 for the other's experts, so the
    launches are split: while the reads stream, an overlap callback computes
-   the shared expert and the resident experts' gate+up; after the reads
-   join, a second launch completes the read rows. Every row keeps its
-   single-launch arithmetic, so outputs are bit-identical to one launch.
-   Other batches launch once over all routes.
+   the shared expert and the resident experts' gate+up and down; after the
+   reads join, a second launch completes the read rows' gate+up and down.
+   Every row keeps its single-launch arithmetic, so outputs are bit-identical
+   to one launch. Other batches launch once over all routes.
 5. Run the phase's reads, then copy each admitted expert from its stage row
    into a slot.
 

@@ -140,9 +140,9 @@ temperature, else the host sampler).
    (the host copies the 6 routes on `routes_stream` and waits, counts hits
    and misses, resolves the prefetch job, uploads changed table rows and
    hit/miss arrays, and runs the read phase, whose overlap callback queues
-   the hit experts' fused gate+up+SwiGLU and, after a miss, the next
-   layer's prediction, then waits for the reads); routed gate+up over the
-   miss rows, routed down over all six slots; hc expand-sum.
+   the hit experts' fused gate+up+SwiGLU and down projections and, after a
+   miss, the next layer's prediction, then waits for the reads); routed
+   gate+up and down over the miss rows; hc expand-sum.
 3. **Close**: final collapse and norm, output head (2.3 ms), device argmax
    rows for verification, logits download (517 KB per row),
    `hipDeviceSynchronize`.

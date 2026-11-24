@@ -168,6 +168,7 @@ Measurements first recorded in the backlog, without an E-number, are in
 | [E132](#e132--swar-sign-helpers-and-the-llamacpp-kernel-fixes-retained) | vendored kernels | retained | Gufo #1295's SWAR `__vcmpne4`/`__vsub4` in the vendored helpers: bit-identical (exhaustive check), 8-14% fewer instructions in the IQ1_M, IQ2_XS and IQ2_S MMQ tiles and 29% in 60 mmvq kernels. Kernel traces of streamed `UD-IQ2_XXS` and resident `IQ1_M` with DSpark launch none of them, so served speed cannot change. llama.cpp's MMQ out-of-bounds and few-row fixes do not apply to the vendored code; its Q8_1 sum change alters rounding in paths production does not run, and is not taken. |
 | [E133](#e133--q8_0-matrix-cores-at-verification-widths-rejected) | decode kernels | rejected | Gufo #1321's packed-K16 Q8_0 WMMA for small batches, as a ceiling first: the split GEMV's Q8_0 decode shapes cost 1.00/1.03/1.07/1.10 × one token's time at 2/4/6/8 rows (bit-exact, DRAM-cold) and 1.27/1.40 × at 12/16. Over the sampled 1-6-row cycle mix a kernel at the read bound saves at most ~0.5% of decode, and int8 activations change rounding. Not built. |
 | [E134](#e134--wide-prefill-passes-on-demand-retained) | prefill / streaming | retained | A streamed engine runs prompts with at least 8,192 uncached tokens in 4,096-row passes, mapping the extra rows (1.47 GB with pinned host rows) after the expert cache releases room, and returning them at the prompt's end. Fresh 17.7K/21K prompts −5.1%/−4.8%, everything else and the expert cache at parity, identical replies; `--prefill-batch` is removed. |
+| [E135](#e135--two-wave-decode-overlap-resident-experts-down-during-ssd-reads-retained) | decode / streaming | retained | On streamed decode and verification batches (1–16 rows), resident experts' `down` projection runs during the SSD read stall behind their `gate+up` (matching E84 on prefill), leaving only missed slots' `down` after the reads and dropping the redundant second `expert_plan` on grouped layers. Coding-agent replay ABBA: decode 144.05/144.62 → 143.10/142.44 s (−1.1%, −3.1 to −5.4% on warming turns); AR greedy chat+code 57.70/57.53 → 57.14/57.21 s (−0.8%), identical replies and drafts. |
 
 ## Milestones
 
@@ -5380,6 +5381,53 @@ With wide passes on demand, `--prefill-batch` is removed: its other values
 served only experiments, and builds without `--stream-experts` keep 2,048
 rows (fewer when memory is short).
 [Runs](artifacts/2026-11-24-wide-prefill/summary.txt).
+
+## E135 — two-wave decode overlap: resident experts' down during SSD reads (retained)
+
+E84 overlapped the resident experts' `down` projection with SSD reads on
+prefill batches (`w.f16`), but decode and verification batches (`w.small`,
+1–16 rows) still ran only resident `gate+up` in `streamed_overlap`, waited
+for the reads, built a second full-route `expert_plan` on multi-row layers,
+and ran `down` over every route. On multi-row layers that all hit, `moe()`
+also built `expert_plan` twice from `d->route_ids`.
+
+`streamed_overlap` now runs the resident experts' `down` projection right
+after their `gate+up` on the same hit IDs / `plan_hit` (and `info->table[2]`)
+while the reads stream, and the post-read pass runs only the missed slots'
+`down` (`zero_dropped = 0`) on the miss IDs / `expert_plan_split[1]`. Grouped
+layers build one `expert_plan` per pass instead of two. Every slot is written
+once with the same per-slot arithmetic, so outputs are bit-identical.
+
+Built with `nix build` at Gufo `60c48924` (base `9b00e40`). Streamed
+`UD-IQ2_XXS` with `MXFP8` Engram and vision, one session, context 65,536,
+fresh server per arm, order base, candidate, candidate, base:
+
+- **Coding-agent replay (DSpark, 53 requests, default sampling, seed 1234):**
+
+| Run | Arm | Decode (s) | Decode (tok/s) | Prefill (s) | Route hits | Cache (GiB) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| r1 | base | 144.05 | 38.24 | 34.46 | 98.7% | 101.83 |
+| r2 | candidate | 143.10 | 38.50 | 35.20 | 98.6% | 99.99 |
+| r3 | candidate | 142.44 | 38.68 | 34.83 | 98.7% | 101.92 |
+| r4 | base | 144.62 | 38.09 | 34.74 | 98.7% | 102.04 |
+
+All 53 replies, 5,509 generated tokens and 2,939 / 3,519 drafted/accepted
+counts match across every run. Decode is −1.1% overall (−1.3% on the
+cache-matched `r3` run; `r2` still beat both base runs despite ~2 GiB less
+cache) and −3.1% to −5.4% on the early cache-warming turns.
+
+- **AR greedy (`--speculative off`, chat + 3.5K code, 512 tokens each):**
+
+| Run | Arm | Chat (s) | Code (s) | Total decode (s) | Route hits | Cache (GiB) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| r1 | base | 29.48 | 28.22 | 57.70 | 92.0% | 106.33 |
+| r2 | candidate | 29.15 | 27.99 | 57.14 | 92.2% | 106.69 |
+| r3 | candidate | 29.10 | 28.12 | 57.21 | 92.2% | 106.69 |
+| r4 | base | 29.31 | 28.23 | 57.53 | 92.2% | 106.69 |
+
+Replies are identical; AR decode is −0.8% (−0.9% on the cold chat turn,
+−0.6% on the code turn). Retained.
+[Runs](artifacts/2026-11-24-decode-down-overlap/runs.json).
 
 ## Backlog measurements without an E-number
 

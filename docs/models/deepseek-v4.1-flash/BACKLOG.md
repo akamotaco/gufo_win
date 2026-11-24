@@ -441,6 +441,7 @@ in EXPERIMENTS.md.
 
 | Item | Result | Ref |
 | --- | --- | --- |
+| Two-wave decode overlap (resident `down` during SSD reads + single `expert_plan`) | Resident experts' `down` runs behind their `gate+up` during read stalls on 1–16-row batches; coding-agent replay decode −1.1% (−3.1 to −5.4% on warming turns), AR greedy −0.8%, identical replies | E135 |
 | 4,096-token prefill batches for streamed builds (item 42) | Wide passes on demand: the rows past 2,048 are mapped after the expert cache releases room and returned at the prompt's end; fresh 17.7K/21K prompts −5.1%/−4.8%, the expert cache and everything else at parity; `--prefill-batch` removed | E134 |
 | Streamed expert-pruned builds (item 41) | Coder streams with the kept experts' ranking; scores byte-identical to resident; default cache at resident speed, 30 GiB cache tg128 14.5 → 21.8 tok/s as it warms | E96 |
 | Higher-precision Engram tables (item 14) | MXFP8 reads cost the same as IQ4_NL (one random read per row); host dequantization 9× faster, bit-identical; served gaps follow the text; Q5_K/Q6_K tables untested | E107 |

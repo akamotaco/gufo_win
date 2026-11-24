@@ -1446,6 +1446,7 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
     uint16_t* mid16 = nullptr;
     int down_type = 0;
     bool gate_up_done = false;
+    bool down_done = false;
     bool shared_done = false;
     ds41_expert_overlap info{};
   };
@@ -1484,19 +1485,45 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
                                  plan_bounds, plan_tiles, n_tiles, nullptr, 0.0f, w.d->down6, 0, kDim,
                                  DS41_N_FF_EXP, down_table, nullptr) == 0;
     }
-    if (w.n == 1)
-      return ds41_v41_gemv_experts_swiglu(w.gate_type, info->table[0], info->table[1], expert_bytes,
-                                          info->hit_ids, w.used, w.d->xn, 0, 1, w.d->route_w, kSwigluLimit,
-                                          w.d->mid6, DS41_N_FF_EXP, kDim,
-                                          static_cast<const void* const*>(info->table[0]),
-                                          static_cast<const void* const*>(info->table[1]), 1) == 0;
-    if (ds41_v41_expert_plan(info->hit_ids, w.rows, w.plan_hit))
+    if (w.n == 1) {
+      if (ds41_v41_gemv_experts_swiglu(
+              w.gate_type, info->table[0], info->table[1], expert_bytes,
+              info->hit_ids, w.used, w.d->xn, 0, 1, w.d->route_w, kSwigluLimit,
+              w.d->mid6, DS41_N_FF_EXP, kDim,
+              static_cast<const void* const*>(info->table[0]),
+              static_cast<const void* const*>(info->table[1]), 0))
+        return false;
+      const uint64_t down_block = expert_block_bytes(w.down_type);
+      if (!down_block)
+        return true;
+      const uint64_t down_bytes =
+          (uint64_t)kDim * DS41_N_FF_EXP / 256 * down_block;
+      w.down_done = true;
+      return ds41_v41_gemv_experts(
+                 w.down_type, info->table[2], down_bytes, info->hit_ids, w.used,
+                 w.d->mid6, DS41_N_FF_EXP, 1, w.d->down6, kDim, DS41_N_FF_EXP,
+                 static_cast<const void* const*>(info->table[2]), 0) == 0;
+    }
+    if (ds41_v41_expert_plan(info->hit_ids, w.rows, w.plan_hit) ||
+        ds41_v41_gemv_experts_grouped(
+            w.gate_type, info->table[0], info->table[1], w.d->route_w,
+            kSwigluLimit, expert_bytes, w.plan_hit, w.rows, w.n, w.d->xn, kDim,
+            w.used, w.d->mid6, DS41_N_FF_EXP, kDim,
+            static_cast<const void* const*>(info->table[0]),
+            static_cast<const void* const*>(info->table[1]), 0))
       return false;
-    return ds41_v41_gemv_experts_grouped(w.gate_type, info->table[0], info->table[1], w.d->route_w,
-                                         kSwigluLimit, expert_bytes, w.plan_hit, w.rows, w.n, w.d->xn, kDim,
-                                         w.used, w.d->mid6, DS41_N_FF_EXP, kDim,
-                                         static_cast<const void* const*>(info->table[0]),
-                                         static_cast<const void* const*>(info->table[1]), 1) == 0;
+    const uint64_t down_block = expert_block_bytes(w.down_type);
+    if (!down_block)
+      return true;
+    const uint64_t down_bytes =
+        (uint64_t)kDim * DS41_N_FF_EXP / 256 * down_block;
+    w.down_done = true;
+    return ds41_v41_gemv_experts_grouped(
+               w.down_type, info->table[2], nullptr, nullptr, 0.0f, down_bytes,
+               w.plan_hit, w.rows, w.n, w.d->mid6, DS41_N_FF_EXP, 1,
+               w.d->down6, kDim, DS41_N_FF_EXP,
+               static_cast<const void* const*>(info->table[2]), nullptr,
+               0) == 0;
   };
   if (d->engine->expert_store) {
     /* Decode batches queue the shared expert, which reads none of the
@@ -1541,15 +1568,34 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
       ds41_mmq_set_routed_classes(nullptr, 0, nullptr, nullptr);
     }
   } routed_bounds;
-  if (grouped && ds41_v41_expert_plan(d->route_ids, (uint32_t)rows, d->expert_plan)) return false;
+  const int32_t* small_plan = d->expert_plan;
+  if (grouped) {
+    const int32_t* plan_ids =
+        work.gate_up_done ? work.info.miss_ids : d->route_ids;
+    int32_t* plan_dst =
+        work.gate_up_done ? d->expert_plan_split[1] : d->expert_plan;
+    if (ds41_v41_expert_plan(plan_ids, (uint32_t)rows, plan_dst))
+      return false;
+    small_plan = plan_dst;
+    if (work.gate_up_done && !work.down_done &&
+        ds41_v41_expert_plan(d->route_ids, (uint32_t)rows, d->expert_plan))
+      return false;
+  }
   /* y = W x over the planned slots (with w_up: the routed SwiGLU into mid6). */
-  const auto grouped_gemv = [&](int type, const void* w, const void* w_up, const float* x, uint32_t x_slot,
-                                uint32_t slots_per_x, float* y, uint32_t m, uint32_t k,
-                                const void* const* w_table = nullptr, const void* const* w_up_table = nullptr) {
-    return ds41_v41_gemv_experts_grouped(type, w, w_up, w_up ? d->route_w : nullptr, w_up ? kSwigluLimit : 0.0f,
-                                         (uint64_t)m * k / 256 * expert_block_bytes(type), d->expert_plan,
-                                         (uint32_t)rows, n, x, x_slot, slots_per_x, y, m, k, w_table, w_up_table,
-                                         1) == 0;
+  const auto grouped_gemv = [&](int type, const void* w, const void* w_up,
+                                const float* x, uint32_t x_slot,
+                                uint32_t slots_per_x, float* y, uint32_t m,
+                                uint32_t k,
+                                const void* const* w_table = nullptr,
+                                const void* const* w_up_table = nullptr,
+                                const int32_t* plan = nullptr,
+                                int zero_dropped = 1) {
+    return ds41_v41_gemv_experts_grouped(
+               type, w, w_up, w_up ? d->route_w : nullptr,
+               w_up ? kSwigluLimit : 0.0f,
+               (uint64_t)m * k / 256 * expert_block_bytes(type),
+               plan ? plan : d->expert_plan, (uint32_t)rows, n, x, x_slot,
+               slots_per_x, y, m, k, w_table, w_up_table, zero_dropped) == 0;
   };
   const int32_t* plan_rows = d->routed_plan;
   int32_t* plan_bounds = d->routed_plan + rows;
@@ -1607,13 +1653,10 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
                                        d->route_w, kSwigluLimit, d->mid6, DS41_N_FF_EXP, kDim, gate_table,
                                        up_table, work.gate_up_done ? 0 : 1))
         return false;
-    } else {
-      if (ds41_v41_expert_plan(ids, (uint32_t)rows, d->expert_plan_split[1])) return false;
-      if (ds41_v41_gemv_experts_grouped(gate_type, gate, up, d->route_w, kSwigluLimit, expert_bytes,
-                                        d->expert_plan_split[1], (uint32_t)rows, n, d->xn, kDim, used,
-                                        d->mid6, DS41_N_FF_EXP, kDim, gate_table, up_table,
-                                        work.gate_up_done ? 0 : 1))
-        return false;
+    } else if (!grouped_gemv(gate_type, gate, up, d->xn, kDim, used, d->mid6,
+                             DS41_N_FF_EXP, kDim, gate_table, up_table,
+                             small_plan, work.gate_up_done ? 0 : 1)) {
+      return false;
     }
   } else if (grouped && gate_type == up_type) {
     if (!grouped_gemv(gate_type, gate, up, d->xn, kDim, used, d->mid6, DS41_N_FF_EXP, kDim, gate_table, up_table))
@@ -1670,13 +1713,18 @@ bool moe(ds41_decoder* d, uint32_t il, uint32_t n) {
   if (f16_down && !f16_gate && ds41_v41_to_half(d->mid6, mid16, (uint64_t)rows * DS41_N_FF_EXP)) return false;
   /* Each (token, slot) row multiplies its own expert's down projection. */
   if (grouped) {
-    if (!grouped_gemv(down_type, down, nullptr, d->mid6, DS41_N_FF_EXP, 1, d->down6, kDim, DS41_N_FF_EXP,
-                      down_table))
+    if (!grouped_gemv(down_type, down, nullptr, d->mid6, DS41_N_FF_EXP, 1,
+                      d->down6, kDim, DS41_N_FF_EXP, down_table, nullptr,
+                      work.down_done ? small_plan : d->expert_plan,
+                      work.down_done ? 0 : 1))
       return false;
   } else if (small) {
     int status = 0;
-    if (!expert_gemv(down_type, down, d->route_ids, rows, d->mid6, true, d->down6, kDim, DS41_N_FF_EXP, &status,
-                     down_table))
+    const int32_t* down_ids =
+        work.down_done ? work.info.miss_ids : d->route_ids;
+    if (!expert_gemv(down_type, down, down_ids, rows, d->mid6, true, d->down6,
+                     kDim, DS41_N_FF_EXP, &status, down_table,
+                     work.down_done ? 0 : 1))
       status = streamed ? 1
                         : ds41_mmq_moe_vec_typed(down_type, down, d->mid6, d->route_ids, d->down6, kDim,
                                                  DS41_N_FF_EXP, rows, n_expert(d), 1, 0);

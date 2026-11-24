@@ -7,6 +7,12 @@ Notable user-facing changes are recorded here. Versions follow `version` in
 
 ### Performance
 
+* **decode:** on streamed builds, resident experts' `down` projections now
+  run alongside their `gate+up` during SSD read stalls on decode and
+  verification batches, and grouped layers plan routes once instead of twice;
+  outputs are unchanged. Coding-agent replay decode is 1.1% faster (3–5% on
+  cache-warming turns) and AR greedy decode 0.8% faster
+  ([E135](docs/models/deepseek-v4.1-flash/EXPERIMENTS.md#e135--two-wave-decode-overlap-resident-experts-down-during-ssd-reads-retained)).
 * **sampling:** tool calls and other output under a JSON grammar sample on
   the GPU, like unconstrained text, instead of building the distribution
   on the host; outputs are unchanged. On a coding-agent replay decode is
