@@ -3,9 +3,10 @@
 Notable user-facing changes are recorded here. Versions follow `version` in
 [extension.json](extension.json).
 
-## Unreleased
+## 0.5.0 (2026-11-24)
 
-Needs extension API 0.3.43 (Gufo's experimental expert store, gufo-org/gufo#1318).
+Built on upstream Gufo `60c48924`; needs extension API 0.3.43 or later (Gufo's
+experimental expert store, gufo-org/gufo#1318).
 
 ### Features
 

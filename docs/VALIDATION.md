@@ -80,6 +80,18 @@ again.
 
 ## Functional checks
 
+Release 0.5.0, November 24, 2026, on streamed `UD-IQ2_XXS` with the `MXFP8` Engram,
+DSpark and the vision projector, built at Gufo `60c48924` and run with Gufo's runner at
+the same revision:
+
+- With two sessions, the `conversation`, `tools`, `long-context`, `cache` (disk restart
+  included), `image-inputs` and `reasoning-budget` suites passed. After them,
+  `tool-images` fails its text-array replay as in 0.4.0 (83 of 86 tokens restored);
+  alone it passes.
+- The 53-request Pi coding-agent replay gave E130's replies and drafts (3,787 drafted,
+  3,110 accepted); against 0.4.0, replies 44, 45 and 49 differ, as E130 records for
+  Gufo `60c48924`.
+
 Release 0.4.0, November 23, 2026, on streamed `UD-IQ2_XXS` with the `MXFP8` Engram,
 DSpark and the vision projector, built at Gufo `e7e38411` and run with Gufo's runner at
 the same revision:
