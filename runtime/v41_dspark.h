@@ -139,6 +139,13 @@ bool ds41_decoder_sample(ds41_decoder* d, uint32_t row,
                          double u2, ds41_v41_sample_result* out);
 /* ds41_v41_softmax_totals on the same resident row. */
 bool ds41_decoder_softmax_totals(ds41_decoder* d, uint32_t row, float temperature, double* maximum, double* sum);
+/* Copy resident logit row `row` to `out` (DS41_N_VOCAB floats). */
+bool ds41_decoder_copy_logits(ds41_decoder* d, uint32_t row, float* out);
+/* ds41_decoder_eval of `n` tokens with optional device argmax and optional
+ * host logits download (logits may be NULL when logit_rows <= 64). */
+int ds41_decoder_eval_argmax(ds41_decoder* d, const int* tokens, uint32_t n,
+                             float* logits, uint32_t logit_rows,
+                             int32_t* argmax);
 /* Device features [rows][3 * dim] of positions [*pos0, *pos0 + *rows). */
 const float* ds41_decoder_features(const ds41_decoder* d, uint32_t* pos0, uint32_t* rows);
 /* Row-major out[t] = W x[t] for a [rows, k] weight of GGUF `type`. */

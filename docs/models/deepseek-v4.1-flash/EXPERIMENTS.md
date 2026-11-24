@@ -170,6 +170,7 @@ Measurements first recorded in the backlog, without an E-number, are in
 | [E134](#e134--wide-prefill-passes-on-demand-retained) | prefill / streaming | retained | A streamed engine runs prompts with at least 8,192 uncached tokens in 4,096-row passes, mapping the extra rows (1.47 GB with pinned host rows) after the expert cache releases room, and returning them at the prompt's end. Fresh 17.7K/21K prompts −5.1%/−4.8%, everything else and the expert cache at parity, identical replies; `--prefill-batch` is removed. |
 | [E135](#e135--two-wave-decode-overlap-resident-experts-down-during-ssd-reads-retained) | decode / streaming | retained | On streamed decode and verification batches (1–16 rows), resident experts' `down` projection runs during the SSD read stall behind their `gate+up` (matching E84 on prefill), leaving only missed slots' `down` after the reads and dropping the redundant second `expert_plan` on grouped layers. Coding-agent replay ABBA: decode 144.05/144.62 → 143.10/142.44 s (−1.1%, −3.1 to −5.4% on warming turns); AR greedy chat+code 57.70/57.53 → 57.14/57.21 s (−0.8%), identical replies and drafts. |
 | [E136](#e136--grouped-expert-gemv-uniform-sgpr-offsets-hoisted-decode-and-task-major-dispatch-retained) | decode kernels | retained | Replaced per-column 64-bit pointer arrays in the grouped expert GEMV with uniform SGPR `x_off[kCols]`, eliminating spills at 6–8 columns so 2–8-row `gate+up` runs in one launch without splitting, and added a task-major kernel (`expert_group_task_kernel`, scalar activation loads, hoisted weight decode, LDS xor-tree reduction) for 9–16-row batches and `IQ1`/`IQ2_XS`/`IQ2_S` downs. Bit-exact on all 10 formats. Coding-agent replay ABBA: decode 142.10/142.69 → 140.90/141.09 s (−1.0%, 49/53 requests faster, all buckets faster), identical replies and drafts; standalone 16-row batches −10% to −28%. |
+| [E137](#e137--lazy-logits-download-persistent-engram-pool-and-drafter-pass-cleanups-retained) | host / drafter | retained | Deferred logits D2H downloads and added 1-row device argmax across single- and multi-session decode (materializing lazily only for host fallback, snapshots, logprobs or cache capture), replaced per-step `std::async`/`std::thread` Engram spawns with a persistent FIFO worker pool, added `ds41_v41_init_hc` to replace 4× `copy_rows` + `one_hot` upload, and cleaned up the DSpark drafter (`q_a`+`kv` `gemv_pair`, side-stream `hc_mix`, coalesced pinned staging). AR greedy ABBA: 57.17/57.10 → 56.95/56.92 s (−0.35%, −0.20 ms/tok); traced drafter pass 7.93 → 7.79 ms; DSpark agent/greedy within cache/policy noise, identical replies; 2-session `conversation`/`batch`/`logprobs`/`cache` suites pass. |
 
 ## Milestones
 
@@ -5487,6 +5488,58 @@ both cache-matched pairs faster: `r1` vs `r3` −1.01 s, `r4` vs `r2` −1.79 s)
 with gains in every batch-width bucket (1–2 rows −1.2%, 2–3 rows −1.3%, 3–4
 rows −0.2%, 4–5 rows −0.9%, 5+ rows −1.5%). Retained.
 [Runs](artifacts/2026-11-24-grouped-expert-gemv/runs.json).
+
+## E137 — lazy logits download, persistent Engram pool and drafter pass cleanups (retained)
+
+Addresses [BACKLOG.md](BACKLOG.md) item 19 and drafter launch/host overhead
+without changing outputs:
+
+1. **Lazy logits download + 1-row device argmax (`v41_decode.cpp`,
+   `v41_session.cpp`):** speculative, joint and 1-row decode steps leave logits
+   resident on the device and copy only the 4–64 B device argmax vector instead
+   of 0.5–8.3 MB of logits plus a 517 KB H2H `memcpy`. Host logits are copied
+   lazily for the single needed row on host-sampler fallback, `logprobs`,
+   snapshots, prompt-cache capture (`ds41_session_logits`), or before another
+   session overwrites the shared device logits buffer. Multi-group batches also
+   now run `finish()` per evaluated group so every group sees resident device
+   logits.
+2. **Persistent FIFO `EngramPool` (`v41_decode.cpp`):** replaces per-step
+   `std::async`, `std::promise`/`std::shared_future` and up to 31 `std::thread`
+   spawns per Engram layer with a persistent 32-worker pool preserving strict
+   layer-order and lookahead FIFO execution.
+3. **Single-launch HC init + drafter cleanups (`ds41_v41.hip.cpp`,
+   `v41_dspark.cpp`):** `ds41_v41_init_hc` replaces the 4× `copy_rows` /
+   `hipMemcpy2DAsync` embedding broadcasts and `one_hot` H2D upload with one
+   kernel; the drafter pairs `q_a`+`kv` (`ds41_v41_gemv_pair`), moves its six
+   `hc_mix` launches onto a side stream (`mix_stream`), and uses zero-allocation
+   pinned staging with a single `hipStreamSynchronize(0)`.
+
+Built with `nix build` at Gufo `60c48924` (base E136 `a683365`). Streamed
+`UD-IQ2_XXS` with `MXFP8` Engram and vision, fresh server per arm, order base,
+candidate, candidate, base:
+
+- **AR greedy (`--speculative off`, chat + 3.5K code, 512 tokens each):**
+
+| Run | Arm | Chat (s) | Code (s) | Total decode (s) | Route hits | Cache (GiB) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| r1 | base | 29.12 | 28.06 | 57.17 | 92.3% | 106.60 |
+| r2 | candidate | 29.01 | 27.95 | 56.95 | 92.2% | 106.69 |
+| r3 | candidate | 28.95 | 27.97 | 56.92 | 92.2% | 106.69 |
+| r4 | base | 29.00 | 28.10 | 57.10 | 92.2% | 106.69 |
+
+Replies are identical; AR decode is −0.35% (−0.20 ms/token, both candidate runs
+faster than both base runs).
+
+- **Traced drafter pass (`GUFO_DEEPSEEK41_DSPARK_TRACE=1`):** `draft_ms` mean
+  `7.93 → 7.79 ms` (`−0.14 ms/draft`, min `6.80 → 6.60 ms`).
+- **DSpark coding-agent replay & greedy chat+code:** identical replies and
+  agent draft counts (`2,939 / 3,519`); totals were within run-to-run cache-size
+  (`99.87–102.04 GiB`, `140.59/140.20` vs `141.30/140.32 s`; cache-matched
+  `r1`/`r3` `140.59 → 140.32 s`) and learned-policy noise (`43.53/43.91` vs
+  `43.60/44.34 s`), reported as inconclusive on DSpark.
+- **Functional verification (`--sessions 2`):** `conversation`, `batch`,
+  `logprobs` and `cache` (all 14 sub-cases including disk restart) passed.
+Retained. [Runs](artifacts/2026-11-24-host-drafter-cleanups/runs.json).
 
 ## Backlog measurements without an E-number
 

@@ -222,14 +222,12 @@ and sampled candidates, and per-session tables in batched drafting.
 
 ### 19. Host work and round trips per step
 
-DSpark: verification argmax is on the device (E50); the remaining gaps sit
-around the logits copies after the output head
-([trace](EXPERIMENTS.md#item-19-dspark-host-round-trips-2026-10-29));
-download full rows only when sampling needs them. AR: the host argmax, the
-Engram hash, per-evaluation `std::async`/`engram_read` threads and the
-embedding dequant and uploads follow each download (DECODE.md lever 8).
-Device argmax for one-row steps, a device embedding lookup and a
-persistent Engram reader pool would take most of it.
+E137 moved 1-row argmax onto the device, deferred logits D2H downloads until
+host sampling/logprobs/snapshots/cache need them, replaced per-step
+`std::async`/`engram_read` threads with a persistent FIFO `EngramPool`, and
+collapsed the 4× embedding copy + `one_hot` upload into `ds41_v41_init_hc`
+(−0.35% / −0.20 ms per AR greedy token). What remains is device embedding
+lookup (avoiding host dequant + upload) and Engram hashing.
 
 ### 29. Zero-copy expert reads
 
@@ -441,6 +439,7 @@ in EXPERIMENTS.md.
 
 | Item | Result | Ref |
 | --- | --- | --- |
+| Lazy logits download, 1-row device argmax, persistent Engram pool, `init_hc`, drafter pass cleanups (item 19/38 part) | Skips logits D2H/H2H on greedy and device-sampled decode, removes per-step Engram thread spawns, pairs drafter `q_a`+`kv` and overlaps drafter `hc_mix`; AR greedy −0.35% (−0.20 ms/tok), drafter −0.14 ms/draft, identical replies | E137 |
 | Grouped expert GEMV: uniform SGPR offsets, selective decode hoisting, task-major dispatch (item 17 part) | Zero spills across 2–16 rows, single launch up to 8 rows, task-major scalar-`x` kernel for 9–16 rows and `IQ1`/`IQ2_XS`/`IQ2_S` downs; coding-agent replay decode −1.0% (49/53 faster, identical replies), 16-row grouped passes −10 to −28% | E136 |
 | Two-wave decode overlap (resident `down` during SSD reads + single `expert_plan`) | Resident experts' `down` runs behind their `gate+up` during read stalls on 1–16-row batches; coding-agent replay decode −1.1% (−3.1 to −5.4% on warming turns), AR greedy −0.8%, identical replies | E135 |
 | 4,096-token prefill batches for streamed builds (item 42) | Wide passes on demand: the rows past 2,048 are mapped after the expert cache releases room and returned at the prompt's end; fresh 17.7K/21K prompts −5.1%/−4.8%, the expert cache and everything else at parity; `--prefill-batch` removed | E134 |

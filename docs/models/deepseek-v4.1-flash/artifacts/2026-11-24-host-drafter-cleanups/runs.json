@@ -1,0 +1,50 @@
+{
+  "experiment": "E137",
+  "date": "2026-11-24",
+  "title": "Lazy logits download, 1-row device argmax, persistent Engram pool and drafter pass cleanups",
+  "gufo_rev": "60c48924",
+  "base_rev": "a683365",
+  "model": "UD-IQ2_XXS streamed + MXFP8 Engram + DSpark Q2_K/Q4_K + mmproj BF16",
+  "ar_greedy_abba": {
+    "prompts": ["chat (41 -> 512)", "code (3514 -> 512)"],
+    "all_replies_match": true,
+    "order": ["base", "candidate", "candidate", "base"],
+    "runs": [
+      {"run": "r1", "arm": "base",      "chat_s": 29.115, "code_s": 28.057, "decode_s": 57.17, "decode_tps": 17.91, "route_hit_pct": 92.3, "cache_gib": 106.60},
+      {"run": "r2", "arm": "candidate", "chat_s": 29.007, "code_s": 27.947, "decode_s": 56.95, "decode_tps": 17.98, "route_hit_pct": 92.2, "cache_gib": 106.69},
+      {"run": "r3", "arm": "candidate", "chat_s": 28.952, "code_s": 27.971, "decode_s": 56.92, "decode_tps": 17.99, "route_hit_pct": 92.2, "cache_gib": 106.69},
+      {"run": "r4", "arm": "base",      "chat_s": 28.999, "code_s": 28.097, "decode_s": 57.10, "decode_tps": 17.93, "route_hit_pct": 92.2, "cache_gib": 106.69}
+    ]
+  },
+  "traced_drafter_pass_ms": {
+    "base": {"n": 155, "min": 6.80, "median": 7.90, "mean": 7.93},
+    "candidate": {"n": 141, "min": 6.60, "median": 7.80, "mean": 7.79}
+  },
+  "agent_replay_abba": {
+    "requests": 53,
+    "gen_tokens": 5509,
+    "draft_accepted": 2939,
+    "draft_n": 3519,
+    "all_replies_match": true,
+    "note": "Inconclusive due to 2.2 GiB expert-cache swing between runs (r2 99.87 vs r4 102.04 GiB)",
+    "order": ["base", "candidate", "candidate", "base"],
+    "runs": [
+      {"run": "r1", "arm": "base",      "decode_s": 140.59, "decode_tps": 39.19, "prefill_s": 34.64, "route_hit_pct": 98.7, "cache_gib": 101.40},
+      {"run": "r2", "arm": "candidate", "decode_s": 141.30, "decode_tps": 38.99, "prefill_s": 35.33, "route_hit_pct": 98.6, "cache_gib": 99.87},
+      {"run": "r3", "arm": "candidate", "decode_s": 140.32, "decode_tps": 39.26, "prefill_s": 34.74, "route_hit_pct": 98.7, "cache_gib": 101.68},
+      {"run": "r4", "arm": "base",      "decode_s": 140.20, "decode_tps": 39.29, "prefill_s": 34.51, "route_hit_pct": 98.7, "cache_gib": 102.04}
+    ]
+  },
+  "dspark_greedy_abba": {
+    "all_replies_match": true,
+    "note": "Inconclusive due to learned-policy draft count variation",
+    "order": ["base", "candidate", "candidate", "base"],
+    "runs": [
+      {"run": "r1", "arm": "base",      "decode_s": 43.53, "draft_accepted": 486, "draft_n": 750, "cache_gib": 102.02},
+      {"run": "r2", "arm": "candidate", "decode_s": 43.60, "draft_accepted": 489, "draft_n": 759, "cache_gib": 102.03},
+      {"run": "r3", "arm": "candidate", "decode_s": 44.34, "draft_accepted": 472, "draft_n": 753, "cache_gib": 101.99},
+      {"run": "r4", "arm": "base",      "decode_s": 43.91, "draft_accepted": 489, "draft_n": 754, "cache_gib": 102.04}
+    ]
+  },
+  "functional_suites_2_sessions": ["conversation", "batch", "logprobs", "cache (14 sub-cases incl. disk restart)"]
+}

@@ -478,6 +478,21 @@ __global__ void copy_rows_kernel(float* dst, uint64_t dst_stride, const float* s
   for (uint32_t i = threadIdx.x; i < cols; i += blockDim.x) d[i] = s[i];
 }
 
+__global__ void init_hc_kernel(const float* __restrict__ src,
+                               float* __restrict__ h, float* __restrict__ pre,
+                               uint32_t hc, uint32_t dim) {
+  const uint32_t row = blockIdx.x;
+  const float* s = src + (uint64_t)row * dim;
+  float* d = h + (uint64_t)row * hc * dim;
+  for (uint32_t i = threadIdx.x; i < dim; i += blockDim.x) {
+    const float v = s[i];
+    for (uint32_t c = 0; c < hc; ++c)
+      d[(uint64_t)c * dim + i] = v;
+  }
+  if (pre && threadIdx.x < hc)
+    pre[(uint64_t)row * hc + threadIdx.x] = threadIdx.x == 0 ? 1.0f : 0.0f;
+}
+
 /* Copy blockIdx.y of the list; values move as bits. */
 __global__ void copy_list_kernel(ds41_v41_copy_list list) {
   const ds41_v41_copy c = list.copy[blockIdx.y];
@@ -3375,6 +3390,14 @@ extern "C" int ds41_v41_copy_rows(float* dst, uint64_t dst_stride, const float* 
   if (rows == 0) return 0;
   copy_rows_kernel<<<rows, kThreads>>>(dst, dst_stride, src, src_stride, cols);
   return launch_ok("copy rows");
+}
+
+extern "C" int ds41_v41_init_hc(const float* src, float* h, float* pre,
+                                uint32_t hc, uint32_t dim, uint32_t rows) {
+  if (rows == 0)
+    return 0;
+  init_hc_kernel<<<rows, kThreads>>>(src, h, pre, hc, dim);
+  return launch_ok("init hc");
 }
 
 extern "C" int ds41_v41_copy_many(const ds41_v41_copy_list* list) {

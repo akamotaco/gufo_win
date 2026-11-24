@@ -33,7 +33,12 @@ struct ds41_session {
   ds41_decoder* decoder = nullptr;
   int context = 0;
   std::vector<int> tokens;
-  std::vector<float> logits;
+  mutable std::vector<float> logits;
+  /* When true, the session's frontier logits are still on the device at row
+   * `logits_row` of the last evaluation; materialized lazily on host reads or
+   * before another session overwrites the shared logits buffer. */
+  mutable bool logits_dirty = false;
+  mutable uint32_t logits_row = 0;
   bool valid = false;
   /* The first position whose decoder-layer rows the windows hold, through
    * the frontier: rows before it skipped the decoder (bounded replay). */
@@ -112,20 +117,107 @@ uint32_t replay_from(uint32_t prompt_end) {
   return prompt_end > DS41_DECODER_REPLAY_ROWS ? prompt_end - DS41_DECODER_REPLAY_ROWS : 0;
 }
 
+void untrack_dirty_logits(const ds41_session* s) {
+  if (!s)
+    return;
+  s->logits_dirty = false;
+  ds41_engine* e = s->engine;
+  if (!e)
+    return;
+  for (uint32_t i = 0; i < e->n_dirty_logits; ++i) {
+    if (e->dirty_logits[i] == s) {
+      e->dirty_logits[i] = e->dirty_logits[--e->n_dirty_logits];
+      break;
+    }
+  }
+}
+
+void track_dirty_logits(ds41_session* s, uint32_t row) {
+  if (!s || !s->engine)
+    return;
+  s->logits_dirty = true;
+  s->logits_row = row;
+  ds41_engine* e = s->engine;
+  for (uint32_t i = 0; i < e->n_dirty_logits; ++i)
+    if (e->dirty_logits[i] == s)
+      return;
+  if (e->n_dirty_logits < DS41_DECODER_MAX_JOINT)
+    e->dirty_logits[e->n_dirty_logits++] = s;
+}
+
+bool materialize_logits(const ds41_session* s) {
+  if (!s || !s->logits_dirty)
+    return true;
+  const bool ok =
+      ds41_decoder_copy_logits(s->decoder, s->logits_row, s->logits.data());
+  untrack_dirty_logits(s);
+  return ok;
+}
+
+/* Before overwriting the shared device logits buffer, download frontier
+ * logits for any dirty session not in `replacing[0..n_replacing)`. Sessions
+ * being replaced right now drop their stale dirty flag, or with
+ * `keep_replacing` stay dirty until their evaluation is sure to run. */
+bool flush_other_dirty_logits(ds41_engine* e, ds41_session* const* replacing,
+                              uint32_t n_replacing,
+                              bool keep_replacing = false) {
+  if (!e || e->n_dirty_logits == 0)
+    return true;
+  bool ok = true;
+  const uint32_t n = e->n_dirty_logits;
+  e->n_dirty_logits = 0;
+  for (uint32_t i = 0; i < n; ++i) {
+    ds41_session* other = e->dirty_logits[i];
+    if (!other || !other->logits_dirty)
+      continue;
+    bool in_batch = false;
+    for (uint32_t j = 0; j < n_replacing; ++j)
+      if (replacing[j] == other) {
+        in_batch = true;
+        break;
+      }
+    if (in_batch && keep_replacing) {
+      e->dirty_logits[e->n_dirty_logits++] = other;
+      continue;
+    }
+    other->logits_dirty = false;
+    if (!in_batch)
+      ok = ds41_decoder_copy_logits(other->decoder, other->logits_row,
+                                    other->logits.data()) &&
+           ok;
+  }
+  return ok;
+}
+
 /* Evaluates n tokens; the frontier logits are those of the last one. Prompt
  * tokens (prompt_end > 0) take the decoder's bounded replay; batches before
- * the replayed positions leave the frontier logits stale. */
-bool eval(ds41_session* s, const int* tokens, uint32_t n, char* error, size_t capacity, uint32_t prompt_end = 0) {
+ * the replayed positions leave the frontier logits stale. When defer_logits
+ * is set (single-token decode), logits stay on the device until read. */
+bool eval(ds41_session* s, const int* tokens, uint32_t n, char* error,
+          size_t capacity, uint32_t prompt_end = 0, int32_t* argmax = nullptr,
+          bool defer_logits = false) {
   if ((int)(s->tokens.size() + n) >= s->context) {
     set_error(error, capacity, "context is full");
     return false;
   }
+  if (!flush_other_dirty_logits(s->engine, &s, 1)) {
+    set_error(error, capacity, "ROCm logits download failed");
+    return false;
+  }
   const uint32_t first = (uint32_t)s->tokens.size();
-  const uint32_t kept = first + n - std::clamp(replay_from(prompt_end), first, first + n);
-  if (s->before_write) s->before_write(s->write_data, first, first + n);
-  const int rc = prompt_end
-                     ? ds41_decoder_eval_prompt(s->decoder, tokens, n, prompt_end, s->logits.data(), kept ? 1 : 0)
-                     : ds41_decoder_eval(s->decoder, tokens, n, s->logits.data(), 1, nullptr, nullptr);
+  const uint32_t kept =
+      first + n - std::clamp(replay_from(prompt_end), first, first + n);
+  if (s->before_write)
+    s->before_write(s->write_data, first, first + n);
+  const int rc =
+      prompt_end ? ds41_decoder_eval_prompt(s->decoder, tokens, n, prompt_end,
+                                            s->logits.data(), kept ? 1 : 0)
+      : (argmax || defer_logits)
+          ? ds41_decoder_eval_argmax(s->decoder, tokens, n,
+                                     defer_logits ? nullptr : s->logits.data(),
+                                     1, argmax)
+          : ds41_decoder_eval(s->decoder, tokens, n, s->logits.data(), 1,
+                              nullptr, nullptr);
   if (rc != 0) {
     set_error(error, capacity, "ROCm evaluation failed");
     s->valid = false;
@@ -133,6 +225,8 @@ bool eval(ds41_session* s, const int* tokens, uint32_t n, char* error, size_t ca
   }
   s->tokens.insert(s->tokens.end(), tokens, tokens + n);
   s->valid = true;
+  if (defer_logits)
+    track_dirty_logits(s, 0);
   /* Kept rows continue the frontier's decoder rows unless the replay starts
    * past them; a batch without kept rows leaves none. */
   if (kept == 0)
@@ -179,6 +273,7 @@ int ds41_session_create(ds41_session** out, ds41_engine* engine, int context_siz
 
 void ds41_session_free(ds41_session* s) {
   if (!s) return;
+  untrack_dirty_logits(s);
   ds41_dspark_state_destroy(s->dspark);
   ds41_decoder_destroy(s->decoder);
   if (s->spec_pinned) (void)hipHostUnregister(s->spec_logits.data());
@@ -233,6 +328,7 @@ int ds41_session_sync(ds41_session* s, const ds41_tokens* prompt, int prompt_end
     }
     s->tokens.clear();
     s->valid = false;
+    untrack_dirty_logits(s);
     s->decoder_from = 0;
     s->next = -1;
     s->lookup.Clear();
@@ -277,13 +373,13 @@ int ds41_session_sync(ds41_session* s, const ds41_tokens* prompt, int prompt_end
 }
 
 int ds41_session_argmax(const ds41_session* s) {
-  if (!s || !s->valid) return -1;
+  if (!s || !s->valid || !materialize_logits(s)) return -1;
   return ds41_sample_argmax(s->logits.data(), vocab(s));
 }
 
 int ds41_session_sample(const ds41_session* s, float temperature, int top_k, float top_p, float min_p,
                         uint64_t* rng_state) {
-  if (!s || !s->valid || !rng_state) return -1;
+  if (!s || !s->valid || !rng_state || !materialize_logits(s)) return -1;
   return ds41_sample_top_p_min_p(s->logits.data(), vocab(s), temperature, top_k, top_p, min_p, rng_state);
 }
 
@@ -454,7 +550,9 @@ struct Cycle {
   uint32_t first = 0, copied = 0, tail = 0, m = 0;
   size_t copy_start = 0;
   bool plain = false;        // the drafter's policy chose a plain step
-  bool speculative = false;  // the block's rows wait in spec_logits for the commit
+  bool speculative = false;  // the block's rows wait on the device until commit
+  bool logits_deferred = false;
+  uint32_t row_downloaded = 0;  // bitmask of rows copied from device
   int32_t argmax[ds41_session::kVerifyRows] = {};  // each row's argmax, from the evaluation
   /* A drafter pass this cycle waits for (draft), its learned width policy,
    * whether a learned cycle drafted and the saving its width predicts, and
@@ -490,6 +588,11 @@ int prepare(Cycle& c, char* error, size_t capacity) {
   const auto emit = [&](int token) { out[(*item.n_emitted)++] = token; };
   c.done = true;
   if (s->next < 0) {
+    if (!materialize_logits(s)) {
+      set_error(error, capacity, "ROCm logits download failed");
+      s->valid = false;
+      return 1;
+    }
     const int anchor = draw(s, sampler, s->logits.data());
     if (anchor < 0 || anchor >= (int)n_vocab) {
       set_error(error, capacity, "DSpark target logits contain no finite values");
@@ -607,14 +710,26 @@ void finish_draft(Cycle& c, bool drafted) {
 /* Evaluates one cycle's block on its own. */
 int evaluate(Cycle& c, char* error, size_t capacity) {
   ds41_session* s = c.item->session;
-  if (c.m == 1) return eval(s, c.block, 1, error, capacity) ? 0 : 1;
-  if (s->before_write) s->before_write(s->write_data, c.first, c.first + c.m);
-  if (ds41_decoder_eval_speculative(s->decoder, c.block, c.m, s->spec_logits.data(), c.argmax) != 0) {
+  if (c.m == 1) {
+    if (!eval(s, c.block, 1, error, capacity, 0, c.argmax, true))
+      return 1;
+    c.logits_deferred = true;
+    return 0;
+  }
+  if (!flush_other_dirty_logits(s->engine, &s, 1)) {
+    set_error(error, capacity, "ROCm logits download failed");
+    return 1;
+  }
+  if (s->before_write)
+    s->before_write(s->write_data, c.first, c.first + c.m);
+  if (ds41_decoder_eval_speculative(s->decoder, c.block, c.m, nullptr,
+                                    c.argmax) != 0) {
     set_error(error, capacity, "DSpark verification failed");
     s->valid = false;
     return 1;
   }
   c.speculative = true;
+  c.logits_deferred = true;
   return 0;
 }
 
@@ -622,31 +737,47 @@ int evaluate(Cycle& c, char* error, size_t capacity) {
  * batches it does not take, which evaluate on their own. */
 int evaluate_joint(Cycle* const* cycles, uint32_t count, char* error, size_t capacity) {
   ds41_decoder* decoders[DS41_DECODER_MAX_JOINT];
+  ds41_session* sessions[DS41_DECODER_MAX_JOINT];
   const int* tokens[DS41_DECODER_MAX_JOINT];
   uint32_t ns[DS41_DECODER_MAX_JOINT];
-  float* logits[DS41_DECODER_MAX_JOINT];
   int32_t* argmax[DS41_DECODER_MAX_JOINT];
   for (uint32_t i = 0; i < count; i++) {
     ds41_session* s = cycles[i]->item->session;
-    if ((int)(s->tokens.size() + cycles[i]->m) >= s->context) return 2;
+    if ((int)(s->tokens.size() + cycles[i]->m) >= s->context)
+      return 2;
+    sessions[i] = s;
     decoders[i] = s->decoder;
     tokens[i] = cycles[i]->block;
     ns[i] = cycles[i]->m;
-    logits[i] = s->spec_logits.data();
     argmax[i] = cycles[i]->argmax;
+  }
+  /* The batch's own deferred logits stay dirty until the joint evaluation
+   * runs: if it falls back to separate evaluations, each one downloads the
+   * others' first. */
+  if (!flush_other_dirty_logits(sessions[0]->engine, sessions, count, true)) {
+    set_error(error, capacity, "ROCm logits download failed");
+    return 1;
   }
   for (uint32_t i = 0; i < count; i++) {
     const Cycle& c = *cycles[i];
     ds41_session* s = c.item->session;
     if (s->before_write) s->before_write(s->write_data, c.first, c.first + c.m);
   }
-  const int rc = ds41_decoder_eval_joint(decoders, tokens, ns, count, logits, argmax);
+  const int rc =
+      ds41_decoder_eval_joint(decoders, tokens, ns, count, nullptr, argmax);
   if (rc == 1) {
     set_error(error, capacity, "DSpark verification failed");
-    for (uint32_t i = 0; i < count; i++) cycles[i]->item->session->valid = false;
+    for (uint32_t i = 0; i < count; i++) {
+      untrack_dirty_logits(sessions[i]);
+      sessions[i]->valid = false;
+    }
     return 1;
   }
-  for (uint32_t i = 0; i < count && rc == 0; i++) cycles[i]->speculative = true;
+  for (uint32_t i = 0; i < count && rc == 0; i++) {
+    untrack_dirty_logits(sessions[i]);
+    cycles[i]->speculative = true;
+    cycles[i]->logits_deferred = true;
+  }
   return rc;
 }
 
@@ -661,7 +792,17 @@ int finish(Cycle& c, char* error, size_t capacity) {
   const auto ends = [&](int token) { return item.stop_at_eos && ds41_token_is_stop(s->engine, token); };
   const int* block = c.block;
   const uint32_t m = c.m;
-  const float* rows = c.speculative ? s->spec_logits.data() : s->logits.data();
+  const auto row_host = [&](uint32_t idx) -> const float* {
+    float* dst = c.speculative
+                     ? s->spec_logits.data() + (uint64_t)idx * n_vocab
+                     : s->logits.data();
+    if (c.logits_deferred && !(c.row_downloaded & (1u << idx))) {
+      if (!ds41_decoder_copy_logits(s->decoder, idx, dst))
+        return nullptr;
+      c.row_downloaded |= 1u << idx;
+    }
+    return dst;
+  };
   /* Row i - 1 verifies block[i]; the first mismatch ends the accepted prefix
    * and its draw is the next token. */
   const int stop = item.stop_at_eos ? ds41_token_eos(s->engine) : -1;
@@ -669,22 +810,38 @@ int finish(Cycle& c, char* error, size_t capacity) {
   uint32_t positional = 0;
   int next = -1;
   const ds41_v41_proposal* proposals =
-      c.stochastic && c.copied == 0 && s->dspark ? ds41_dspark_proposals(s->dspark) : nullptr;
-  /* A speculative evaluation's rows come with their argmax. */
-  const int32_t* row_argmax = c.speculative ? c.argmax : nullptr;
+      c.stochastic && c.copied == 0 && s->dspark
+          ? ds41_dspark_proposals(s->dspark)
+          : nullptr;
   for (uint32_t i = 1; i < m; i++) {
-    const float* row = rows + (uint64_t)(i - 1) * n_vocab;
-    const int32_t* top = row_argmax ? row_argmax + (i - 1) : nullptr;
+    const int32_t top = c.argmax[i - 1];
     if (next >= 0) {
-      positional += (top ? *top : ds41_sample_argmax(row, n_vocab)) == block[i];
+      positional += top == block[i];
       continue;
     }
     int drawn = -1, argmax = -1;
-    if (!device_draw(s, sampler, i - 1, proposals ? proposals + (i - 1) : nullptr, &drawn, &argmax)) {
-      argmax = top ? *top : ds41_sample_argmax(row, n_vocab);
-      device_totals(s, sampler, i - 1);
-      drawn = c.stochastic && c.copied == 0 ? sampler->verify(sampler->ctx, i - 1, row, n_vocab, block[i])
-                                            : draw(s, sampler, row, &argmax);
+    if (!device_draw(s, sampler, i - 1,
+                     proposals ? proposals + (i - 1) : nullptr, &drawn,
+                     &argmax)) {
+      argmax = top;
+      if (!(c.stochastic && c.copied == 0) &&
+          (!sampler ||
+           (sampler->try_accept_argmax && top >= 0 &&
+            sampler->try_accept_argmax(sampler->ctx, top)))) {
+        drawn = top;
+      } else {
+        device_totals(s, sampler, i - 1);
+        const float* row = row_host(i - 1);
+        if (!row) {
+          set_error(error, capacity, "ROCm logits download failed");
+          s->valid = false;
+          return 1;
+        }
+        drawn = c.stochastic && c.copied == 0
+                    ? sampler->verify(sampler->ctx, i - 1, row, n_vocab,
+                                      block[i])
+                    : sampler->sample(sampler->ctx, row, n_vocab);
+      }
     }
     positional += argmax == block[i];
     if (drawn != block[i] || ends(drawn) || block[i] == stop)
@@ -700,7 +857,14 @@ int finish(Cycle& c, char* error, size_t capacity) {
     }
     s->tokens.insert(s->tokens.end(), block, block + accepted);
     s->valid = true;
-    memcpy(s->logits.data(), rows + (uint64_t)(accepted - 1) * n_vocab, n_vocab * sizeof(float));
+    if (!c.logits_deferred || (c.row_downloaded & (1u << (accepted - 1)))) {
+      memcpy(s->logits.data(),
+             s->spec_logits.data() + (uint64_t)(accepted - 1) * n_vocab,
+             n_vocab * sizeof(float));
+      untrack_dirty_logits(s);
+    } else {
+      track_dirty_logits(s, accepted - 1);
+    }
     if (s->dspark && !ds41_dspark_inject(s->dspark, c.first, accepted)) {
       set_error(error, capacity, "DSpark feature injection failed");
       s->valid = false;
@@ -709,9 +873,25 @@ int finish(Cycle& c, char* error, size_t capacity) {
   }
   /* The token after a fully accepted block (or a plain step): the last row. */
   int bonus_argmax = -1;
-  if (next < 0 && !device_draw(s, sampler, m - 1, nullptr, &next, &bonus_argmax)) {
-    device_totals(s, sampler, m - 1);
-    next = draw(s, sampler, s->logits.data(), row_argmax ? row_argmax + m - 1 : nullptr);
+  if (next < 0 &&
+      !device_draw(s, sampler, m - 1, nullptr, &next, &bonus_argmax)) {
+    const int32_t top = c.argmax[m - 1];
+    if (!sampler || (sampler->try_accept_argmax && top >= 0 &&
+                     sampler->try_accept_argmax(sampler->ctx, top))) {
+      next = top;
+    } else {
+      device_totals(s, sampler, m - 1);
+      const float* row = row_host(m - 1);
+      if (!row) {
+        set_error(error, capacity, "ROCm logits download failed");
+        s->valid = false;
+        return 1;
+      }
+      if (c.speculative)
+        memcpy(s->logits.data(), row, n_vocab * sizeof(float));
+      untrack_dirty_logits(s);
+      next = sampler->sample(sampler->ctx, row, n_vocab);
+    }
   }
   if (next < 0 || next >= (int)n_vocab) {
     set_error(error, capacity, "DSpark target logits contain no finite values");
@@ -808,11 +988,28 @@ int ds41_sessions_dspark_step_batch(const ds41_session_dspark_batch_item* items,
   Cycle* group[DS41_DECODER_MAX_JOINT];
   uint32_t grouped = 0, rows = 0;
   const auto flush = [&]() {
+    if (grouped == 0) return true;
     int rc = grouped > 1 ? evaluate_joint(group, grouped, error, capacity) : 2;
-    for (uint32_t i = 0; i < grouped && rc == 2; i++)
-      if (evaluate(*group[i], error, capacity) != 0) return false;
+    if (rc == 1) {
+      grouped = rows = 0;
+      return false;
+    }
+    if (rc == 0) {
+      for (uint32_t i = 0; i < grouped; i++)
+        if (finish(*group[i], error, capacity) != 0) {
+          grouped = rows = 0;
+          return false;
+        }
+    } else {
+      for (uint32_t i = 0; i < grouped; i++)
+        if (evaluate(*group[i], error, capacity) != 0 ||
+            finish(*group[i], error, capacity) != 0) {
+          grouped = rows = 0;
+          return false;
+        }
+    }
     grouped = rows = 0;
-    return rc != 1;
+    return true;
   };
   for (Cycle& c : cycles) {
     if (c.done) continue;
@@ -821,8 +1018,6 @@ int ds41_sessions_dspark_step_batch(const ds41_session_dspark_batch_item* items,
     rows += c.m;
   }
   if (!flush()) return 1;
-  for (Cycle& c : cycles)
-    if (!c.done && finish(c, error, capacity) != 0) return 1;
   return 0;
 }
 
@@ -858,7 +1053,9 @@ void ds41_session_dspark_stats(const ds41_session* s, uint64_t* drafted, uint64_
 }
 
 int ds41_session_copy_logits(const ds41_session* s, float* out, int capacity) {
-  if (!s || !s->valid || !out || capacity < (int)vocab(s)) return 0;
+  if (!s || !s->valid || !out || capacity < (int)vocab(s) ||
+      !materialize_logits(s))
+    return 0;
   memcpy(out, s->logits.data(), s->logits.size() * sizeof(float));
   return (int)vocab(s);
 }
@@ -867,6 +1064,10 @@ int ds41_session_save_snapshot(const ds41_session* s, ds41_session_snapshot* sna
                                size_t capacity) {
   if (!s || !snapshot || !s->valid) {
     set_error(error, capacity, "no evaluated state to save");
+    return 1;
+  }
+  if (!materialize_logits(s)) {
+    set_error(error, capacity, "ROCm logits download failed");
     return 1;
   }
   std::vector<uint8_t> payload;
@@ -926,6 +1127,7 @@ int ds41_session_load_snapshot(ds41_session* s, const ds41_session_snapshot* sna
   const uint8_t* at = snapshot->ptr + sizeof(header);
   s->tokens.assign((const int*)at, (const int*)at + header[1]);
   memcpy(s->logits.data(), at + header[1] * sizeof(int), header[2] * sizeof(float));
+  untrack_dirty_logits(s);
   s->decoder_from = (uint32_t)header[4];
   s->valid = true;
   s->next = -1;
@@ -948,6 +1150,7 @@ void ds41_session_set_cancel(ds41_session* s, ds41_session_cancel_fn callback, v
 void ds41_session_invalidate(ds41_session* s) {
   if (!s) return;
   s->valid = false;
+  untrack_dirty_logits(s);
   s->tokens.clear();
   s->decoder_from = 0;
   s->next = -1;
@@ -967,11 +1170,16 @@ bool ds41_session_valid(const ds41_session* s) { return s && s->valid; }
 
 const int* ds41_session_tokens(const ds41_session* s) { return s ? s->tokens.data() : nullptr; }
 
-float* ds41_session_logits(ds41_session* s) { return s ? s->logits.data() : nullptr; }
+float* ds41_session_logits(ds41_session* s) {
+  if (!s) return nullptr;
+  (void)materialize_logits(s);
+  return s->logits.data();
+}
 
 int* ds41_session_begin_restore(ds41_session* s, uint32_t n) {
   if (!s || n == 0 || n >= (uint32_t)s->context) return nullptr;
   s->valid = false;
+  untrack_dirty_logits(s);
   s->tokens.resize(n);
   return s->tokens.data();
 }

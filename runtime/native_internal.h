@@ -12,6 +12,7 @@ struct ds41_dspark_model;
 struct ds41_engram_tables;
 struct ds41_expert_store;
 struct ds41_model;
+struct ds41_session;
 struct ds41_vocab;
 struct ds41_weights;
 
@@ -52,6 +53,10 @@ struct ds41_engine {
   float* lora_t;        // device scratch, lora_t_rows rows of lora_max_rank
   uint32_t lora_t_rows;
   uint32_t lora_max_rank;
+  /* Sessions whose latest frontier logits stay only on the device until read
+   * or displaced by another session's evaluation. */
+  ds41_session* dirty_logits[DS41_DECODER_MAX_JOINT];
+  uint32_t n_dirty_logits;
 };
 
 /* Maps the GGUF at `path` (the first shard of a split build) and parses its

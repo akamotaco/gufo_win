@@ -132,6 +132,10 @@ int ds41_v41_routed_plan_device(const int32_t* ids, uint32_t slots, uint32_t n_e
 /* dst[r, 0:cols] = src[r, 0:cols] for `rows` rows with the given strides (floats). */
 int ds41_v41_copy_rows(float* dst, uint64_t dst_stride, const float* src, uint64_t src_stride, uint32_t rows,
                        uint32_t cols);
+/* Replicate each row of src[rows, dim] into h[rows, hc, dim] and write the
+ * layer-0 one-hot pre-mix [1, 0, ...] into pre[rows, hc] (if non-NULL). */
+int ds41_v41_init_hc(const float* src, float* h, float* pre, uint32_t hc,
+                     uint32_t dim, uint32_t rows);
 
 /* Independent device copies of count floats each, in one launch: the list
  * travels as the kernel argument, so it needs no staging buffer. */

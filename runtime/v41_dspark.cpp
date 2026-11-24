@@ -28,15 +28,25 @@ constexpr uint32_t kMixes = 2 * kHc + kHc * kHc;
 constexpr uint32_t kFeatureDim = DS41_DSPARK_TARGET_LAYERS * kDim;
 constexpr uint32_t kRows = DS41_DSPARK_BLOCK;
 constexpr uint32_t kMaxRows = kRows * DS41_DSPARK_MAX_BATCH;
-/* Pinned staging sections for a draft's inputs, 256-byte aligned. */
+/* Pinned staging for a draft's uploads and downloads, 256 B aligned. */
 constexpr uint64_t kStageAlign = 256;
 constexpr uint64_t stage_round(uint64_t b) { return (b + kStageAlign - 1) / kStageAlign * kStageAlign; }
 constexpr uint64_t kStageDraws = 0;
-constexpr uint64_t kStageRows = kStageDraws + stage_round((uint64_t)kMaxRows * sizeof(uint32_t));
-constexpr uint64_t kStageOneHot = kStageRows + stage_round((uint64_t)kMaxRows * DS41_N_EMBD * sizeof(float));
-constexpr uint64_t kStageTokens = kStageOneHot + stage_round((uint64_t)kMaxRows * DS41_N_HC * sizeof(float));
+constexpr uint64_t kStageRows =
+    kStageDraws + stage_round((uint64_t)kMaxRows * sizeof(uint32_t));
+constexpr uint64_t kStageTokens =
+    kStageRows + stage_round((uint64_t)kMaxRows * DS41_N_EMBD * sizeof(float));
+constexpr uint64_t kStageOutTokens =
+    kStageTokens + stage_round((uint64_t)DS41_DSPARK_MAX_BATCH * (kRows + 1) *
+                               sizeof(int32_t));
+constexpr uint64_t kStageOutProposals =
+    kStageOutTokens + stage_round((uint64_t)DS41_DSPARK_MAX_BATCH *
+                                  (kRows + 1) * sizeof(int32_t));
+constexpr uint64_t kStageOutConf =
+    kStageOutProposals +
+    stage_round((uint64_t)kMaxRows * sizeof(ds41_v41_proposal));
 constexpr uint64_t kStagingBytes =
-    kStageTokens + stage_round((uint64_t)DS41_DSPARK_MAX_BATCH * (kRows + 1) * sizeof(int32_t));
+    kStageOutConf + stage_round((uint64_t)kMaxRows * sizeof(float));
 constexpr uint32_t kRouted = DS41_DSPARK_EXPERTS_USED;
 constexpr uint64_t kRingFloats = (uint64_t)DS41_N_SWA * kHeadDim;
 constexpr float kSwigluLimit = DS41_SWIGLU_CLAMP_EXP;
@@ -89,10 +99,18 @@ struct ds41_dspark_scratch {
   ds41_v41_proposal* proposals = nullptr;
   float *main_raw = nullptr, *main_x = nullptr, *main_kv = nullptr, *main_kvn = nullptr;
   float* head_x = nullptr;     // the drafted rows' final norms, compacted for the target head
-  /* Pinned staging for a draft's inputs (draws, rows, one-hot pre-mix,
-   * tokens), uploaded asynchronously behind the queued work. */
+  /* Pinned staging for a draft's uploads and downloads. */
   unsigned char* staging = nullptr;
+  /* hc_mix side stream: overlaps the 6 stage mixes with attention and MoE. */
+  hipStream_t mix_stream = nullptr;
+  hipEvent_t mix_start = nullptr, mix_done = nullptr;
   ~ds41_dspark_scratch() {
+    if (mix_stream) {
+      (void)hipStreamSynchronize(mix_stream);
+      (void)hipStreamDestroy(mix_stream);
+    }
+    if (mix_start) (void)hipEventDestroy(mix_start);
+    if (mix_done) (void)hipEventDestroy(mix_done);
     for (void* p : owned) (void)hipFree(p);
     if (staging) (void)hipHostFree(staging);
   }
@@ -163,6 +181,14 @@ bool alloc_scratch(ds41_dspark_scratch& s) {
     s.staging = nullptr;
     return false;
   }
+  if (hipEventCreateWithFlags(&s.mix_start, hipEventDisableTiming) !=
+          hipSuccess ||
+      hipEventCreateWithFlags(&s.mix_done, hipEventDisableTiming) !=
+          hipSuccess ||
+      hipStreamCreateWithFlags(&s.mix_stream, hipStreamNonBlocking) !=
+          hipSuccess) {
+    s.mix_stream = nullptr;
+  }
   return s.alloc(&s.h, r * hd) && s.alloc(&s.h2, r * hd) && s.alloc(&s.xn, r * kDim) &&
          s.alloc(&s.mixes, r * kMixes) && s.alloc(&s.pre[0], r * kHc) && s.alloc(&s.pre[1], r * kHc) &&
          s.alloc(&s.post, r * kHc) && s.alloc(&s.comb, r * kHc * kHc) && s.alloc(&s.ffn_post, r * kHc) &&
@@ -215,7 +241,25 @@ struct Job {
 bool attention(const ds41_dspark_stage& st, ds41_dspark_scratch& s, uint32_t stage, const std::vector<Job>& jobs) {
   const uint32_t n = (uint32_t)jobs.size() * kRows;
   const float eps = DS41_RMS_EPS;
-  if (!lin_rows(st.q_a, s.xn, s.qa, n) || !lin_rows(st.kv, s.xn, s.kv, n)) return false;
+  if (st.q_a.type == DS41_TENSOR_Q4_K && st.kv.type == DS41_TENSOR_Q4_K &&
+      st.q_a.k == st.kv.k && st.q_a.k % 256 == 0 &&
+      slices(st.q_a) == slices(st.kv)) {
+    const uint32_t chunk = DS41_V41_GEMV_MAX_TOKENS;
+    const int sl = slices(st.q_a);
+    for (uint32_t r = 0; r < n; r += chunk) {
+      const uint32_t m = std::min(chunk, n - r);
+      if (ds41_v41_gemv_pair((int)st.q_a.type, st.q_a.p,
+                             s.qa + (uint64_t)r * st.q_a.rows,
+                             (uint32_t)st.q_a.rows, st.kv.p,
+                             s.kv + (uint64_t)r * st.kv.rows,
+                             (uint32_t)st.kv.rows,
+                             s.xn + (uint64_t)r * st.q_a.k, st.q_a.k, sl, m))
+        return false;
+    }
+  } else if (!lin_rows(st.q_a, s.xn, s.qa, n) ||
+             !lin_rows(st.kv, s.xn, s.kv, n)) {
+    return false;
+  }
   for (const Job& j : jobs)
     if (ds41_v41_q_kv_norm(s.qa + (uint64_t)j.row0 * DS41_N_LORA_Q, f32(st.q_a_norm),
                            s.qr + (uint64_t)j.row0 * DS41_N_LORA_Q, nullptr, DS41_N_LORA_Q,
@@ -325,17 +369,32 @@ bool moe(const ds41_dspark_stage& st, ds41_dspark_scratch& s, uint32_t n) {
   return lin_rows(st.down_shexp, s.sm, s.sd, n);
 }
 
-/* In launches of at most 16 rows, each on hc_mix's per-token kernel as
- * the drafter's own block is. */
-bool hc_mix(const ds41_dspark_tensor& fn, const ds41_dspark_tensor& scale, const ds41_dspark_tensor& base,
-            ds41_dspark_scratch& s, const float* h, float* pre, float* post, float* comb, uint32_t n) {
-  constexpr uint32_t kMixRows = 16;
+/* Up to 16 rows hc_mix is one kernel and runs on mix_stream in parallel with
+ * attention / MoE; wait_mix joins it before hc_expand reads its outputs. */
+constexpr uint32_t kMixRows = 16;
+
+bool hc_mix(const ds41_dspark_tensor& fn, const ds41_dspark_tensor& scale,
+            const ds41_dspark_tensor& base, ds41_dspark_scratch& s,
+            const float* h, float* pre, float* post, float* comb, uint32_t n) {
+  const bool side = s.mix_stream && n <= kMixRows;
+  hipStream_t stream = side ? s.mix_stream : nullptr;
+  if (side && (hipEventRecord(s.mix_start, nullptr) != hipSuccess ||
+               hipStreamWaitEvent(s.mix_stream, s.mix_start, 0) != hipSuccess))
+    return false;
   for (uint32_t r = 0; r < n; r += kMixRows)
-    if (ds41_v41_hc_mix(f32(fn), h + (uint64_t)r * kHc * kDim, f32(scale), f32(base), s.mixes + (uint64_t)r * kMixes,
-                        pre + (uint64_t)r * kHc, post + (uint64_t)r * kHc, comb + (uint64_t)r * kHc * kHc, kHc, kDim,
-                        DS41_RMS_EPS, DS41_N_HC_SINKHORN_ITER, DS41_HC_EPS, std::min(kMixRows, n - r), nullptr))
+    if (ds41_v41_hc_mix(
+            f32(fn), h + (uint64_t)r * kHc * kDim, f32(scale), f32(base),
+            s.mixes + (uint64_t)r * kMixes, pre + (uint64_t)r * kHc,
+            post + (uint64_t)r * kHc, comb + (uint64_t)r * kHc * kHc, kHc, kDim,
+            DS41_RMS_EPS, DS41_N_HC_SINKHORN_ITER, DS41_HC_EPS,
+            std::min(kMixRows, n - r), stream))
       return false;
-  return true;
+  return !side || hipEventRecord(s.mix_done, s.mix_stream) == hipSuccess;
+}
+
+bool wait_mix(ds41_dspark_scratch& s, uint32_t n) {
+  return !s.mix_stream || n > kMixRows ||
+         hipStreamWaitEvent(nullptr, s.mix_done, 0) == hipSuccess;
 }
 
 }  // namespace
@@ -542,9 +601,11 @@ bool ds41_dspark_draft_batch(ds41_dspark_draft_request* requests, uint32_t count
    * Sampled requests draw each proposal on the device from the biased top
    * eight, so the next Markov row reads it without a host round trip; the
    * request RNG supplies the draws up front and q returns once per cycle. */
-  std::vector<int32_t> tokens((uint64_t)jobs.size() * kTokenStride, -1);
-  std::vector<float> one_hot((uint64_t)n * kHc, 0.0f);
-  std::vector<uint32_t> draws(n, 0);
+  const size_t token_count = jobs.size() * kTokenStride;
+  auto* stage_tokens = reinterpret_cast<int32_t*>(sc.staging + kStageTokens);
+  auto* stage_draws = reinterpret_cast<uint32_t*>(sc.staging + kStageDraws);
+  std::fill_n(stage_tokens, token_count, -1);
+  std::fill_n(stage_draws, n, 0u);
   bool ok = true;
   bool any_stochastic = false;
   for (Job& j : jobs) {
@@ -552,11 +613,11 @@ bool ds41_dspark_draft_batch(ds41_dspark_draft_request* requests, uint32_t count
     int block[kRows];
     block[0] = r.anchor;
     for (uint32_t t = 1; t < kRows; t++) block[t] = DS41_DSPARK_NOISE_TOKEN;
-    for (uint32_t t = 0; t < kRows; t++) one_hot[(uint64_t)(j.row0 + t) * kHc] = 1.0f;
-    tokens[(uint64_t)(j.row0 / kRows) * kTokenStride] = r.anchor;
+    stage_tokens[(uint64_t)(j.row0 / kRows) * kTokenStride] = r.anchor;
     j.stochastic = r.sampler && r.sampler->draws && r.sampler->retain;
     if (j.stochastic) {
-      j.temperature = r.sampler->draws(r.sampler->ctx, r.count, draws.data() + j.row0);
+      j.temperature =
+          r.sampler->draws(r.sampler->ctx, r.count, stage_draws + j.row0);
       any_stochastic = true;
     }
     ok = ok && ds41_decoder_embed(r.state->decoder, block, kRows,
@@ -564,32 +625,36 @@ bool ds41_dspark_draft_batch(ds41_dspark_draft_request* requests, uint32_t count
   }
   /* Pinned, asynchronous uploads queue behind the work in flight (the
    * previous cycle's injection) instead of waiting for it. */
-  memcpy(sc.staging + kStageDraws, draws.data(), n * sizeof(uint32_t));
-  memcpy(sc.staging + kStageOneHot, one_hot.data(), one_hot.size() * sizeof(float));
-  memcpy(sc.staging + kStageTokens, tokens.data(), tokens.size() * sizeof(int32_t));
-  ok = ok && (!any_stochastic || hipMemcpyAsync(sc.draws, sc.staging + kStageDraws, n * sizeof(uint32_t),
-                                                hipMemcpyHostToDevice, 0) == hipSuccess) &&
-       hipMemcpyAsync(sc.xn, sc.staging + kStageRows, (uint64_t)n * kDim * sizeof(float), hipMemcpyHostToDevice,
+  ok = ok &&
+       (!any_stochastic ||
+        hipMemcpyAsync(sc.draws, sc.staging + kStageDraws, n * sizeof(uint32_t),
+                       hipMemcpyHostToDevice, 0) == hipSuccess) &&
+       hipMemcpyAsync(sc.xn, sc.staging + kStageRows,
+                      (uint64_t)n * kDim * sizeof(float), hipMemcpyHostToDevice,
                       0) == hipSuccess &&
-       hipMemcpyAsync(sc.pre[0], sc.staging + kStageOneHot, one_hot.size() * sizeof(float), hipMemcpyHostToDevice,
+       hipMemcpyAsync(sc.tokens, sc.staging + kStageTokens,
+                      token_count * sizeof(int32_t), hipMemcpyHostToDevice,
                       0) == hipSuccess &&
-       hipMemcpyAsync(sc.tokens, sc.staging + kStageTokens, tokens.size() * sizeof(int32_t), hipMemcpyHostToDevice,
-                      0) == hipSuccess;
-  for (uint32_t c = 0; c < kHc && ok; c++)
-    ok = hipMemcpy2DAsync(sc.h + c * kDim, hd * sizeof(float), sc.xn, kDim * sizeof(float), kDim * sizeof(float), n,
-                          hipMemcpyDeviceToDevice, 0) == hipSuccess;
+       ds41_v41_init_hc(sc.xn, sc.h, sc.pre[0], kHc, kDim, n) == 0;
 
   /* Shifted mHC as in the decoder: attention takes pre[0] and leaves its mix
    * in pre[1] for the FFN, whose own mix returns to pre[0]. */
   for (uint32_t st = 0; st < DS41_DSPARK_STAGES && ok; st++) {
     const ds41_dspark_stage& l = m->stage[st];
-    ok = hc_mix(l.hc_attn_fn, l.hc_attn_scale, l.hc_attn_base, sc, sc.h, sc.pre[1], sc.post, sc.comb, n) &&
-         ds41_v41_hc_collapse_norm(sc.h, sc.pre[0], f32(l.attn_norm), sc.xn, kHc, kDim, DS41_RMS_EPS, n) == 0 &&
-         attention(l, sc, st, jobs) && ds41_v41_hc_expand(sc.attn_out, sc.h, sc.post, sc.comb, sc.h2, kHc, kDim, n) == 0 &&
-         hc_mix(l.hc_ffn_fn, l.hc_ffn_scale, l.hc_ffn_base, sc, sc.h2, sc.pre[0], sc.ffn_post, sc.ffn_comb, n) &&
-         ds41_v41_hc_collapse_norm(sc.h2, sc.pre[1], f32(l.ffn_norm), sc.xn, kHc, kDim, DS41_RMS_EPS, n) == 0 &&
-         moe(l, sc, n) &&
-         ds41_v41_hc_expand_sum(sc.down, sc.sd, kRouted, sc.h2, sc.ffn_post, sc.ffn_comb, sc.h, kHc, kDim, n) == 0;
+    ok = hc_mix(l.hc_attn_fn, l.hc_attn_scale, l.hc_attn_base, sc, sc.h,
+                sc.pre[1], sc.post, sc.comb, n) &&
+         ds41_v41_hc_collapse_norm(sc.h, sc.pre[0], f32(l.attn_norm), sc.xn,
+                                   kHc, kDim, DS41_RMS_EPS, n) == 0 &&
+         attention(l, sc, st, jobs) && wait_mix(sc, n) &&
+         ds41_v41_hc_expand(sc.attn_out, sc.h, sc.post, sc.comb, sc.h2, kHc,
+                            kDim, n) == 0 &&
+         hc_mix(l.hc_ffn_fn, l.hc_ffn_scale, l.hc_ffn_base, sc, sc.h2,
+                sc.pre[0], sc.ffn_post, sc.ffn_comb, n) &&
+         ds41_v41_hc_collapse_norm(sc.h2, sc.pre[1], f32(l.ffn_norm), sc.xn,
+                                   kHc, kDim, DS41_RMS_EPS, n) == 0 &&
+         moe(l, sc, n) && wait_mix(sc, n) &&
+         ds41_v41_hc_expand_sum(sc.down, sc.sd, kRouted, sc.h2, sc.ffn_post,
+                                sc.ffn_comb, sc.h, kHc, kDim, n) == 0;
   }
   /* Target head over each job's drafted rows (compacted for several jobs),
    * in launches of at most 8 rows: the decode GEMV's per-token arithmetic. */
@@ -647,37 +712,51 @@ bool ds41_dspark_draft_batch(ds41_dspark_draft_request* requests, uint32_t count
                            : ds41_v41_argmax_bias(row, sc.bias, DS41_N_VOCAB, job_tokens, i + 1)) == 0;
     }
   }
-  /* One download each of the drafted tokens, proposals and confidences. */
-  std::vector<ds41_v41_proposal> q(any_stochastic ? n : 0);
-  std::vector<float> conf(n);
-  ok = ok && hipMemcpy(tokens.data(), sc.tokens, tokens.size() * sizeof(int32_t), hipMemcpyDeviceToHost) == hipSuccess &&
-       (!any_stochastic || hipMemcpy(q.data(), sc.proposals, n * sizeof(q[0]), hipMemcpyDeviceToHost) == hipSuccess);
+  /* Asynchronous pinned downloads followed by one stream sync. */
+  auto* out_tokens = reinterpret_cast<int32_t*>(sc.staging + kStageOutTokens);
+  auto* out_q =
+      reinterpret_cast<ds41_v41_proposal*>(sc.staging + kStageOutProposals);
+  auto* out_conf = reinterpret_cast<float*>(sc.staging + kStageOutConf);
   bool any_learned = false;
-  for (const Job& j : jobs) any_learned = any_learned || (j.req->confidence && has_confidence);
-  ok = ok && (!any_learned || hipMemcpy(conf.data(), sc.confidence, n * sizeof(float), hipMemcpyDeviceToHost) ==
-                                  hipSuccess);
+  for (const Job& j : jobs)
+    any_learned = any_learned || (j.req->confidence && has_confidence);
+  ok = ok &&
+       hipMemcpyAsync(out_tokens, sc.tokens, token_count * sizeof(int32_t),
+                      hipMemcpyDeviceToHost, 0) == hipSuccess &&
+       (!any_stochastic ||
+        hipMemcpyAsync(out_q, sc.proposals, n * sizeof(ds41_v41_proposal),
+                       hipMemcpyDeviceToHost, 0) == hipSuccess) &&
+       (!any_learned ||
+        hipMemcpyAsync(out_conf, sc.confidence, n * sizeof(float),
+                       hipMemcpyDeviceToHost, 0) == hipSuccess);
+  for (Job& j : jobs)
+    if (ok && j.stochastic)
+      ok = hipMemcpyAsync(j.req->state->proposals, sc.proposals + j.row0,
+                          j.req->count * sizeof(ds41_v41_proposal),
+                          hipMemcpyDeviceToDevice, 0) == hipSuccess;
+  ok = ok && hipStreamSynchronize(0) == hipSuccess;
   /* A job without finite candidates fails alone, as its own draft would. */
   for (Job& j : jobs) {
     if (!ok) break;
     ds41_dspark_draft_request& r = *j.req;
     bool valid = true;
     if (j.stochastic) {
-      ok = hipMemcpyAsync(r.state->proposals, sc.proposals + j.row0, r.count * sizeof(q[0]), hipMemcpyDeviceToDevice,
-                          0) == hipSuccess;
       for (uint32_t i = 0; i < r.count && ok && valid; i++) {
-        const ds41_v41_proposal& p = q[j.row0 + i];
+        const ds41_v41_proposal& p = out_q[j.row0 + i];
         valid = p.token >= 0;  // fewer than eight finite candidates
         if (valid) r.sampler->retain(r.sampler->ctx, i, p.ids, p.masses, p.size, p.token);
         if (r.top) r.top[i] = (float)p.masses[0] / (float)(1u << 24);
         r.drafts[i] = p.token;
       }
     } else {
-      for (uint32_t i = 0; i < r.count; i++) r.drafts[i] = tokens[(uint64_t)(j.row0 / kRows) * kTokenStride + 1 + i];
+      const uint64_t base = (uint64_t)(j.row0 / kRows) * kTokenStride + 1;
+      for (uint32_t i = 0; i < r.count; i++)
+        r.drafts[i] = out_tokens[base + i];
     }
     if (!valid) continue;
     if (r.confidence) {
       if (has_confidence)
-        std::copy_n(conf.data() + j.row0, r.count, r.confidence);
+        std::copy_n(out_conf + j.row0, r.count, r.confidence);
       else
         std::fill_n(r.confidence, r.count, -1.0f);
     }

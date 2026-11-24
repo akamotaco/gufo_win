@@ -11,9 +11,10 @@
 
 #include <algorithm>
 #include <array>
-#include <cmath>
-#include <cstdio>
 #include <atomic>
+#include <cmath>
+#include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <future>
 #include <memory>
@@ -295,7 +296,7 @@ struct Activations {
  * current batch's own rows are in (ds41_decoder_set_lookahead). Valid for
  * the batch whose position, tokens and n-gram history match. */
 struct EngramAhead {
-  std::future<bool> read;
+  uint64_t tickets[DS41_N_ENGRAM_LAYER] = {};
   const ds41_decoder* owner = nullptr;
   uint32_t pos = 0;
   size_t history = 0;
@@ -314,6 +315,182 @@ struct HostRows {
   float* row(uint64_t t) const {
     return t < split ? lo + t * kEngramIn : hi + (t - split) * kEngramIn;
   }
+};
+
+/* Persistent worker pool for parallel Engram pread + dequant jobs. Jobs run
+ * strictly in FIFO submission order (layer 1 before layer 14, current batch
+ * before lookahead), eliminating per-step thread spawns and std::async. */
+class EngramPool {
+public:
+  static constexpr uint32_t kMaxWorkers = 32;
+  static constexpr uint32_t kRing = 16;
+
+  ~EngramPool() { Shutdown(); }
+
+  uint64_t Submit(const ds41_engine* engine, const int64_t* rows, uint32_t n,
+                  HostRows out) {
+    const uint64_t count = (uint64_t)n * DS41_ENGRAM_COLS;
+    std::unique_lock<std::mutex> lock(mu_);
+    EnsureWorkersLocked();
+    done_cv_.wait(lock, [&] { return tail_ - completed_ < kRing; });
+    const uint64_t ticket = ++tail_;
+    Job& j = ring_[(ticket - 1) % kRing];
+    j.engine = engine;
+    j.rows = rows;
+    j.out = out;
+    j.count = count;
+    j.in_flight = 0;
+    j.next.store(0, std::memory_order_relaxed);
+    j.ok.store(true, std::memory_order_relaxed);
+    if (head_ + 1 == ticket) {
+      if (count == 0) {
+        ok_ring_[head_ % kRing] = true;
+        ++head_;
+        completed_ = head_;
+        done_cv_.notify_all();
+      } else {
+        WakeForLocked(count);
+      }
+    }
+    return ticket;
+  }
+
+  bool Wait(uint64_t ticket) {
+    if (ticket == 0)
+      return true;
+    std::unique_lock<std::mutex> lock(mu_);
+    done_cv_.wait(lock, [&] { return completed_ >= ticket; });
+    return ok_ring_[(ticket - 1) % kRing];
+  }
+
+  void Shutdown() {
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      stop_ = true;
+    }
+    work_cv_.notify_all();
+    for (std::thread& t : workers_)
+      if (t.joinable())
+        t.join();
+    workers_.clear();
+  }
+
+private:
+  struct Job {
+    const ds41_engine* engine = nullptr;
+    const int64_t* rows = nullptr;
+    HostRows out;
+    uint64_t count = 0;
+    uint32_t in_flight = 0;
+    std::atomic<uint64_t> next{0};
+    std::atomic<bool> ok{true};
+  };
+
+  void EnsureWorkersLocked() {
+    if (!workers_.empty())
+      return;
+    workers_.reserve(kMaxWorkers);
+    for (uint32_t w = 0; w < kMaxWorkers; ++w)
+      workers_.emplace_back([this] { WorkerLoop(); });
+  }
+
+  void WakeForLocked(uint64_t count) {
+    const uint32_t want = (uint32_t)std::min<uint64_t>(
+        kMaxWorkers, (count + kEngramRowsPerThread - 1) / kEngramRowsPerThread);
+    if (want >= kMaxWorkers) {
+      work_cv_.notify_all();
+    } else {
+      for (uint32_t i = 0; i < want; ++i)
+        work_cv_.notify_one();
+    }
+  }
+
+  void DrainEmptyLocked() {
+    bool drained = false;
+    while (head_ < tail_ && ring_[head_ % kRing].count == 0) {
+      ok_ring_[head_ % kRing] = true;
+      ++head_;
+      completed_ = head_;
+      drained = true;
+    }
+    if (drained)
+      done_cv_.notify_all();
+  }
+
+  void WorkerLoop() {
+    std::vector<uint8_t> raw;
+    std::unique_lock<std::mutex> lock(mu_);
+    for (;;) {
+      DrainEmptyLocked();
+      if (stop_)
+        return;
+      if (head_ >= tail_ ||
+          ring_[head_ % kRing].next.load(std::memory_order_relaxed) >=
+              ring_[head_ % kRing].count) {
+        work_cv_.wait(lock);
+        continue;
+      }
+      Job* job = &ring_[head_ % kRing];
+      ++job->in_flight;
+      const ds41_engram_tables* e = job->engine->engram;
+      const ds41_tensor* table = e->table;
+      const uint64_t base = table->abs_offset - e->file.shard_offset[0];
+      const int fd = e->file.shard_fd[0];
+      const uint64_t row_bytes = e->row_bytes;
+      const uint32_t type = table->type;
+      const int64_t* rows = job->rows;
+      const HostRows out = job->out;
+      const uint64_t count = job->count;
+      lock.unlock();
+
+      if (raw.size() < row_bytes)
+        raw.resize(row_bytes);
+      for (;;) {
+        const uint64_t i = job->next.fetch_add(1, std::memory_order_relaxed);
+        if (i >= count)
+          break;
+        if (!job->ok.load(std::memory_order_relaxed))
+          continue;
+        float* dst = out.row(i / DS41_ENGRAM_COLS) +
+                     (i % DS41_ENGRAM_COLS) * DS41_ENGRAM_HEAD_DIM;
+        if (rows[i] < 0) {
+          std::fill_n(dst, DS41_ENGRAM_HEAD_DIM, 0.0f);
+          continue;
+        }
+        const off_t at = (off_t)(base + (uint64_t)rows[i] * row_bytes);
+        if (pread(fd, raw.data(), row_bytes, at) != (ssize_t)row_bytes ||
+            !dequant_row(type, raw.data(), dst, DS41_ENGRAM_HEAD_DIM))
+          job->ok.store(false, std::memory_order_relaxed);
+      }
+
+      lock.lock();
+      --job->in_flight;
+      if (job->in_flight == 0 &&
+          job->next.load(std::memory_order_relaxed) >= count) {
+        const bool ok = job->ok.load(std::memory_order_relaxed);
+        if (!ok)
+          fprintf(stderr, "ds41: Engram row read failed\n");
+        ok_ring_[head_ % kRing] = ok;
+        ++head_;
+        completed_ = head_;
+        DrainEmptyLocked();
+        done_cv_.notify_all();
+        if (head_ < tail_)
+          WakeForLocked(ring_[head_ % kRing].count);
+      }
+    }
+  }
+
+  std::mutex mu_;
+  std::condition_variable work_cv_;
+  std::condition_variable done_cv_;
+  std::vector<std::thread> workers_;
+  Job ring_[kRing];
+  bool ok_ring_[kRing] = {};
+  uint64_t head_ = 0;
+  uint64_t tail_ = 0;
+  uint64_t completed_ = 0;
+  bool stop_ = false;
 };
 
 /* Device pages mapped at chosen addresses; ranges whose buffers are never
@@ -410,6 +587,7 @@ struct SharedActivations {
    * while the next batch's rows land in the other. */
   float* engram_ahead[DS41_N_ENGRAM_LAYER] = {};
   EngramAhead ahead;
+  EngramPool engram_pool;
   /* views is narrow, or wide while a long prompt runs (ds41_decoder_map_wide):
    * the same device buffers, wide's extra rows mapped. gen counts the
    * switches, so decoders refresh their copy of views. */
@@ -427,7 +605,8 @@ struct SharedActivations {
   float* engram_wide[2][DS41_N_ENGRAM_LAYER] = {};
   bool wide_mapped = false;
   ~SharedActivations() {
-    if (ahead.read.valid()) ahead.read.wait();
+    engram_pool.Wait(ahead.tickets[DS41_N_ENGRAM_LAYER - 1]);
+    engram_pool.Shutdown();
     for (auto& set : engram_wide)
       for (float* p : set)
         if (p)
@@ -450,7 +629,9 @@ struct SharedActivations {
 
 /* Waits for a pending Engram lookahead read and drops it. */
 void join_engram_ahead(SharedActivations& sh) {
-  if (sh.ahead.read.valid()) (void)sh.ahead.read.get();
+  (void)sh.engram_pool.Wait(sh.ahead.tickets[DS41_N_ENGRAM_LAYER - 1]);
+  for (uint64_t& t : sh.ahead.tickets)
+    t = 0;
   sh.ahead.owner = nullptr;
 }
 
@@ -761,48 +942,7 @@ bool engram_tail_matches(const int64_t* tail, const std::vector<int64_t>& histor
   return std::equal(now, now + DS41_ENGRAM_MAX_NGRAM - 1, tail);
 }
 
-/* Reads and dequantizes the n * DS41_ENGRAM_COLS table rows of a layer into
- * out; a negative row id (an image position) reads zeros, whose Engram term
- * is exactly zero, as the official masked gate. Reads run on parallel threads: each is a small random read, so
- * throughput comes from queue depth. Touches only immutable engine state, so
- * it can run while the GPU works on earlier layers. */
-bool engram_read(const ds41_engine* engine, const int64_t* rows, uint32_t n,
-                 HostRows out) {
-  const ds41_engram_tables* e = engine->engram;
-  const ds41_tensor* table = e->table;
-  const uint64_t base = table->abs_offset - e->file.shard_offset[0];
-  const uint64_t count = (uint64_t)n * DS41_ENGRAM_COLS;
-  std::atomic<uint64_t> next{0};
-  std::atomic<bool> ok{true};
-  auto worker = [&] {
-    std::vector<uint8_t> raw(e->row_bytes);
-    for (uint64_t i = next++; i < count && ok; i = next++) {
-      if (rows[i] < 0) {
-        std::fill_n(out.row(i / DS41_ENGRAM_COLS) +
-                        i % DS41_ENGRAM_COLS * DS41_ENGRAM_HEAD_DIM,
-                    DS41_ENGRAM_HEAD_DIM, 0.0f);
-        continue;
-      }
-      const off_t at = (off_t)(base + (uint64_t)rows[i] * e->row_bytes);
-      if (pread(e->file.shard_fd[0], raw.data(), raw.size(), at) !=
-              (ssize_t)raw.size() ||
-          !dequant_row(table->type, raw.data(),
-                       out.row(i / DS41_ENGRAM_COLS) +
-                           i % DS41_ENGRAM_COLS * DS41_ENGRAM_HEAD_DIM,
-                       DS41_ENGRAM_HEAD_DIM))
-        ok = false;
-    }
-  };
-  const uint32_t threads = (uint32_t)std::min<uint64_t>(32, (count + kEngramRowsPerThread - 1) / kEngramRowsPerThread);
-  std::vector<std::thread> pool;
-  for (uint32_t t = 1; t < threads; t++) pool.emplace_back(worker);
-  worker();
-  for (auto& t : pool) t.join();
-  if (!ok) fprintf(stderr, "ds41: Engram row read failed\n");
-  return ok;
-}
-
-/* Adds layer il's Engram term from rows read by engram_read. */
+/* Adds layer il's Engram term from rows read by engram_pool. */
 bool engram(ds41_decoder* d, uint32_t il, HostRows rows, uint32_t n) {
   const ds41_layer_weights* l = &d->engine->weights->layer[il];
   const uint64_t lo = std::min<uint64_t>(n, rows.split),
@@ -2508,8 +2648,8 @@ bool replay_boundary(ds41_decoder* d, uint32_t il, int prev, uint32_t skip, uint
 int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from, float* logits,
               uint32_t logit_rows, ds41_decoder_layer_fn layer_fn, void* ctx) {
   if (!d || !tokens || n == 0 || n > ds41_decoder_batch_capacity(d) ||
-      logit_rows > n || (logit_rows && !logits) || d->pos + n > d->context ||
-      d->spec_n)
+      logit_rows > n || (logit_rows > kLogitRows && !logits) ||
+      d->pos + n > d->context || d->spec_n)
     return 1;
   sync_views(d);
   d->resident_logits = 0;
@@ -2544,39 +2684,49 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
 
   /* A lookahead read made during the previous batch serves this one when it
    * covered exactly these tokens after the same history; any other pending
-   * lookahead read is joined, since it writes buffers this batch may use. */
+   * lookahead read finishes ahead of this batch in the FIFO pool. */
   SharedActivations& sh = *d->shared;
   EngramAhead& ahead = sh.ahead;
-  const bool from_ahead = ahead.read.valid() && ahead.owner == d && ahead.pos == pos0 &&
-                          ahead.history == history && engram_tail_matches(ahead.tail, d->engram_history, history) &&
-                          ahead.tokens.size() == n && std::equal(tokens, tokens + n, ahead.tokens.begin()) &&
-                          d->image_runs.empty();
+  const bool from_ahead =
+      ahead.tickets[0] != 0 && ahead.owner == d && ahead.pos == pos0 &&
+      ahead.history == history &&
+      engram_tail_matches(ahead.tail, d->engram_history, history) &&
+      ahead.tokens.size() == n &&
+      std::equal(tokens, tokens + n, ahead.tokens.begin()) &&
+      d->image_runs.empty();
   const int set = from_ahead ? ahead.set : 0;
-  /* The chain below waits for it, so only the first Engram layer does. */
-  std::future<bool> pending = std::move(ahead.read);
+  uint64_t pending_tickets[DS41_N_ENGRAM_LAYER] = {};
+  for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER; slot++) {
+    pending_tickets[slot] = ahead.tickets[slot];
+    ahead.tickets[slot] = 0;
+  }
   const std::vector<int64_t> pending_rows = std::move(ahead.rows);
   ahead.owner = nullptr;
   HostRows engram_src[DS41_N_ENGRAM_LAYER];
   for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER; slot++)
     engram_src[slot] = engram_host_rows(sh, set, slot);
 
-  /* Otherwise every Engram layer's rows are read while the GPU runs the
-   * layers before it, one layer after the other in layer order: the first
-   * Engram layer runs a layer after the batch starts, and the later layer's
-   * rows only slowed it down. Slots are in layer order. The chain is joined
-   * before the promises and rows it writes go out of scope. */
-  std::promise<bool> engram_done[DS41_N_ENGRAM_LAYER];
-  std::shared_future<bool> engram_reads[DS41_N_ENGRAM_LAYER];
-  for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER; slot++) engram_reads[slot] = engram_done[slot].get_future().share();
-  std::future<void> engram_chain = std::async(std::launch::async, [&] {
-    const bool ahead_ok = !pending.valid() || pending.get() || !from_ahead;
-    for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER; slot++)
-      engram_done[slot].set_value(from_ahead ? ahead_ok
-                                             : engram_read(d->engine, &engram_rows[(uint64_t)slot * n * DS41_ENGRAM_COLS],
-                                                           n, engram_src[slot]));
-  });
-  /* The next prompt batch's rows are read into the other buffer set once
-   * this batch's are in, so its first Engram layer does not wait for them. */
+  /* Every Engram layer's rows are read in layer order on the persistent pool
+   * while the GPU runs the layers before it. The guard waits before local
+   * engram_rows / pending_rows go out of scope. */
+  uint64_t engram_tickets[DS41_N_ENGRAM_LAYER] = {};
+  for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER; slot++)
+    engram_tickets[slot] =
+        from_ahead ? pending_tickets[slot]
+                   : sh.engram_pool.Submit(
+                         d->engine,
+                         &engram_rows[(uint64_t)slot * n * DS41_ENGRAM_COLS], n,
+                         engram_src[slot]);
+  struct EngramGuard {
+    EngramPool* pool;
+    uint64_t ticket;
+    ~EngramGuard() {
+      if (ticket)
+        (void)pool->Wait(ticket);
+    }
+  } engram_guard{&sh.engram_pool, engram_tickets[DS41_N_ENGRAM_LAYER - 1]};
+  /* The next prompt batch's rows are queued right behind this batch's in the
+   * FIFO pool into the other buffer set. */
   if (!d->lookahead.empty() && d->images.empty() &&
       d->lookahead.size() <= ds41_decoder_batch_capacity(d)) {
     const uint32_t m = (uint32_t)d->lookahead.size();
@@ -2594,25 +2744,17 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
     engram_tail(d->engram_history, ahead.history, ahead.tail);
     ahead.tokens = d->lookahead;
     ahead.set = set ^ 1;
-    std::array<HostRows, DS41_N_ENGRAM_LAYER> targets;
     for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER; slot++)
-      targets[slot] = engram_host_rows(sh, ahead.set, slot);
-    ahead.read = std::async(std::launch::async, [after = engram_reads[DS41_N_ENGRAM_LAYER - 1], engine = d->engine,
-                                                 rows = ahead.rows.data(), m, targets] {
-      after.wait();
-      bool read_ok = true;
-      for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER; slot++)
-        read_ok = engram_read(engine, rows + (uint64_t)slot * m * DS41_ENGRAM_COLS, m, targets[slot]) && read_ok;
-      return read_ok;
-    });
+      ahead.tickets[slot] = sh.engram_pool.Submit(
+          d->engine,
+          ahead.rows.data() + (uint64_t)slot * m * DS41_ENGRAM_COLS, m,
+          engram_host_rows(sh, ahead.set, slot));
   }
 
   /* Embedding, replicated over the hc residual streams; layer 0 pre-mix is one-hot. */
   const ds41_tensor* embd = w->token_embd;
   const uint64_t row_bytes = embd->bytes / DS41_N_VOCAB;
   float* embd_rows = d->embd_pinned;
-  float* one_hot = embd_rows + (uint64_t)n * kDim;
-  memset(one_hot, 0, (uint64_t)n * kHc * sizeof(float));
   /* Long batches dequantize their rows on a few threads. */
   auto dequant_rows = [&](uint32_t begin, uint32_t end) {
     bool rows_ok = true;
@@ -2627,8 +2769,8 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
     dequant_parts[i - 1] = std::async(std::launch::async, dequant_rows, std::min(n, i * step), std::min(n, (i + 1) * step));
   bool ok = dequant_rows(0, std::min(n, step));
   for (uint32_t i = 1; i < parts; i++) ok = dequant_parts[i - 1].get() && ok;
-  for (uint32_t t = 0; t < n; t++) one_hot[(uint64_t)t * kHc] = 1.0f;
-  /* One upload into xn (free until the first block), then a device copy per stream. */
+  /* One upload into xn (free until the first block), then one kernel to
+   * replicate across the hc streams and initialize the one-hot pre-mix. */
   ok = ok && hipMemcpyAsync(d->xn, embd_rows, (uint64_t)n * kDim * sizeof(float), hipMemcpyHostToDevice, 0) ==
                  hipSuccess;
   /* Image rows replace their placeholder embeddings (merge_image_embeddings). */
@@ -2638,12 +2780,7 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
       ok = hipMemcpyAsync(d->xn + (uint64_t)(first - pos0) * kDim, image.data + (uint64_t)(first - image.pos) * kDim,
                           (uint64_t)(end - first) * kDim * sizeof(float), hipMemcpyDeviceToDevice, 0) == hipSuccess;
   }
-  /* A kernel, not hipMemcpy2DAsync: a wide batch's rows span two mappings
-   * (ds41_decoder_map_wide), which a 2D copy refuses. */
-  for (uint32_t c = 0; c < kHc && ok; c++)
-    ok = ds41_v41_copy_rows(d->h + c * kDim, hd, d->xn, kDim, n, kDim) == 0;
-  ok = ok && hipMemcpyAsync(d->pre[0], one_hot, (uint64_t)n * kHc * sizeof(float), hipMemcpyHostToDevice, 0) ==
-                 hipSuccess;
+  ok = ok && ds41_v41_init_hc(d->xn, d->h, d->pre[0], kHc, kDim, n) == 0;
   d->pass_end = kept ? DS41_N_LAYER : DS41_FIRST_DECODER_LAYER;
   d->trace_tail = skip && kept <= kTraceRows ? kept : 0;
   ok = ok && predict_first_layer(d, n);
@@ -2661,7 +2798,9 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
       if (!ok || !kept) break;
     }
     const int slot = ds41_layer_engram_slot(il);
-    if (slot >= 0) ok = engram_reads[slot].get() && engram(d, il, engram_src[slot], n);
+    if (slot >= 0)
+      ok = sh.engram_pool.Wait(engram_tickets[slot]) &&
+           engram(d, il, engram_src[slot], n);
     if (d->features) {
       for (uint32_t f = 0; f < DS41_DSPARK_TARGET_LAYERS && ok; f++)
         if (il == DS41_DSPARK_TARGET_LAYER[f])
@@ -2689,15 +2828,19 @@ int eval_rows(ds41_decoder* d, const int* tokens, uint32_t n, uint32_t keep_from
                                    d->xn, kHc, kDim, DS41_RMS_EPS, logit_rows) == 0;
     for (uint32_t r = 0; r < logit_rows && ok; r += kLogitRows) {
       const uint32_t rows = std::min(kLogitRows, logit_rows - r);
-      ok = linear(d, w->output, d->xn + (uint64_t)r * kDim, d->logits, rows) &&
-           (!d->argmax_out || ds41_v41_argmax_rows(d->logits, DS41_N_VOCAB, rows, d->row_argmax + r) == 0) &&
-           hipMemcpy(logits + (uint64_t)r * DS41_N_VOCAB, d->logits, (uint64_t)rows * DS41_N_VOCAB * sizeof(float),
-                     hipMemcpyDeviceToHost) == hipSuccess;
+      ok =
+          linear(d, w->output, d->xn + (uint64_t)r * kDim, d->logits, rows) &&
+          (!d->argmax_out || ds41_v41_argmax_rows(d->logits, DS41_N_VOCAB, rows,
+                                                  d->row_argmax + r) == 0) &&
+          (!logits || hipMemcpy(logits + (uint64_t)r * DS41_N_VOCAB, d->logits,
+                                (uint64_t)rows * DS41_N_VOCAB * sizeof(float),
+                                hipMemcpyDeviceToHost) == hipSuccess);
     }
     ok = ok && (!d->argmax_out || hipMemcpy(d->argmax_out, d->row_argmax, logit_rows * sizeof(int32_t),
                                             hipMemcpyDeviceToHost) == hipSuccess);
   }
-  ok = ok && hipDeviceSynchronize() == hipSuccess;
+  ok = ok && ((logit_rows && (logits || d->argmax_out)) ||
+              hipDeviceSynchronize() == hipSuccess);
   if (!ok) {
     /* The device state is partial; callers reset or reload before reuse. */
     d->engram_history.resize(history);
@@ -2742,6 +2885,18 @@ static bool ensure_row_argmax(ds41_decoder* d) {
   return d->row_argmax != nullptr;
 }
 
+int ds41_decoder_eval_argmax(ds41_decoder* d, const int* tokens, uint32_t n,
+                             float* logits, uint32_t logit_rows,
+                             int32_t* argmax) {
+  if (!d || (argmax && (logit_rows > kLogitRows || !ensure_row_argmax(d))))
+    return 1;
+  d->argmax_out = argmax;
+  const int rc =
+      eval_rows(d, tokens, n, 0, logits, logit_rows, nullptr, nullptr);
+  d->argmax_out = nullptr;
+  return rc;
+}
+
 int ds41_decoder_eval_speculative(ds41_decoder* d, const int* tokens, uint32_t n, float* logits, int32_t* argmax) {
   static_assert(DS41_DECODER_MAX_SPECULATIVE <= DS41_V41_GEMV_MAX_TOKENS &&
                 DS41_DECODER_MAX_SPECULATIVE <= DS41_V41_ATTN_SPLIT_MAX_TOKENS &&
@@ -2764,13 +2919,13 @@ int ds41_decoder_eval_joint(ds41_decoder* const* ds, const int* const* tokens, c
                             float* const* logits, int32_t* const* argmax) {
   static_assert(DS41_DECODER_MAX_JOINT <= DS41_V41_GEMV_MAX_TOKENS && DS41_DECODER_MAX_JOINT <= kMinCapacity &&
                 DS41_DECODER_MAX_JOINT <= kLogitRows && DS41_DECODER_MAX_JOINT <= DS41_V41_ATTN_SPLIT_MAX_TOKENS);
-  if (!ds || !tokens || !ns || !logits || count == 0) return 1;
+  if (!ds || !tokens || !ns || count == 0) return 1;
   ds41_decoder* lead = ds[0];
   uint32_t total = 0;
   for (uint32_t i = 0; i < count; i++) {
     ds41_decoder* d = ds[i];
-    if (!d || !tokens[i] || !logits[i] || d->spec_n || ns[i] == 0 || ns[i] > DS41_DECODER_MAX_SPECULATIVE ||
-        d->pos + ns[i] > d->context)
+    if (!d || !tokens[i] || d->spec_n || ns[i] == 0 ||
+        ns[i] > DS41_DECODER_MAX_SPECULATIVE || d->pos + ns[i] > d->context)
       return 1;
     for (uint32_t j = 0; j < i; j++)
       if (ds[j] == d) return 1;
@@ -2804,37 +2959,37 @@ int ds41_decoder_eval_joint(ds41_decoder* const* ds, const int* const* tokens, c
   }
   /* A pending prompt lookahead read may write these buffers. */
   join_engram_ahead(*lead->shared);
-  std::future<bool> engram_reads[DS41_N_ENGRAM_LAYER];
-  for (uint32_t il = 0; il < DS41_N_LAYER; il++) {
-    const int slot = ds41_layer_engram_slot(il);
-    if (slot >= 0)
-      engram_reads[slot] =
-          std::async(std::launch::async, engram_read, lead->engine,
-                     &engram_rows[(uint64_t)slot * total * DS41_ENGRAM_COLS],
-                     total, HostRows{lead->engram_pinned[slot]});
-  }
+  uint64_t engram_tickets[DS41_N_ENGRAM_LAYER] = {};
+  for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER; slot++)
+    engram_tickets[slot] = lead->shared->engram_pool.Submit(
+        lead->engine, &engram_rows[(uint64_t)slot * total * DS41_ENGRAM_COLS],
+        total, HostRows{lead->engram_pinned[slot]});
+  struct EngramGuard {
+    EngramPool* pool;
+    uint64_t ticket;
+    ~EngramGuard() {
+      if (ticket)
+        (void)pool->Wait(ticket);
+    }
+  } engram_guard{&lead->shared->engram_pool,
+                 engram_tickets[DS41_N_ENGRAM_LAYER - 1]};
 
   /* Embedding, replicated over the hc residual streams; layer 0 pre-mix is one-hot. */
   const ds41_tensor* embd = w->token_embd;
   const uint64_t row_bytes = embd->bytes / DS41_N_VOCAB;
   float* embd_rows = lead->embd_pinned;
-  float* one_hot = embd_rows + (uint64_t)total * kDim;
-  memset(one_hot, 0, (uint64_t)total * kHc * sizeof(float));
   bool ok = true;
   for (uint32_t i = 0; i < count && ok; i++)
     for (uint32_t t = 0; t < ns[i] && ok; t++) {
       const uint64_t r = first[i] + t;
       ok = dequant_row(embd->type, host(lead, embd) + (uint64_t)tokens[i][t] * row_bytes, embd_rows + r * kDim,
                        kDim);
-      one_hot[r * kHc] = 1.0f;
     }
-  ok = ok && hipMemcpyAsync(lead->xn, embd_rows, (uint64_t)total * kDim * sizeof(float), hipMemcpyHostToDevice,
-                            0) == hipSuccess;
-  for (uint32_t c = 0; c < kHc && ok; c++)
-    ok = hipMemcpy2DAsync(lead->h + c * kDim, hd * sizeof(float), lead->xn, kDim * sizeof(float),
-                          kDim * sizeof(float), total, hipMemcpyDeviceToDevice, 0) == hipSuccess;
-  ok = ok && hipMemcpyAsync(lead->pre[0], one_hot, (uint64_t)total * kHc * sizeof(float), hipMemcpyHostToDevice,
-                            0) == hipSuccess;
+  ok = ok &&
+       hipMemcpyAsync(lead->xn, embd_rows,
+                      (uint64_t)total * kDim * sizeof(float),
+                      hipMemcpyHostToDevice, 0) == hipSuccess &&
+       ds41_v41_init_hc(lead->xn, lead->h, lead->pre[0], kHc, kDim, total) == 0;
 
   /* Each session's views start at its rows; every one takes the decode paths. */
   for (uint32_t i = 0; i < count; i++) {
@@ -2853,7 +3008,7 @@ int ds41_decoder_eval_joint(ds41_decoder* const* ds, const int* const* tokens, c
   for (uint32_t il = 0; il < DS41_N_LAYER && ok; il++) {
     const int slot = ds41_layer_engram_slot(il);
     if (slot >= 0)
-      ok = engram_reads[slot].get() &&
+      ok = lead->shared->engram_pool.Wait(engram_tickets[slot]) &&
            engram(lead, il, HostRows{lead->engram_pinned[slot]}, total);
     for (uint32_t i = 0; i < count && ok; i++) {
       ds41_decoder* d = ds[i];
@@ -2865,8 +3020,6 @@ int ds41_decoder_eval_joint(ds41_decoder* const* ds, const int* const* tokens, c
     }
     ok = ok && block(lead, il, prev, prev ^ 1, total, &joint, &mixed, next_layer(lead, il, false));
   }
-  for (uint32_t slot = 0; slot < DS41_N_ENGRAM_LAYER; slot++)
-    if (engram_reads[slot].valid()) engram_reads[slot].wait();
 
   /* Final mix and norm, the vocabulary projection, and each session's rows. */
   if (ok)
@@ -2876,13 +3029,19 @@ int ds41_decoder_eval_joint(ds41_decoder* const* ds, const int* const* tokens, c
   int32_t ids[DS41_DECODER_MAX_JOINT];
   ok = ok && (!argmax || (ensure_row_argmax(lead) &&
                           ds41_v41_argmax_rows(lead->logits, DS41_N_VOCAB, total, lead->row_argmax) == 0));
+  bool copied_any = false;
   for (uint32_t i = 0; i < count && ok; i++)
-    ok = hipMemcpy(logits[i], lead->logits + (uint64_t)first[i] * DS41_N_VOCAB,
-                   (uint64_t)ns[i] * DS41_N_VOCAB * sizeof(float), hipMemcpyDeviceToHost) == hipSuccess;
+    if (logits && logits[i]) {
+      ok =
+          hipMemcpy(logits[i], lead->logits + (uint64_t)first[i] * DS41_N_VOCAB,
+                    (uint64_t)ns[i] * DS41_N_VOCAB * sizeof(float),
+                    hipMemcpyDeviceToHost) == hipSuccess;
+      copied_any = true;
+    }
   ok = ok && (!argmax || hipMemcpy(ids, lead->row_argmax, total * sizeof(int32_t), hipMemcpyDeviceToHost) == hipSuccess);
   for (uint32_t i = 0; i < count && ok && argmax; i++)
     if (argmax[i]) memcpy(argmax[i], ids + first[i], ns[i] * sizeof(int32_t));
-  ok = ok && hipDeviceSynchronize() == hipSuccess;
+  ok = ok && (copied_any || argmax || hipDeviceSynchronize() == hipSuccess);
   const uint64_t gen = ok ? ++lead->shared->logits_gen : 0;
   for (uint32_t i = 0; i < count; i++) {
     ds41_decoder* d = ds[i];
@@ -2981,6 +3140,16 @@ bool ds41_decoder_softmax_totals(ds41_decoder* d, uint32_t row, float temperatur
   const float* logits = d->shared->views.logits + (uint64_t)(d->logits_row0 + row) * DS41_N_VOCAB;
   return d->sample_scratch &&
          ds41_v41_softmax_totals(logits, DS41_N_VOCAB, temperature, d->sample_scratch, maximum, sum) == 0;
+}
+
+bool ds41_decoder_copy_logits(ds41_decoder* d, uint32_t row, float* out) {
+  if (!d || !out || row >= d->resident_logits ||
+      d->logits_gen != d->shared->logits_gen)
+    return false;
+  const float* logits =
+      d->shared->views.logits + (uint64_t)(d->logits_row0 + row) * DS41_N_VOCAB;
+  return hipMemcpy(out, logits, DS41_N_VOCAB * sizeof(float),
+                   hipMemcpyDeviceToHost) == hipSuccess;
 }
 
 bool ds41_decoder_enable_features(ds41_decoder* d) {

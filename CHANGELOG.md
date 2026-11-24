@@ -7,6 +7,14 @@ Notable user-facing changes are recorded here. Versions follow `version` in
 
 ### Performance
 
+* **decode:** single- and multi-session decode now defers logits downloads until
+  host sampling, logprobs, snapshots or cache capture need them, computes 1-row
+  argmax on the device, reads Engram rows on a persistent FIFO worker pool,
+  broadcasts initial embeddings with one `init_hc` kernel, and pairs `q_a`+`kv`
+  / overlaps `hc_mix` in the DSpark drafter; outputs are unchanged. AR greedy
+  decode is 0.35% faster (−0.20 ms/token) and traced drafter passes drop
+  7.93 → 7.79 ms
+  ([E137](docs/models/deepseek-v4.1-flash/EXPERIMENTS.md#e137--lazy-logits-download-persistent-engram-pool-and-drafter-pass-cleanups-retained)).
 * **decode:** grouped routed-expert GEMV kernels now use uniform SGPR column
   offsets (eliminating register spills so 2–8-row passes run in one launch) and
   a task-major scalar-activation kernel for wide 9–16-row batches and
