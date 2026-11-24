@@ -367,6 +367,7 @@ usable higher-quality streamed option once item 27 runs it.
 | 16 | Multi-user AR decode | Distinct-prompt `IQ1_M` C8 63.0 tok/s against a ~93 tok/s read ceiling | Card refresh with distinct prompts, then a C8 trace |
 | 10 | Batch-level draft width | DSpark trails AR with distinct prompts at C4 (53.6 against 55.5) and C8 (59.3 against 63.0) | Re-measure E27's batch plan after E42 |
 | 27 | Streamed kernels for the `IQ2_XS` build | Prerequisite for item 23 | IQ3_XXS down, IQ2_S gate/up paths |
+| 44 | Our own functional suites | Gufo's suites target its core models and fail on output-length or cache-budget details for this one (`reasoning-budget` after E138, `tool-images` since 0.4.0) | Not now: port them, likely to a Gufo fork shared with Hy4 and Gemma |
 
 ### 16. Multi-user AR decode below the card
 
@@ -404,6 +405,17 @@ launches per token, AR −0.4%); each matrix still adds its down launch.
 One-launch kernels lost (E98), so the remaining option is the A dot as an
 epilogue of the GEMV producing its input, or one launch for the shared and
 routed FFN downs (the shared one already overlaps the streamed host gap).
+
+### 44. Our own functional suites
+
+Gufo's `tests/functional` suites are written for its core models; an
+external model's failures there are ours to judge. Some are flaky or
+fragile for this one: `reasoning-budget` needs the control reply to reason
+past 64 tokens, which 0.5.0 cleared by 4 and E138 missed by 2 with the same
+answer; `tool-images` fails its text-array replay after other suites
+since 0.4.0. Port the suites we rely on, likely to a Gufo fork so one
+copy covers Hy4, Gemma and this model, with checks set for each model's
+outputs. Not scheduled.
 
 ## Tried and closed
 
