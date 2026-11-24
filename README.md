@@ -14,8 +14,8 @@ so `main` here is an upstream release plus what upstream does not carry:
 
 | Layer | Source | What it brings |
 | --- | --- | --- |
-| Engine and Windows build | [gufo-org/gufo](https://github.com/gufo-org/gufo) `main` (v0.35.0 + 46, November 22, 2026) | Gufo itself, the `windows-release` preset and its Windows platform code; since #1046/#1047 also every hook the Gemma 4 extension needs |
-| Gemma 4 engine | [franzmoca/gemma4-gufo-extension](https://github.com/franzmoca/gemma4-gufo-extension) with Windows fixes: branch [`gemma4-ext`](https://github.com/akamotaco/gufo_win/tree/gemma4-ext) of this repository, built with `-DGUFO_EXTENSION_DIRS` | Gemma 4 26B-A4B / 31B with MTP, vision and tool calls |
+| Engine and Windows build | [gufo-org/gufo](https://github.com/gufo-org/gufo) `main` (v0.36.0 + 18, November 24, 2026) | Gufo itself, the `windows-release` preset and its Windows platform code; since #1046/#1047 also every hook the Gemma 4 extension needs |
+| Gemma 4 engine | [franzmoca/gemma4-gufo-extension](https://github.com/franzmoca/gemma4-gufo-extension) 0.2.2, which includes this fork's Windows fixes since #9: branch [`gemma4-ext`](https://github.com/akamotaco/gufo_win/tree/gemma4-ext) of this repository (upstream plus a README), built with `-DGUFO_EXTENSION_DIRS` | Gemma 4 26B-A4B / 31B with MTP, vision and tool calls |
 | Fork-only fixes | this repository | See below |
 
 Fork-only changes:
@@ -165,6 +165,23 @@ Re-checked on v0.35.0 + 46 (November 22-23; #1321 Flash-Next wave32 MoE and Q8_0
   decode 38.5-55.3 tok/s, i.e. within about 2% of November 17: no visible gain on this setup.
 - AtomicChat Q5_K_M, 1 x 262,144: prefill 1,600-1,607 / 1,636-1,649 / 1,652-1,666 /
   1,568-1,576 tok/s, decode 39.9-58.3 tok/s; tool calls, images and copy test pass.
+
+Re-checked on v0.36.0 + 18 (November 24; #1366 HTTP server on tokio/hyper, #1364/#1372
+Flash-Next stages and weight sources, #1318 MoE weight streaming) with Gemma 4 extension 0.2.2,
+which now carries this fork's Windows fixes (franzmoca/gemma4-gufo-extension#9). Branch
+`q5_k_m` had one conflict, in `qwen38_flash_next/kernels/rocm/device_model.cpp`: the AtomicChat
+upload helpers stay, and anything they do not convert goes through upstream's `Projection()`.
+Same power setting as before (Balance, 120 W):
+- Gemma 4 26B: 8/8 identical, tool calls, images, copy test at 439 and 75,648 tokens pass.
+  Prefill 2,996 / 3,187 / 2,620 / 1,312 tok/s (2.1K / 8.5K / 31.8K / 160K), decode 50-53
+  (37.8 at 160K).
+- Orca Q4Mix and AtomicChat Q5_K_M: same draft acceptance as November 22-23 (identical outputs);
+  tool calls, images and copy test at 411 and 75,620 tokens pass. Prefill is 3-6% lower
+  (Q4Mix 1,552-1,574 / 1,549-1,600 / 1,597-1,618 / 1,530-1,547; AtomicChat 1,571 / 1,596 /
+  1,573 / 1,486 tok/s) and decode 2-3% lower. `gufo bench --speculative none` on AtomicChat
+  shows the same in the kernels: pp512/2K/8K/32K 1,154 / 1,667 / 1,758 / 1,685 tok/s
+  (November 23: 1,239 / 1,763 / 1,840 / 1,784), tg256 29.0 (29.5). Q4Mix, which takes no
+  AtomicChat path, slowed as much, so the cause is likely upstream; it was not bisected.
 
 | Model | Sessions x context | Prompt | Prefill (tok/s) | Decode, MTP (tok/s) |
 | --- | --- | --- | ---: | ---: |
