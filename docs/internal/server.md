@@ -1588,6 +1588,27 @@ a restart is the only recovery.
 
 ## Metrics
 
+`/metrics` renders a registry that lives in Rust (`src/core/metrics`, wrapped
+for C++ by `src/core/metrics.hpp`) in the Prometheus text format. The text
+server registers its families once, in `TextMetrics`
+(`src/cli/serve/generation_metrics.hpp`), and the scheduler and request paths
+update them through typed handles. An update neither locks nor allocates. A
+text scrape sets the process-global gauges and renders them under one mutex,
+so concurrent scrapes do not interleave.
+
+Families render in registration order, and `GET /metrics` answers with
+`Content-Type: text/plain; version=0.0.4`. Integer samples print as integers.
+Fractional samples print with 17 significant digits, as a C++ stream set to
+`max_digits10` does, so 0.1 reads `0.10000000000000001`. A non-finite sample
+reads `NaN`, `+Inf` or `-Inf`. A histogram has fixed upper bounds chosen at
+registration and renders as cumulative `_bucket{le="..."}` lines with `_sum`
+and `_count`. Its bounds and sum print in the shortest form that reads back
+exactly, so `le="0.1"` stays `0.1`. A histogram counts a non-finite observation
+in its `+Inf` bucket and in `_count` but leaves it out of `_sum`.
+`gufo_device_lost_total` counts confirmed GPU context losses.
+`tests/fixtures/metrics/text_server.golden` pins the text server's body byte
+for byte.
+
 `/metrics` exposes total prompt/generated tokens and the latest prompt/decode
 speeds. The token counters advance as each prefill chunk and generated token
 executes, so their rates show live throughput; prompt tokens exclude cache
@@ -1609,6 +1630,15 @@ even if the client disconnects before reading it; requests that fail in the
 scheduler, such as on a deadline or a runner error, add none of these.
 `llamacpp:kv_cache_usage_ratio` is the in-flight prompt and generated tokens
 over sessions times context; retained cache entries are not counted.
+Each scrape sets `llamacpp:kv_cache_usage_ratio` and the shared-state and
+prompt-state gauges from the backend. `gufo_shared_state_bytes`,
+`gufo_shared_state_charged_bytes`, `gufo_shared_state_reclaimable_bytes` and
+`gufo_shared_state_max_prompt_tokens` report the demand-mapped state the
+sessions share, and `gufo_shared_state_waits_total`,
+`gufo_shared_state_pauses_total` and `gufo_shared_state_preemptions_total`
+count requests that waited, decoding requests that paused, and requests
+stopped with `memory_pressure`. These families are absent from the text for
+backends that do not share session state.
 `gufo_prompt_state_budget_bytes` is the host RAM prompt state may claim before
 admission refuses, `gufo_prompt_state_reserved_bytes` the bytes charged to
 in-flight requests, and `gufo_prompt_state_available_bytes` the remainder.
@@ -1768,7 +1798,11 @@ Each request to `/v1/chat/completions`, `/v1/completions`, `/v1/responses`,
   miss detail the completion log also reports, `generated_tokens`, `finish`,
   `error` when generation failed, the `prompt` decoded from its tokens with
   special tokens spelled out, and the raw `output` before reasoning and
-  tool-call parsing.
+  tool-call parsing. The parser's inputs follow: the model's `tool_dialect`,
+  its `reasoning` markup (`open` and `close`), the chat's
+  `initial_output_state` and `pieces`, the end offset in bytes of each piece
+  the parser read. `tools/generation_parse/corpus.py` turns a trace into
+  cases for `generation_parse_test`, without the prompts.
 - `response`: `status`, `outcome`, whether the reply was a `stream`, and the
   `body` the client received. For a stream this is the event stream as
   written, `: ping` keepalives included, so a difference between streaming and
@@ -1814,7 +1848,12 @@ Loading logs report elapsed time, model, context and session capacity,
 speculative mode and memory. `rss_mib` is process resident memory;
 `host_available_mib` is available system memory. At load completion,
 `gpu_device_used_mib` is device-wide HIP usage. These overlap on unified memory
-and must not be added together.
+and must not be added together. A failed load adds `gpu_device_free_mib` and
+`gpu_device_total_mib`, read after the partial upload is freed, and on Linux
+`gtt_used_mib` and `gtt_total_mib`. On Linux the free value counts GPU memory
+held by other processes, which `host_available_mib` can miss: a small free value
+with plenty of host memory available means another GPU process holds the
+memory. On Windows it counts only this process's allocations.
 With disk caching enabled, `phase=artifact_identity` identifies full-file
 SHA-256 work. Digests are cached against the open file's identity, size and
 modification/change timestamps; unchanged artifacts avoid another scan.
@@ -1836,6 +1875,8 @@ lazily in the worker. Control characters are escaped in log lines.
   including that `--log-level` and `-v` change the emitted log rather than only
   parsing.
 - `openai_chat_test`: chat parsing, streaming, images, tools and sampling controls.
+- `chat_request_test`: the Rust request decoder for Chat Completions, Responses
+  and Messages against frozen copies of the C++ decoders it replaced.
 - Per-model serving tests: greedy/sampled decoding, batching, cache reuse and
   cancellation. Use the affected model's benchmark README for commands and limits.
 

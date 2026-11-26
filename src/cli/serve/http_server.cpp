@@ -19,6 +19,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <ranges>
@@ -33,6 +34,7 @@
 #include "src/cli/serve/audio_asr_api.hpp"
 #include "src/cli/serve/audio_tts_api.hpp"
 #include "src/cli/serve/audio_websocket.hpp"
+#include "src/cli/serve/chat_request.hpp"
 #include "src/cli/serve/decision_service.hpp"
 #include "src/cli/serve/embedding_service.hpp"
 #include "src/cli/serve/embeddings_api.hpp"
@@ -259,197 +261,6 @@ HttpResponse NotImplemented(const HttpRequest&, TextGenerationBackend&) {
   return Err(501, "Not Implemented",
              "endpoint not implemented on this text model", "server_error",
              "not_implemented");
-}
-
-// Parse a role string into a ChatRole.
-tokenization::ChatRole RoleFrom(const std::string& r) {
-  if (r == "system")
-    return tokenization::ChatRole::kSystem;
-  if (r == "developer")
-    return tokenization::ChatRole::kDeveloper;
-  if (r == "assistant")
-    return tokenization::ChatRole::kAssistant;
-  if (r == "tool")
-    return tokenization::ChatRole::kTool;
-  return tokenization::ChatRole::kUser;
-}
-
-// Messages replays assistant reasoning as thinking blocks. Restore it as the
-// turn's thought so the prompt reproduces the generated tokens.
-bool ReadTextContent(const json::Value* content, std::string* out,
-                     std::string* thought = nullptr,
-                     tokenization::ChatMessage* image_message = nullptr,
-                     core::ImageReadBudget* image_budget = nullptr,
-                     std::string* error = nullptr) {
-  if (content == nullptr)
-    return false;
-  if (content->is_string()) {
-    *out = content->get_str();
-  } else if (content->is_array()) {
-    for (const auto& part : content->items()) {
-      if (thought != nullptr && part.is_object() &&
-          part.member_str("type") == "thinking") {
-        const auto* thinking = part.find("thinking");
-        if (thinking == nullptr || !thinking->is_string())
-          return false;
-        *thought += thinking->str();
-        continue;
-      }
-      // Messages images ride along with the text of a user turn; `out` is
-      // that message's content, so the image lands at its current end.
-      if (image_message != nullptr && part.is_object() &&
-          part.member_str("type") == "image") {
-        std::string ignored;
-        if (!ParseAnthropicImage(part, image_message, *image_budget,
-                                 error != nullptr ? error : &ignored))
-          return false;
-        continue;
-      }
-      const auto* text = part.find("text");
-      const auto type = part.member_str("type");
-      if (!part.is_object() || text == nullptr || !text->is_string() ||
-          (type != "text" && type != "input_text" && type != "output_text")) {
-        return false;
-      }
-      *out += text->str();
-    }
-  } else {
-    return false;
-  }
-  return true;
-}
-
-bool ReadTextMessages(const json::Value* input,
-                      std::vector<tokenization::ChatMessage>* messages,
-                      bool images_supported, bool responses = false,
-                      std::string* parse_error = nullptr) {
-  core::ImageReadBudget image_budget;
-  image_budget.accepts_images = images_supported;
-  if (input == nullptr || !input->is_array() || input->empty())
-    return false;
-  // Responses replays one assistant turn as several reasoning, message and
-  // function_call items. A system/developer item between them would split
-  // that turn, so it waits until the next item that starts a new message.
-  std::vector<tokenization::ChatMessage> deferred;
-  const auto push = [&](tokenization::ChatMessage message) {
-    for (auto& system : deferred)
-      messages->push_back(std::move(system));
-    deferred.clear();
-    messages->push_back(std::move(message));
-  };
-  for (const auto& item : input->items()) {
-    if (!responses && item.is_object() && item.find("content") &&
-        item.find("content")->is_array() &&
-        std::ranges::any_of(item.find("content")->items(),
-                            [](const auto& part) {
-                              return part.is_object() &&
-                                     (part.member_str("type") == "tool_use" ||
-                                      part.member_str("type") == "tool_result");
-                            })) {
-      std::string error;
-      if (!ParseAnthropicToolMessage(item, messages, image_budget, &error)) {
-        if (parse_error && !error.empty())
-          *parse_error = std::move(error);
-        return false;
-      }
-      continue;
-    }
-    if (responses && (item.member_str("type") == "function_call" ||
-                      item.member_str("type") == "function_call_output" ||
-                      item.member_str("type") == "custom_tool_call" ||
-                      item.member_str("type") == "custom_tool_call_output")) {
-      tokenization::ChatMessage message;
-      std::string error;
-      if (!ParseOpenAiResponseMessage(item, &message, image_budget, &error)) {
-        if (parse_error && !error.empty())
-          *parse_error = std::move(error);
-        return false;
-      }
-      if (message.role == tokenization::ChatRole::kAssistant &&
-          !messages->empty() &&
-          messages->back().role == tokenization::ChatRole::kAssistant) {
-        auto& calls = messages->back().tool_calls;
-        calls.insert(calls.end(), message.tool_calls.begin(),
-                     message.tool_calls.end());
-      } else {
-        push(std::move(message));
-      }
-      continue;
-    }
-    if (responses && item.member_str("type") == "reasoning") {
-      const auto* summary = item.find("summary");
-      const auto* encrypted = item.find("encrypted_content");
-      const auto* content = item.find("content");
-      // Codex replays null-valued content and encrypted_content echoed by
-      // OpenAI; only non-null payload carries reasoning we cannot restore.
-      if (summary == nullptr || !summary->is_array() ||
-          (encrypted != nullptr && !encrypted->is_null()) ||
-          (content != nullptr && !content->is_null()))
-        return false;
-      tokenization::ChatMessage reasoning;
-      reasoning.role = tokenization::ChatRole::kAssistant;
-      for (const auto& part : summary->items()) {
-        const auto* text = part.find("text");
-        if (part.member_str("type") != "summary_text" || text == nullptr ||
-            !text->is_string())
-          return false;
-        reasoning.thought += text->str();
-      }
-      push(std::move(reasoning));
-      continue;
-    }
-    const auto role = item.member_str("role");
-    if (!item.is_object() ||
-        (role != "user" && role != "assistant" && role != "system" &&
-         role != "developer") ||
-        item.member_str("type", "message") != "message" ||
-        item.contains("tool_calls")) {
-      return false;
-    }
-    tokenization::ChatMessage message;
-    message.role = RoleFrom(role);
-    if (responses) {
-      std::string error;
-      if (!ParseOpenAiResponseMessage(item, &message, image_budget, &error)) {
-        if (parse_error && !error.empty())
-          *parse_error = std::move(error);
-        return false;
-      }
-    } else {
-      std::string error;
-      if (!ReadTextContent(item.find("content"), &message.content,
-                           message.role == tokenization::ChatRole::kAssistant
-                               ? &message.thought
-                               : nullptr,
-                           message.role == tokenization::ChatRole::kUser
-                               ? &message
-                               : nullptr,
-                           &image_budget, &error)) {
-        if (parse_error && !error.empty())
-          *parse_error = std::move(error);
-        return false;
-      }
-    }
-    if (responses &&
-        (message.role == tokenization::ChatRole::kSystem ||
-         message.role == tokenization::ChatRole::kDeveloper) &&
-        !messages->empty() &&
-        messages->back().role == tokenization::ChatRole::kAssistant) {
-      deferred.push_back(std::move(message));
-      continue;
-    }
-    if (responses && message.role == tokenization::ChatRole::kAssistant &&
-        !messages->empty() &&
-        messages->back().role == tokenization::ChatRole::kAssistant &&
-        messages->back().content.empty() && !messages->back().thought.empty()) {
-      messages->back().content = std::move(message.content);
-    } else {
-      push(std::move(message));
-    }
-  }
-  for (auto& system : deferred)
-    messages->push_back(std::move(system));
-  return true;
 }
 
 HttpResponse InvalidCompatibilityRequest(std::string_view message) {
@@ -984,66 +795,44 @@ HttpResponse OpenAiCompletions(const HttpRequest& req,
              "invalid_prompt");
 }
 
-std::optional<HttpResponse> ReadOpenAiResponseChat(
-    const json::Value& body, TextGenerationBackend& b, ChatRequest* chat,
-    std::size_t* max_tokens, sampling::SamplingConfig* sampling_config) {
-  chat->reasoning = b.reasoning_defaults();
-  if (auto error = ParseOpenAiResponseControls(body, chat))
+// Responses and Messages bodies decode in Rust (src/core/chat_request) from
+// the server's reasoning defaults, with this file's compatibility validator
+// at the point each API checks it.
+std::optional<HttpResponse> DecodeCompatibilityChat(
+    ChatApi api, const HttpRequest& req, TextGenerationBackend& b,
+    DecodedChatRequest* decoded) {
+  auto environment = ChatEnvironment(b);
+  environment.compatibility =
+      [&b](ChatApi api, const json::Value& body, std::optional<bool> thinking,
+           std::size_t* max_tokens, sampling::SamplingConfig* sampling) {
+        if (api == ChatApi::kResponses)
+          return ReadCompatibilityOptions(
+              body, b, "max_output_tokens", max_tokens, sampling, thinking,
+              {.stream = true, .response_controls = true});
+        return ReadCompatibilityOptions(body, b, "max_tokens", max_tokens,
+                                        sampling, thinking,
+                                        {.stop_field = "stop_sequences",
+                                         .stream = true,
+                                         .thinking = true,
+                                         .output_config = true,
+                                         .tools = true});
+      };
+  if (auto error = DecodeChatRequest(api, req.body, environment,
+                                     /*require_model=*/true, decoded))
     return error;
-  if (auto error = ReadCompatibilityOptions(
-          body, b, "max_output_tokens", max_tokens, sampling_config,
-          chat->reasoning.enabled,
-          {.stream = true, .response_controls = true})) {
-    return error;
-  }
-  if (const auto error = ParseResponsesLogprobs(body, sampling_config))
-    return Err(400, "Bad Request", error->message.c_str(),
-               "invalid_request_error", error->code.c_str());
-
-  std::vector<tokenization::ChatMessage> messages;
-  if (const auto* instructions = body.find("instructions")) {
-    if (!instructions->is_string()) {
-      return InvalidCompatibilityRequest("'instructions' must be a string");
-    }
-    messages.push_back(
-        {tokenization::ChatRole::kSystem, instructions->str(), "", ""});
-  }
-  const auto* input = body.find("input");
-  std::string input_error =
-      "'input' must contain text, message items with text/images, reasoning "
-      "items, function calls or function outputs";
-  if (input != nullptr && input->is_string() && !input->str().empty()) {
-    messages.push_back({tokenization::ChatRole::kUser, input->str(), "", ""});
-  } else if (!ReadTextMessages(input, &messages, b.supports_images(), true,
-                               &input_error)) {
-    return InvalidCompatibilityRequest(input_error);
-  }
-
-  chat->messages = std::move(messages);
   return std::nullopt;
 }
 
 HttpResponse OpenAiResponses(const HttpRequest& req,
                              TextGenerationBackend& b) try {
-  json::Value body;
-  try {
-    body = json::parse(req.body);
-  } catch (const std::exception& e) {
-    return Err(400, "Bad Request", e.what(), "invalid_request_error",
-               "parse_error");
-  }
-
-  ChatRequest chat;
-  std::size_t max_tokens = 0;
-  sampling::SamplingConfig sampling_config;
+  DecodedChatRequest decoded;
   if (auto error =
-          ReadOpenAiResponseChat(body, b, &chat, &max_tokens, &sampling_config))
+          DecodeCompatibilityChat(ChatApi::kResponses, req, b, &decoded))
     return std::move(*error);
-  chat.client_id = req.client_id;
+  decoded.chat.client_id = req.client_id;
   return CreateOpenAiResponse(
-      req, b, chat, max_tokens, sampling_config,
-      body.find("stream") != nullptr && body.find("stream")->as_bool(),
-      RequestedModel(body, b));
+      req, b, decoded.chat, decoded.max_tokens.value_or(0), decoded.sampling,
+      decoded.stream, decoded.model ? *decoded.model : b.model_id());
 } catch (const std::length_error& error) {
   return Err(400, "Bad Request", error.what(), "invalid_request_error",
              "context_length_exceeded");
@@ -1054,22 +843,12 @@ HttpResponse OpenAiResponses(const HttpRequest& req,
 
 HttpResponse OpenAiResponsesInputTokens(const HttpRequest& req,
                                         TextGenerationBackend& b) try {
-  json::Value body;
-  try {
-    body = json::parse(req.body);
-  } catch (const std::exception& e) {
-    return Err(400, "Bad Request", e.what(), "invalid_request_error",
-               "parse_error");
-  }
-
-  ChatRequest chat;
-  std::size_t max_tokens = 0;
-  sampling::SamplingConfig sampling_config;
+  DecodedChatRequest decoded;
   if (auto error =
-          ReadOpenAiResponseChat(body, b, &chat, &max_tokens, &sampling_config))
+          DecodeCompatibilityChat(ChatApi::kResponses, req, b, &decoded))
     return std::move(*error);
-  chat.client_id = req.client_id;
-  return CountOpenAiInputTokens(chat, b);
+  decoded.chat.client_id = req.client_id;
+  return CountOpenAiInputTokens(decoded.chat, b);
 } catch (const std::length_error& error) {
   return Err(400, "Bad Request", error.what(), "invalid_request_error",
              "context_length_exceeded");
@@ -1078,144 +857,16 @@ HttpResponse OpenAiResponsesInputTokens(const HttpRequest& req,
              "invalid_prompt");
 }
 
-// Messages selects reasoning with thinking.type; adaptive leaves the choice to
-// the server's default. With enabled thinking, budget_tokens caps the
-// reasoning tokens, as llama.cpp does; enabled thinking keeps the server's
-// effort unless output_config.effort sets it.
-// Reasoning is returned for every display, because replayed thinking blocks
-// restore the cached thought.
-std::optional<HttpResponse> ReadThinking(const json::Value& body,
-                                         ReasoningOptions* reasoning) {
-  const auto* thinking = body.find("thinking");
-  if (thinking == nullptr)
-    return {};
-  const auto* type = thinking->is_object() ? thinking->find("type") : nullptr;
-  if (type == nullptr || !type->is_string() ||
-      (type->str() != "enabled" && type->str() != "adaptive" &&
-       type->str() != "disabled"))
-    return InvalidCompatibilityRequest(
-        "'thinking.type' must be enabled, adaptive, or disabled");
-  if (const auto* budget = thinking->find("budget_tokens");
-      budget != nullptr &&
-      (!budget->is_number() || !std::isfinite(budget->as_double()) ||
-       budget->as_double() < 1 ||
-       budget->as_double() > std::numeric_limits<std::int32_t>::max() ||
-       std::floor(budget->as_double()) != budget->as_double()))
-    return InvalidCompatibilityRequest(
-        "'thinking.budget_tokens' must be a positive integer at most "
-        "2147483647");
-  else if (budget != nullptr && type->str() == "enabled")
-    reasoning->budget_tokens = static_cast<std::size_t>(budget->as_double());
-  if (const auto* display = thinking->find("display");
-      display != nullptr &&
-      (!display->is_string() ||
-       (display->str() != "summarized" && display->str() != "omitted" &&
-        display->str() != "updates")))
-    return InvalidCompatibilityRequest(
-        "'thinking.display' must be summarized, omitted, or updates");
-  if (type->str() != "adaptive")
-    reasoning->enabled = type->str() == "enabled";
-  return {};
-}
-
-std::optional<HttpResponse> ReadMessagesOutputConfig(
-    const json::Value& body, ReasoningOptions* options) {
-  const auto* config = body.find("output_config");
-  if (config == nullptr || config->is_null())
-    return {};
-  if (!config->is_object())
-    return InvalidCompatibilityRequest("'output_config' must be an object");
-  for (const auto& [key, value] : config->members()) {
-    if (key != "effort")
-      return InvalidCompatibilityRequest("unsupported output_config member: " +
-                                         key);
-    if (value.is_null())
-      continue;
-    // Anthropic effort does not select thinking, so it never enables it;
-    // formatters apply it only while thinking is on. Anthropic has no minimal
-    // effort.
-    const auto effort = value.is_string() && value.str() != "minimal"
-                            ? ParseReasoningEffortName(value.str())
-                            : std::nullopt;
-    if (!effort.has_value())
-      return InvalidCompatibilityRequest(
-          "'output_config.effort' must be low, medium, high, xhigh, or max");
-    options->effort = effort;
-  }
-  return {};
-}
-
-// The request fields Messages and count_tokens share: sampling and reasoning
-// controls, tools, system text and the turns.
-std::optional<HttpResponse> ReadAnthropicChat(
-    const json::Value& body, TextGenerationBackend& b, ChatRequest* chat,
-    std::size_t* max_tokens, sampling::SamplingConfig* sampling_config) {
-  chat->reasoning = b.reasoning_defaults();
-  if (body.is_object()) {
-    if (auto error = ReadThinking(body, &chat->reasoning))
-      return error;
-    if (auto error = ReadMessagesOutputConfig(body, &chat->reasoning))
-      return error;
-  }
-  if (auto error =
-          ReadCompatibilityOptions(body, b, "max_tokens", max_tokens,
-                                   sampling_config, chat->reasoning.enabled,
-                                   {.stop_field = "stop_sequences",
-                                    .stream = true,
-                                    .thinking = true,
-                                    .output_config = true,
-                                    .tools = true})) {
-    return error;
-  }
-  if (auto error = ParseAnthropicToolControls(body, chat))
-    return error;
-
-  std::vector<tokenization::ChatMessage> messages;
-  if (const auto* system = body.find("system")) {
-    std::string text;
-    if (!ReadTextContent(system, &text)) {
-      return InvalidCompatibilityRequest("'system' must contain only text");
-    }
-    messages.push_back(
-        {tokenization::ChatRole::kSystem, std::move(text), "", ""});
-  }
-  std::string messages_error =
-      "'messages' must contain text, image, thinking, tool_use or tool_result "
-      "blocks";
-  if (!ReadTextMessages(body.find("messages"), &messages, b.supports_images(),
-                        false, &messages_error)) {
-    return InvalidCompatibilityRequest(messages_error);
-  }
-
-  chat->messages = std::move(messages);
-  if (const auto error = ParseStopSequences(body.find("stop_sequences"),
-                                            StopSequenceFormat::kAnthropic,
-                                            &chat->stop_sequences))
-    return InvalidCompatibilityRequest(*error);
-  return std::nullopt;
-}
-
 HttpResponse AnthropicMessages(const HttpRequest& req,
                                TextGenerationBackend& b) try {
-  json::Value body;
-  try {
-    body = json::parse(req.body);
-  } catch (const std::exception& e) {
-    return Err(400, "Bad Request", e.what(), "invalid_request_error",
-               "parse_error");
-  }
-
-  ChatRequest chat;
-  std::size_t max_tokens = 0;
-  sampling::SamplingConfig sampling_config;
+  DecodedChatRequest decoded;
   if (auto error =
-          ReadAnthropicChat(body, b, &chat, &max_tokens, &sampling_config))
+          DecodeCompatibilityChat(ChatApi::kMessages, req, b, &decoded))
     return std::move(*error);
-  chat.client_id = req.client_id;
+  decoded.chat.client_id = req.client_id;
   return CreateAnthropicMessage(
-      req, b, chat, max_tokens, sampling_config,
-      body.find("stream") != nullptr && body.find("stream")->as_bool(),
-      RequestedModel(body, b));
+      req, b, decoded.chat, decoded.max_tokens.value_or(0), decoded.sampling,
+      decoded.stream, decoded.model ? *decoded.model : b.model_id());
 } catch (const std::length_error& error) {
   return Err(400, "Bad Request", error.what(), "invalid_request_error",
              "context_length_exceeded");
@@ -1227,23 +878,13 @@ HttpResponse AnthropicMessages(const HttpRequest& req,
 // The prompt size a Messages request would have, without generating.
 HttpResponse AnthropicCountTokens(const HttpRequest& req,
                                   TextGenerationBackend& b) try {
-  json::Value body;
-  try {
-    body = json::parse(req.body);
-  } catch (const std::exception& e) {
-    return Err(400, "Bad Request", e.what(), "invalid_request_error",
-               "parse_error");
-  }
-
-  ChatRequest chat;
-  std::size_t max_tokens = 0;
-  sampling::SamplingConfig sampling_config;
+  DecodedChatRequest decoded;
   if (auto error =
-          ReadAnthropicChat(body, b, &chat, &max_tokens, &sampling_config))
+          DecodeCompatibilityChat(ChatApi::kMessages, req, b, &decoded))
     return std::move(*error);
-  if (body.find("stream") != nullptr && body.find("stream")->as_bool())
+  if (decoded.stream)
     return InvalidCompatibilityRequest("'stream' must be false");
-  const auto tokens = b.count_chat_tokens(chat);
+  const auto tokens = b.count_chat_tokens(decoded.chat);
   if (!tokens)
     return NotImplemented(req, b);
   json::Value resp = json::Value::object();
@@ -1486,142 +1127,33 @@ double KvCacheUsageRatio(const TextGenerationBackend& b) {
 }
 
 HttpResponse LlamaMetrics(const HttpRequest&, TextGenerationBackend& b) {
-  std::ostringstream out;
-  out << std::setprecision(std::numeric_limits<double>::max_digits10);
-  out << "# HELP gufo_device_lost_total Confirmed GPU context losses\n"
-      << "# TYPE gufo_device_lost_total counter\n"
-      << "gufo_device_lost_total "
-      << detail::DeviceLostTotal().load(std::memory_order_relaxed) << "\n";
-  out << "# HELP llamacpp:prompt_tokens_total Total prompt tokens processed, "
-         "excluding cache hits\n"
-      << "# TYPE llamacpp:prompt_tokens_total counter\n"
-      << "llamacpp:prompt_tokens_total "
-      << detail::TotalPromptTokens().load(std::memory_order_relaxed) << "\n"
-      << "# HELP llamacpp:prompt_tokens_cached_total Total prompt tokens "
-         "reused from cache\n"
-      << "# TYPE llamacpp:prompt_tokens_cached_total counter\n"
-      << "llamacpp:prompt_tokens_cached_total "
-      << detail::TotalCachedPromptTokens().load(std::memory_order_relaxed)
-      << "\n"
-      << "# HELP llamacpp:prompt_seconds_total Prompt process time\n"
-      << "# TYPE llamacpp:prompt_seconds_total counter\n"
-      << "llamacpp:prompt_seconds_total "
-      << detail::TotalPromptSeconds().load(std::memory_order_relaxed) << "\n"
-      << "# HELP llamacpp:tokens_predicted_total Total tokens generated\n"
-      << "# TYPE llamacpp:tokens_predicted_total counter\n"
-      << "llamacpp:tokens_predicted_total "
-      << detail::TotalGenTokens().load(std::memory_order_relaxed) << "\n"
-      << "# HELP llamacpp:tokens_predicted_seconds_total Predict process "
-         "time\n"
-      << "# TYPE llamacpp:tokens_predicted_seconds_total counter\n"
-      << "llamacpp:tokens_predicted_seconds_total "
-      << detail::TotalGenSeconds().load(std::memory_order_relaxed) << "\n"
-      << "# HELP llamacpp:n_tokens_max Largest observed n_tokens.\n"
-      << "# TYPE llamacpp:n_tokens_max counter\n"
-      << "llamacpp:n_tokens_max "
-      << detail::MaxSequenceTokens().load(std::memory_order_relaxed) << "\n"
-      << "# HELP llamacpp:spec_decode_num_drafts_total Total speculative "
-         "verification rounds\n"
-      << "# TYPE llamacpp:spec_decode_num_drafts_total counter\n"
-      << "llamacpp:spec_decode_num_drafts_total "
-      << detail::TotalDraftRounds().load(std::memory_order_relaxed) << "\n"
-      << "# HELP llamacpp:spec_decode_num_draft_tokens_total Total draft "
-         "tokens proposed\n"
-      << "# TYPE llamacpp:spec_decode_num_draft_tokens_total counter\n"
-      << "llamacpp:spec_decode_num_draft_tokens_total "
-      << detail::TotalDraftTokens().load(std::memory_order_relaxed) << "\n"
-      << "# HELP llamacpp:spec_decode_num_accepted_tokens_total Total draft "
-         "tokens accepted\n"
-      << "# TYPE llamacpp:spec_decode_num_accepted_tokens_total counter\n"
-      << "llamacpp:spec_decode_num_accepted_tokens_total "
-      << detail::TotalDraftAcceptedTokens().load(std::memory_order_relaxed)
-      << "\n"
-      << "# HELP gufo_spec_lookup_tokens_total Total prompt-lookup copies "
-         "proposed\n"
-      << "# TYPE gufo_spec_lookup_tokens_total counter\n"
-      << "gufo_spec_lookup_tokens_total "
-      << detail::TotalLookupTokens().load(std::memory_order_relaxed) << "\n"
-      << "# HELP gufo_spec_lookup_accepted_tokens_total Total prompt-lookup "
-         "copies accepted\n"
-      << "# TYPE gufo_spec_lookup_accepted_tokens_total counter\n"
-      << "gufo_spec_lookup_accepted_tokens_total "
-      << detail::TotalLookupAcceptedTokens().load(std::memory_order_relaxed)
-      << "\n"
-      << "# HELP llamacpp:prompt_tokens_seconds Prompt processing speed in "
-         "tokens per second\n"
-      << "# TYPE llamacpp:prompt_tokens_seconds gauge\n"
-      << "llamacpp:prompt_tokens_seconds "
-      << detail::LastPromptSpeed().load(std::memory_order_relaxed) << "\n"
-      << "# HELP llamacpp:predicted_tokens_seconds Generation speed in tokens "
-         "per second\n"
-      << "# TYPE llamacpp:predicted_tokens_seconds gauge\n"
-      << "llamacpp:predicted_tokens_seconds "
-      << detail::LastGenSpeed().load(std::memory_order_relaxed) << "\n"
-      << "# HELP llamacpp:requests_processing Number of admitted requests, "
-         "including cache preparation\n"
-      << "# TYPE llamacpp:requests_processing gauge\n"
-      << "llamacpp:requests_processing "
-      << detail::RequestsProcessing().load(std::memory_order_relaxed) << "\n"
-      << "# HELP llamacpp:requests_deferred Number of requests waiting for a "
-         "session\n"
-      << "# TYPE llamacpp:requests_deferred gauge\n"
-      << "llamacpp:requests_deferred "
-      << detail::RequestsDeferred().load(std::memory_order_relaxed) << "\n"
-      << "# HELP llamacpp:kv_cache_usage_ratio In-flight prompt and generated "
-         "tokens over sessions times context; excludes retained cache\n"
-      << "# TYPE llamacpp:kv_cache_usage_ratio gauge\n"
-      << "llamacpp:kv_cache_usage_ratio " << KvCacheUsageRatio(b) << "\n";
-  if (const auto shared = b.shared_state()) {
-    out << "# HELP gufo_shared_state_bytes Session state the configured "
-           "sessions share when they do not all fit at full context\n"
-        << "# TYPE gufo_shared_state_bytes gauge\n"
-        << "gufo_shared_state_bytes " << shared->shared_bytes << "\n"
-        << "# HELP gufo_shared_state_charged_bytes Shared session state "
-           "charged to sessions\n"
-        << "# TYPE gufo_shared_state_charged_bytes gauge\n"
-        << "gufo_shared_state_charged_bytes " << shared->charged_bytes << "\n"
-        << "# HELP gufo_shared_state_reclaimable_bytes Charged session state "
-           "held by idle sessions or mapped past a session's need\n"
-        << "# TYPE gufo_shared_state_reclaimable_bytes gauge\n"
-        << "gufo_shared_state_reclaimable_bytes " << shared->reclaimable_bytes
-        << "\n"
-        << "# HELP gufo_shared_state_max_prompt_tokens Longest prompt the "
-           "shared session state holds\n"
-        << "# TYPE gufo_shared_state_max_prompt_tokens gauge\n"
-        << "gufo_shared_state_max_prompt_tokens " << shared->max_prompt_tokens
-        << "\n"
-        << "# HELP gufo_shared_state_waits_total Requests that waited for "
-           "shared session state\n"
-        << "# TYPE gufo_shared_state_waits_total counter\n"
-        << "gufo_shared_state_waits_total " << shared->waits << "\n"
-        << "# HELP gufo_shared_state_pauses_total Decoding requests paused "
-           "until shared session state freed\n"
-        << "# TYPE gufo_shared_state_pauses_total counter\n"
-        << "gufo_shared_state_pauses_total " << shared->pauses << "\n"
-        << "# HELP gufo_shared_state_preemptions_total Requests stopped "
-           "with memory_pressure so others could continue\n"
-        << "# TYPE gufo_shared_state_preemptions_total counter\n"
-        << "gufo_shared_state_preemptions_total " << shared->preemptions
-        << "\n";
+  // The cells are process-global, so a concurrent scrape could Show or Set
+  // between this scrape's updates and its render.
+  static std::mutex scrape_mutex;
+  const std::lock_guard<std::mutex> lock(scrape_mutex);
+  TextMetrics& metrics = Metrics();
+  metrics.kv_cache_usage_ratio.Set(KvCacheUsageRatio(b));
+  const auto shared = b.shared_state();
+  metrics.shared_state.Show(shared.has_value());
+  if (shared) {
+    metrics.shared_state.bytes.Set(shared->shared_bytes);
+    metrics.shared_state.charged_bytes.Set(shared->charged_bytes);
+    metrics.shared_state.reclaimable_bytes.Set(shared->reclaimable_bytes);
+    metrics.shared_state.max_prompt_tokens.Set(shared->max_prompt_tokens);
+    metrics.shared_state.waits.Set(shared->waits);
+    metrics.shared_state.pauses.Set(shared->pauses);
+    metrics.shared_state.preemptions.Set(shared->preemptions);
   }
-  if (const auto budget = b.prompt_admission_budget()) {
-    out << "# HELP gufo_prompt_state_budget_bytes Host RAM prompt state may "
-           "claim before admission refuses\n"
-        << "# TYPE gufo_prompt_state_budget_bytes gauge\n"
-        << "gufo_prompt_state_budget_bytes " << budget->budget_bytes << "\n"
-        << "# HELP gufo_prompt_state_reserved_bytes Host prompt state charged "
-           "to in-flight requests\n"
-        << "# TYPE gufo_prompt_state_reserved_bytes gauge\n"
-        << "gufo_prompt_state_reserved_bytes " << budget->used_bytes << "\n"
-        << "# HELP gufo_prompt_state_available_bytes Remaining host prompt "
-           "state budget\n"
-        << "# TYPE gufo_prompt_state_available_bytes gauge\n"
-        << "gufo_prompt_state_available_bytes " << budget->available_bytes
-        << "\n";
+  const auto budget = b.prompt_admission_budget();
+  metrics.prompt_state.Show(budget.has_value());
+  if (budget) {
+    metrics.prompt_state.budget_bytes.Set(budget->budget_bytes);
+    metrics.prompt_state.reserved_bytes.Set(budget->used_bytes);
+    metrics.prompt_state.available_bytes.Set(budget->available_bytes);
   }
   return {.status = 200,
           .reason = "OK",
-          .body = out.str(),
+          .body = metrics.registry.Render(),
           .headers = {{"Content-Type", "text/plain; version=0.0.4"}}};
 }
 

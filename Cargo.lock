@@ -166,8 +166,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "gufo-chat-request"
+version = "0.0.0"
+dependencies = [
+ "gufo-ffi",
+ "gufo-json",
+]
+
+[[package]]
+name = "gufo-chat-response"
+version = "0.0.0"
+dependencies = [
+ "gufo-ffi",
+ "gufo-json",
+]
+
+[[package]]
 name = "gufo-ffi"
 version = "0.0.0"
+
+[[package]]
+name = "gufo-generation-parse"
+version = "0.0.0"
+dependencies = [
+ "gufo-ffi",
+ "gufo-json",
+]
 
 [[package]]
 name = "gufo-gguf"
@@ -223,11 +247,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "gufo-png-decode"
+name = "gufo-metrics"
+version = "0.0.0"
+dependencies = [
+ "gufo-ffi",
+]
+
+[[package]]
+name = "gufo-png"
 version = "0.0.0"
 dependencies = [
  "gufo-ffi",
  "png",
+]
+
+[[package]]
+name = "gufo-realtime-voice"
+version = "0.0.0"
+dependencies = [
+ "gufo-base64",
+ "gufo-ffi",
+ "gufo-json",
 ]
 
 [[package]]
@@ -241,14 +281,28 @@ dependencies = [
  "gufo-audio-decode",
  "gufo-base64",
  "gufo-cache-manifest",
+ "gufo-chat-request",
+ "gufo-chat-response",
+ "gufo-generation-parse",
  "gufo-gguf",
  "gufo-http",
  "gufo-http-server",
  "gufo-jpeg-decode",
  "gufo-json",
  "gufo-json-schema",
- "gufo-png-decode",
+ "gufo-metrics",
+ "gufo-png",
+ "gufo-realtime-voice",
+ "gufo-tokenizer-json",
  "gufo-websocket",
+]
+
+[[package]]
+name = "gufo-tokenizer-json"
+version = "0.0.0"
+dependencies = [
+ "gufo-ffi",
+ "gufo-json",
 ]
 
 [[package]]

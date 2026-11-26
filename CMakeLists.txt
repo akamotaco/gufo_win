@@ -66,7 +66,6 @@ endif()
 find_package(ICU REQUIRED COMPONENTS uc i18n)
 find_package(Threads REQUIRED)
 find_package(CURL REQUIRED)
-find_package(PNG REQUIRED)
 if (WIN32)
   # Windows has no system pkg-config; locate the pkgconf tool vcpkg installs.
   # .pc files resolve via CMAKE_PREFIX_PATH, which the vcpkg toolchain already
@@ -315,7 +314,6 @@ if (ENGINE_ENABLE_HIP)
     "$<$<NOT:$<PLATFORM_ID:Windows>>:${PROJECT_SOURCE_DIR}/src/core/hip/copy_engine.cpp>"
     "$<$<PLATFORM_ID:Windows>:${PROJECT_SOURCE_DIR}/src/core/hip/copy_engine_windows.cpp>"
     src/core/hip/snapshot_copy.hip
-    src/core/hip/staging.cpp
     src/core/hip/transfer_pool.cpp)
   target_link_libraries(gufo_cache_hip PUBLIC gufo_cache gufo_hip_host hip::host)
   # The copy engine resolves ROCr's functions from the runtime HIP loaded, so
@@ -399,7 +397,9 @@ add_subdirectory(src/core/npu)
 
 add_library(gufo_core STATIC
   src/core/base64.cpp
+  src/core/metrics.cpp
   src/core/image.cpp
+  src/core/png.cpp
   src/core/crypto/sha256.cpp
   src/core/gguf_reader.cpp
   src/core/gguf_identity.cpp
@@ -542,9 +542,11 @@ add_library(gufo_http STATIC
   src/cli/serve/voice_page.cpp
   src/cli/serve/decision_service.cpp
   src/cli/serve/tts_websocket.cpp
+  src/cli/serve/chat_request.cpp
+  src/cli/serve/generation_parse.cpp
   src/cli/serve/openai_chat.cpp
 )
-target_link_libraries(gufo_http PUBLIC gufo_logging gufo_ext_runtime gufo_core gufo_qwen_text PNG::PNG)
+target_link_libraries(gufo_http PUBLIC gufo_logging gufo_ext_runtime gufo_core gufo_qwen_text)
 
 add_executable(gufo
   src/cli/main.cpp
@@ -969,7 +971,8 @@ endfunction()
   add_executable(json_constraint_test tests/core/json_constraint_test.cpp)
   target_link_libraries(json_constraint_test PRIVATE gufo_core)
   target_compile_definitions(json_constraint_test PRIVATE
-    GUFO_LLAMA_TOOL_GRAMMAR_GOLDENS="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/llama_cpp_tool_grammar.json")
+    GUFO_LLAMA_TOOL_GRAMMAR_GOLDENS="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/llama_cpp_tool_grammar.json"
+    GUFO_JSON_CONSTRAINT_GRAMMARS="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/json_constraint_grammars.json")
   add_test(NAME json_constraint_test COMMAND json_constraint_test)
   set_tests_properties(json_constraint_test PROPERTIES LABELS "cpu;json;sampling")
 
@@ -990,13 +993,18 @@ endfunction()
   add_test(NAME json_parse_test COMMAND json_parse_test)
   set_tests_properties(json_parse_test PROPERTIES LABELS "cpu;json;correctness")
 
-  # The test writes its PNG cases with zlib directly.
-  find_package(ZLIB REQUIRED)
-  add_executable(png_decode_test
-    tests/core/png_decode_test.cpp)
-  target_link_libraries(png_decode_test PRIVATE gufo_core PNG::PNG ZLIB::ZLIB)
-  add_test(NAME png_decode_test COMMAND png_decode_test)
-  set_tests_properties(png_decode_test PROPERTIES LABELS "cpu;image;correctness")
+  # Compares the Rust JSON writer with json::Value::dump; the Rust header
+  # comes from gufo_rust.
+  add_executable(json_write_test tests/core/json_write_test.cpp)
+  target_link_libraries(json_write_test PRIVATE gufo_json gufo_rust)
+  add_test(NAME json_write_test COMMAND json_write_test)
+  set_tests_properties(json_write_test PROPERTIES LABELS "cpu;json;correctness")
+
+  # The test writes its PNG cases itself, with stored deflate blocks.
+  add_executable(png_test tests/core/png_test.cpp)
+  target_link_libraries(png_test PRIVATE gufo_core)
+  add_test(NAME png_test COMMAND png_test)
+  set_tests_properties(png_test PROPERTIES LABELS "cpu;image;correctness")
 
   # libjpeg-turbo writes the cases and is the frozen reference decoder; the
   # shipped binary decodes JPEG in Rust.
@@ -1053,10 +1061,26 @@ endfunction()
   set_tests_properties(openai_chat_test PROPERTIES
     LABELS "cpu;server;api;openai;streaming;tools")
 
-  add_executable(quote_tracker_test tests/cli/quote_tracker_test.cpp)
-  target_link_libraries(quote_tracker_test PRIVATE gufo_core)
-  add_test(NAME quote_tracker_test COMMAND quote_tracker_test)
-  set_tests_properties(quote_tracker_test PROPERTIES LABELS "cpu;server;api")
+  # The Rust generation parser against a frozen copy of the C++ one it
+  # replaced, over the corpus in tests/fixtures/generation_parse, with the
+  # real Qwen and DeepSeek scanners and tool grammar.
+  add_executable(generation_parse_test
+    tests/cli/generation_parse_test.cpp
+    tests/cli/generation_parse_frozen.cpp
+  )
+  target_link_libraries(generation_parse_test PRIVATE gufo_core gufo_http
+    gufo_deepseek_v4_flash_text ${GUFO_QWEN_LIBRARIES})
+  # One test per corpus file, so a parallel ctest spreads them.
+  file(GLOB generation_parse_corpus CONFIGURE_DEPENDS
+    ${PROJECT_SOURCE_DIR}/tests/fixtures/generation_parse/*.json)
+  foreach(corpus IN LISTS generation_parse_corpus)
+    get_filename_component(corpus_name "${corpus}" NAME_WE)
+    string(REPLACE "-" "_" corpus_name "${corpus_name}")
+    add_test(NAME generation_parse_${corpus_name}_test
+      COMMAND generation_parse_test "${corpus}")
+    set_tests_properties(generation_parse_${corpus_name}_test PROPERTIES
+      LABELS "cpu;server;api;openai;streaming;tools")
+  endforeach()
 
   # Image provider startup options and request capabilities with fake
   # providers; no sockets, so it runs on every host.
@@ -1085,6 +1109,11 @@ endfunction()
   add_test(NAME base64_test COMMAND base64_test)
   set_tests_properties(base64_test PROPERTIES LABELS "cpu;server;correctness")
 
+  add_executable(metrics_test tests/core/metrics_test.cpp)
+  target_link_libraries(metrics_test PRIVATE gufo_http)
+  add_test(NAME metrics_test COMMAND metrics_test)
+  set_tests_properties(metrics_test PROPERTIES LABELS "cpu;server;correctness")
+
   add_executable(websocket_frame_test
     tests/cli/websocket_frame_test.cpp)
   target_link_libraries(websocket_frame_test PRIVATE gufo_core)
@@ -1098,6 +1127,15 @@ endfunction()
   add_test(NAME http_request_test COMMAND http_request_test)
   set_tests_properties(http_request_test PROPERTIES
     LABELS "cpu;server;http;correctness")
+
+  # The Rust chat request decoder against frozen C++ decoders; no sockets.
+  add_executable(chat_request_test
+    tests/cli/chat_request_test.cpp
+    tests/cli/chat_request_reference.cpp)
+  target_link_libraries(chat_request_test PRIVATE gufo_http)
+  add_test(NAME chat_request_test COMMAND chat_request_test)
+  set_tests_properties(chat_request_test PROPERTIES
+    LABELS "cpu;server;api;openai;correctness")
 
   add_executable(multipart_test
     tests/cli/multipart_test.cpp
@@ -1115,6 +1153,14 @@ endfunction()
   target_link_libraries(http_server_test PRIVATE gufo_http)
   add_test(NAME http_server_test COMMAND http_server_test)
   set_tests_properties(http_server_test PROPERTIES LABELS "cpu;server;http" TIMEOUT 30)
+
+  add_executable(metrics_golden_test tests/cli/metrics_golden_test.cpp)
+  target_link_libraries(metrics_golden_test PRIVATE gufo_http)
+  target_compile_definitions(metrics_golden_test PRIVATE
+    GUFO_METRICS_FIXTURES="${PROJECT_SOURCE_DIR}/tests/fixtures/metrics")
+  add_test(NAME metrics_golden_test COMMAND metrics_golden_test)
+  set_tests_properties(metrics_golden_test PROPERTIES
+    LABELS "cpu;server;http;correctness" TIMEOUT 30)
 
   add_executable(http_server_signals_test tests/cli/http_server_signals_test.cpp)
   target_link_libraries(http_server_signals_test PRIVATE gufo_http)
@@ -1206,6 +1252,16 @@ endfunction()
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/check_pr_title_test.py)
   set_tests_properties(check_pr_title_test PROPERTIES LABELS "cpu;docs" TIMEOUT 30)
+
+  add_test(NAME cache_growth_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/cache_growth_test.py)
+  set_tests_properties(cache_growth_test PROPERTIES LABELS "cpu;repository" TIMEOUT 30)
+
+  add_test(NAME prune_caches_test
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/tests/tools/prune_caches_test.py)
+  set_tests_properties(prune_caches_test PROPERTIES LABELS "cpu;repository" TIMEOUT 30)
 
   add_test(NAME extension_distribution_test
     COMMAND ${Python3_EXECUTABLE}
@@ -1639,11 +1695,6 @@ endfunction()
   target_link_libraries(exact_token_test PRIVATE gufo_core ${GUFO_QWEN_LIBRARIES})
   add_test(NAME exact_token_test COMMAND exact_token_test)
   set_tests_properties(exact_token_test PROPERTIES LABELS "cpu;quality;tokens")
-
-  add_executable(eval_regrade_test tests/quality/eval_regrade_test.cpp)
-  target_link_libraries(eval_regrade_test PRIVATE gufo_core gufo_eval)
-  add_test(NAME eval_regrade_test COMMAND eval_regrade_test)
-  set_tests_properties(eval_regrade_test PROPERTIES LABELS "cpu;quality;eval")
 
   add_test(NAME eval_http_test
     COMMAND ${Python3_EXECUTABLE}
