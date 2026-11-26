@@ -14,7 +14,7 @@ so `main` here is an upstream release plus what upstream does not carry:
 
 | Layer | Source | What it brings |
 | --- | --- | --- |
-| Engine and Windows build | [gufo-org/gufo](https://github.com/gufo-org/gufo) `main` (v0.36.0 + 18, November 24, 2026) | Gufo itself, the `windows-release` preset and its Windows platform code; since #1046/#1047 also every hook the Gemma 4 extension needs |
+| Engine and Windows build | [gufo-org/gufo](https://github.com/gufo-org/gufo) `main` (v0.37.0 + 5, November 26, 2026) | Gufo itself, the `windows-release` preset and its Windows platform code; since #1046/#1047 also every hook the Gemma 4 extension needs |
 | Gemma 4 engine | [franzmoca/gemma4-gufo-extension](https://github.com/franzmoca/gemma4-gufo-extension) 0.2.2, which includes this fork's Windows fixes since #9: branch [`gemma4-ext`](https://github.com/akamotaco/gufo_win/tree/gemma4-ext) of this repository (upstream plus a README), built with `-DGUFO_EXTENSION_DIRS` | Gemma 4 26B-A4B / 31B with MTP, vision and tool calls |
 | Fork-only fixes | this repository | See below |
 
@@ -184,6 +184,19 @@ Same power setting as before (Balance, 120 W):
   29.1-29.4 / 29.1-29.2 tok/s, and this branch before and after the merge 1,759 / 1,726-1,733,
   1,806-1,829 / 1,789-1,820 and 29.1-29.4 / 29.2-29.4. The earlier gap came from heat and run
   order: one build measured 1,621 to 1,754 tok/s at pp2048 depending on what ran before it.
+
+Re-checked on v0.37.0 + 5 (November 26; chat requests, responses, tool-call parsing and PNG
+encoding moved to Rust, #1397 one-row Q4_K draft head rounding) with Gemma 4 extension 0.2.2.
+The merge conflicted once more in `device_model.cpp` only (allocation error messages, #1396);
+the 256 MiB request image budget still applies, since chat request decoding reads images
+through the same `ImageReadBudget`:
+- Gemma 4 26B: 8/8 identical, tool calls (buffered and streamed), images, copy test at 439 and
+  75,648 tokens pass.
+- Orca Q4Mix: 8/8 chat outputs identical to v0.36.0 + 18, same draft acceptance; tool calls,
+  images and copy test at 411 and 75,620 tokens pass. Prefill 1,624 / 1,654 / 1,673 / 1,591 tok/s
+  (2.1K / 8.5K / 31.8K / 160K) measured right after load, decode 38-54.
+- AtomicChat Q5_K_M: same draft acceptance as November 23; tool calls, images and copy test
+  pass. Prefill 1,561 / 1,606 / 1,651 / 1,566 tok/s, decode 39-57.
 
 | Model | Sessions x context | Prompt | Prefill (tok/s) | Decode, MTP (tok/s) |
 | --- | --- | --- | ---: | ---: |
