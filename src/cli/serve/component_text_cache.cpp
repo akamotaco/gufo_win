@@ -411,8 +411,11 @@ struct ComponentTextCache::Impl {
                                         ? resources->committed_backing_bytes()
                                         : prepared;
     const std::uint64_t cached = claim.store->GetStats().cache_bytes;
-    const std::uint64_t available = ext::HostAvailableBytes();
-    const std::uint64_t keep = claim.headroom_bytes + pending;
+    // The prompt cache's backing is host memory: it competes with the expert
+    // cache only where that cache is host memory too.
+    const bool dedicated = expert_stream::CacheUsesDedicatedHeap();
+    const std::uint64_t available = expert_stream::CacheAvailableBytes();
+    const std::uint64_t keep = claim.headroom_bytes + (dedicated ? 0 : pending);
     const std::uint64_t grant =
         available > keep ? cached + (available - keep)
                          : cached - std::min(cached, keep - available);

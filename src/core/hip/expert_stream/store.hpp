@@ -131,6 +131,15 @@ struct Overlap {
   const void* const* table = nullptr;  // [pieces] device tables
 };
 
+/* Bytes an expert cache may take now. Where device pages are host memory
+ * (a unified-memory APU on Linux) that is the host memory available; where
+ * the GPU has memory of its own that the OS does not count as RAM (Windows,
+ * whose carve-out is VRAM), it is the device heap's free bytes, and the cache
+ * is allocated there. */
+uint64_t CacheAvailableBytes();
+/* True when the cache lives in device memory the host cannot see as RAM. */
+bool CacheUsesDedicatedHeap();
+
 class Store {
 public:
   struct Impl;

@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "src/core/hip/managed_alloc.hpp"
+#include "src/core/hip/admission_query.hpp"
 #include "src/core/logging/logging.hpp"
 #include "src/core/platform/fs.hpp"
 #include "src/core/platform/mapped_file.hpp"
@@ -42,9 +43,10 @@ namespace {
 
 constexpr uint64_t kGiB = 1ull << 30;
 
-/* Host memory available now, as the rest of Gufo measures it. */
+/* Host memory available now, as the rest of Gufo measures it, or the device
+ * heap's free bytes where the cache lives there (CacheAvailableBytes). */
 uint64_t AvailableMemory() {
-  return gufo::ext::HostAvailableBytes();
+  return CacheAvailableBytes();
 }
 /* Each slot size class grows by its own chunks, so a smaller chunk bounds
  * the capacity a class can strand in a part-used chunk. */
@@ -88,6 +90,38 @@ hipMemAllocationProp DeviceProp(int device) {
   prop.location.id = device;
   return prop;
 }
+
+}  // namespace
+
+bool CacheUsesDedicatedHeap() {
+  return !platform::DevicePagesUseHostMemory();
+}
+
+uint64_t CacheAvailableBytes() {
+  if (!CacheUsesDedicatedHeap())
+    return gufo::ext::HostAvailableBytes();
+  size_t heap_free = 0, heap_total = 0;
+  if (hipMemGetInfo(&heap_free, &heap_total) != hipSuccess) {
+    (void)hipGetLastError();
+    return 0;
+  }
+  // On Windows HIP's heap (and DXGI's local budget) include shared system
+  // memory beyond the BIOS carve-out; what the cache takes past the carve-out,
+  // WDDM places in system RAM. The dedicated memory this process has not used
+  // yet caps it, less a margin for other processes' video memory.
+  constexpr uint64_t kDedicatedMargin = 2 * kGiB;
+  if (const auto local = gufo::hip::detail::QueryDeviceLocalBudget();
+      local && local->dedicated_bytes) {
+    const uint64_t used = heap_total > heap_free ? heap_total - heap_free : 0;
+    const uint64_t cap = local->dedicated_bytes > used + kDedicatedMargin
+                             ? local->dedicated_bytes - used - kDedicatedMargin
+                             : 0;
+    return std::min<uint64_t>(heap_free, cap);
+  }
+  return heap_free;
+}
+
+namespace {
 
 bool DevicePagesAvailable(int device) {
   if (!platform::DevicePagesUseHostMemory())
@@ -1011,9 +1045,16 @@ struct Store::Impl {
       range.used += count * slot_bytes;
     } else {
       void* allocation = nullptr;
-      if (gufo::hip::AllocateManaged(
-              &allocation, count * slot_bytes + read_margin) != hipSuccess)
+      // Managed memory is system RAM where the GPU has a heap of its own.
+      const hipError_t status =
+          CacheUsesDedicatedHeap()
+              ? hipMalloc(&allocation, count * slot_bytes + read_margin)
+              : gufo::hip::AllocateManaged(&allocation,
+                                           count * slot_bytes + read_margin);
+      if (status != hipSuccess) {
+        (void)hipGetLastError();
         return false;
+      }
       chunk.base = static_cast<uint8_t*>(allocation);
       chunk.bytes = count * slot_bytes + read_margin;
       first = chunk.base;

@@ -51,8 +51,12 @@ std::optional<GpuLocalBudget> QueryGpuLocalBudget(
           node, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))) {
     return std::nullopt;
   }
+  DXGI_ADAPTER_DESC1 desc{};
+  const std::uint64_t dedicated =
+      SUCCEEDED(adapter->GetDesc1(&desc)) ? desc.DedicatedVideoMemory : 0;
   return GpuLocalBudget{.budget_bytes = info.Budget,
-                        .usage_bytes = info.CurrentUsage};
+                        .usage_bytes = info.CurrentUsage,
+                        .dedicated_bytes = dedicated};
 }
 
 }  // namespace gufo::platform

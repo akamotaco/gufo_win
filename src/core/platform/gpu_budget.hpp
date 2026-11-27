@@ -11,6 +11,10 @@ namespace gufo::platform {
 struct GpuLocalBudget {
   std::uint64_t budget_bytes{0};
   std::uint64_t usage_bytes{0};
+  /// The adapter's dedicated video memory (DXGI_ADAPTER_DESC1), 0 when
+  /// unknown. On an APU with a BIOS carve-out this is the carve-out, while
+  /// the local budget also covers the shared system memory WDDM may page to.
+  std::uint64_t dedicated_bytes{0};
 };
 
 /// Budget and current usage of the local memory segment group of the GPU
