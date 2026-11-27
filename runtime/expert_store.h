@@ -17,8 +17,9 @@ struct ds41_weights;
 using ds41_expert_store_stats = gufo::expert_stream::Stats;
 using ds41_expert_overlap = gufo::expert_stream::Overlap;
 
-/* Available unified host memory, including reclaimable file cache, as Gufo
- * measures it (gufo::ext::HostAvailableBytes). */
+/* Memory the streamed experts may take (gufo::expert_stream::CacheAvailableBytes):
+ * available unified host memory on Linux, free device heap where the GPU has
+ * memory of its own (Windows). */
 uint64_t ds41_expert_available_memory();
 
 /* The model and its shard descriptors outlive the store. cache_limit_bytes

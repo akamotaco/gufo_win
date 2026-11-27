@@ -163,7 +163,7 @@ bool histogram_ranking(const ds41_expert_store& store, const char* path,
 }  // namespace
 
 uint64_t ds41_expert_available_memory() {
-  return gufo::ext::HostAvailableBytes();
+  return gufo::expert_stream::CacheAvailableBytes();
 }
 
 ds41_expert_store* ds41_expert_store_create(const ds41_model* model,
@@ -275,7 +275,7 @@ gufo::expert_stream::Store* ds41_expert_store_handle(ds41_expert_store* store) {
 bool ds41_expert_store_fit_available(ds41_expert_store* store) {
   if (!store)
     return false;
-  const uint64_t available = gufo::ext::HostAvailableBytes();
+  const uint64_t available = gufo::expert_stream::CacheAvailableBytes();
   const uint64_t cached = store->store->GetStats().cache_bytes;
   return store->store->Fit(
       cached + (available > store->headroom ? available - store->headroom : 0));

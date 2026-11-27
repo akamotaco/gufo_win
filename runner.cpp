@@ -161,12 +161,12 @@ public:
     const auto start = std::chrono::steady_clock::now();
     const std::uint64_t need =
         bytes + store->FloorBytes() + kWidePrefillMarginBytes;
-    const std::uint64_t available = ext::HostAvailableBytes();
+    const std::uint64_t available = expert_stream::CacheAvailableBytes();
     const std::uint64_t released =
         available < need ? store->Release(need - available) : 0;
     const bool held = available < need;
     const auto mapping = std::chrono::steady_clock::now();
-    const std::uint64_t after = ext::HostAvailableBytes();
+    const std::uint64_t after = expert_stream::CacheAvailableBytes();
     const bool mapped = after >= need && session.MapWideScratch();
     const auto end = std::chrono::steady_clock::now();
     const auto ms = [](auto from, auto to) {
