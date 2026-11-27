@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "ds41_platform.h"
 #include "model.h"
 #include "tensor_types.h"
 
@@ -104,11 +105,11 @@ struct ds41_tensor {
  * shard_offset[i], so tensor abs_offset addresses the whole model and the
  * resident upload path sees a single map. */
 struct ds41_model {
-  int fd;
+  ds41_file fd;
   const uint8_t* map;
   uint64_t size;
   uint32_t n_shards;
-  int shard_fd[DS41_MAX_SHARDS];
+  ds41_file shard_fd[DS41_MAX_SHARDS];
   uint64_t shard_offset[DS41_MAX_SHARDS];
   uint64_t shard_size[DS41_MAX_SHARDS];
   uint32_t version;

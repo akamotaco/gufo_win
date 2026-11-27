@@ -4,8 +4,16 @@
 
 #include <hip/hip_runtime.h>
 #include <inttypes.h>
+#include <stdio.h>
+#if defined(_WIN32)
+#include <io.h>
+#define ds41_isatty_stderr() (_isatty(_fileno(stderr)) != 0)
+#else
 #include <unistd.h>
+#define ds41_isatty_stderr() (isatty(STDERR_FILENO) != 0)
+#endif
 
+#include <chrono>
 #include <cstdint>
 #include <ctime>
 #include <cstdio>
@@ -19,13 +27,14 @@
 #include <gufo/ext/host.hpp>
 #include <gufo/ext/experimental/managed_alloc.hpp>
 #include <gufo/ext/experimental/weight_upload.hpp>
+#include <gufo/ext/platform/mapped_file.hpp>
 
 #define DS41_GPU_LOG_PREFIX "ds41: ROCm "
 
 namespace {
 
 struct ModelShard {
-  int fd;
+  gufo::platform::PlatformFile fd;
   uint64_t offset;
   uint64_t size;
 };
@@ -45,7 +54,7 @@ uint64_t g_model_resident_weight_bytes;
 /* Placement for this model load, decided once from the registered weight size
  * against the device heap. */
 std::unique_ptr<gufo::hip::WeightAllocator> g_model_weight_alloc;
-int g_model_fd = -1;
+gufo::platform::PlatformFile g_model_fd = gufo::platform::kInvalidFile;
 const void* g_model_fd_host_base;
 std::vector<ModelShard> g_model_shards;
 int g_model_cache_full;
@@ -69,9 +78,9 @@ int hip_ok(hipError_t err, const char* what) {
 }
 
 double hip_wall_sec() {
-  struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return (double)ts.tv_sec + (double)ts.tv_nsec * 1.0e-9;
+  return std::chrono::duration<double>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
 }
 
 void hip_model_load_progress_reset() {
@@ -85,7 +94,7 @@ void hip_model_load_progress_note(uint64_t cached_bytes) {
   const double now = hip_wall_sec();
   if (!g_model_load_progress_started) {
     g_model_load_progress_started = 1;
-    g_model_load_progress_tty = isatty(STDERR_FILENO) != 0;
+    g_model_load_progress_tty = ds41_isatty_stderr();
     g_model_load_progress_next = (g_model_load_progress_tty ? 2ull : 16ull) *
                                  1024ull * 1024ull * 1024ull;
     g_model_load_progress_last = now;
@@ -189,7 +198,7 @@ char* hip_model_range_alloc(uint64_t bytes, const char* what) {
 const char* hip_model_range_ptr_from_fd(const void* model_map, uint64_t offset,
                                         uint64_t bytes, const char* what,
                                         bool wait) {
-  if (g_model_fd < 0 || bytes == 0)
+  if (!gufo::platform::FileValid(g_model_fd) || bytes == 0)
     return NULL;
   if (g_model_fd_host_base != NULL && model_map != g_model_fd_host_base)
     return NULL;
@@ -307,7 +316,7 @@ int set_model_map(const void* model_map, uint64_t model_size) {
   g_model_host_base = model_map;
   g_model_registered_size = model_size;
   g_model_cache_full = 0;
-  if (g_model_fd >= 0 && g_model_fd_host_base == NULL) {
+  if (gufo::platform::FileValid(g_model_fd) && g_model_fd_host_base == NULL) {
     g_model_fd_host_base = model_map;
   }
   return 1;
@@ -347,7 +356,7 @@ extern "C" void ds41_gpu_cleanup(void) {
   g_model_registered_size = 0;
   g_model_resident_weight_bytes = 0;
   g_model_weight_alloc.reset();
-  g_model_fd = -1;
+  g_model_fd = gufo::platform::kInvalidFile;
   g_model_shards.clear();
   g_model_cache_full = 0;
 }
@@ -372,7 +381,7 @@ extern "C" const void* ds41_gpu_model_ptr(const void* model_map,
   return hip_model_range_ptr(model_map, offset, bytes, "tensor");
 }
 
-extern "C" int ds41_gpu_set_model_shards(const int* fds,
+extern "C" int ds41_gpu_set_model_shards(const gufo::platform::PlatformFile* fds,
                                          const uint64_t* offsets,
                                          const uint64_t* sizes,
                                          uint32_t count) {

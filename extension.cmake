@@ -63,8 +63,11 @@ if(ENGINE_ENABLE_HIP)
     GGML_USE_HIP
     GGML_HIP_NO_VMM
     DS41_ROCM_WMMA_MMQ_Y=64)
+  # ${GUFO_CLANG_OPTION} is /clang: under clang-cl, which otherwise drops
+  # these flags (or keeps them from the device compile).
   target_compile_options(gufo_deepseek41flash_mmq PRIVATE
-    -O3 -ffast-math -fno-finite-math-only -Wno-unused-value
+    ${GUFO_CLANG_OPTION}-O3 ${GUFO_CLANG_OPTION}-ffast-math
+    ${GUFO_CLANG_OPTION}-fno-finite-math-only -Wno-unused-value
     -Wno-unused-command-line-argument)
   target_include_directories(gufo_deepseek41flash_mmq
     SYSTEM PUBLIC ${DEEPSEEK41FLASH_MMQ_DIR})
@@ -80,6 +83,7 @@ gufo_extension_target(
     adapter.cpp
     continuation_adapter.cpp
     engine.cpp
+    runtime/ds41_platform.cpp
     runtime/expert_store.cpp
     runtime/model_data.cpp
     runtime/sampling.cpp
@@ -120,7 +124,9 @@ if(TARGET gufo_deepseek41flash_hip)
     _GNU_SOURCE
     DS41_ROCM_BUILD=1)
   target_compile_options(gufo_deepseek41flash_hip PRIVATE
-    -O3 -ffast-math -fno-finite-math-only
+    $<$<COMPILE_LANGUAGE:CXX>:-O3>
+    $<$<COMPILE_LANGUAGE:HIP>:${GUFO_CLANG_OPTION}-O3>
+    ${GUFO_CLANG_OPTION}-ffast-math ${GUFO_CLANG_OPTION}-fno-finite-math-only
     $<$<COMPILE_LANGUAGE:HIP>:-Wno-unused-command-line-argument>)
   target_include_directories(gufo_deepseek41flash_hip PUBLIC
     "$<BUILD_INTERFACE:${GUFO_EXTENSION_BUILD_ROOT}>")
@@ -141,6 +147,7 @@ gufo_extension_target(
     gufo_deepseek41flash_hip
     gufo_deepseek41flash
     gufo_ext_runtime
+    gufo_ext_core
     gufo_ext_hip
 )
 if(TARGET gufo_deepseek41flash_text)

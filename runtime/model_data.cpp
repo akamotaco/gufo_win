@@ -3,7 +3,6 @@
 
 #include <ctype.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <inttypes.h>
 #include <math.h>
 #include <stdarg.h>
@@ -12,18 +11,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
-#include <sys/file.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
 #include <time.h>
-#include <unistd.h>
 
 #include <hip/hip_runtime_api.h>
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <filesystem>
 #include <memory>
+#include <optional>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -37,10 +34,11 @@
 #include "v41_dspark.h"
 #include <gufo/ext/host.hpp>
 #include <gufo/ext/mapped_prefetch.hpp>
+#include <gufo/ext/platform/publish.hpp>
 
 static uint32_t g_ds41_compress_ratios[DS41_N_LAYER] = {0};
 
-static int g_ds41_lock_fd = -1;
+static gufo::platform::FileLock g_ds41_lock;
 
 /* =========================================================================
  * GGUF Quant Block Formats.
@@ -143,11 +141,6 @@ int ds41_layer_engram_slot(uint32_t il) {
   return -1;
 }
 
-static void ds41_die_errno(const char* what, const char* path) {
-  fprintf(stderr, "ds41: %s '%s': %s\n", what, path, strerror(errno));
-  throw std::runtime_error("incompatible or invalid DeepSeek artifact");
-}
-
 static bool ds41_streq(ds41_str s, const char* z) {
   size_t n = strlen(z);
   return s.len == n && memcmp(s.ptr, z, n) == 0;
@@ -182,9 +175,9 @@ void* ds41_xmalloc(size_t size) {
 }
 
 double ds41_now_seconds(void) {
-  struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return (double)ts.tv_sec + (double)ts.tv_nsec * 1.0e-9;
+  return std::chrono::duration<double>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
 }
 
 static void cursor_error(ds41_cursor* c, const char* msg) {
@@ -560,14 +553,16 @@ static void model_close(ds41_model* m) {
     return;
   free(m->kv);
   free(m->tensors);
-  if (m->map)
-    munmap((void*)m->map, (size_t)m->size);
+  ds41_unmap_shards(m->map, m->shard_offset, m->shard_size, m->n_shards,
+                    m->size);
   for (uint32_t i = 0; i < m->n_shards; i++) {
-    if (m->shard_fd[i] >= 0)
-      close(m->shard_fd[i]);
+    if (gufo::platform::FileValid(m->shard_fd[i]))
+      gufo::platform::CloseFile(m->shard_fd[i]);
   }
   memset(m, 0, sizeof(*m));
-  m->fd = -1;
+  m->fd = DS41_INVALID_FILE;
+  for (ds41_file& f : m->shard_fd)
+    f = DS41_INVALID_FILE;
 }
 
 /* Read one shard's GGUF metadata table. Values stay in the mapping; only the
@@ -708,47 +703,42 @@ static std::vector<std::string> model_shard_paths(const char* path) {
  * 2 MiB gap separates shards so merged upload spans never cross a file. */
 static void model_open(ds41_model* m, const std::vector<std::string>& paths) {
   memset(m, 0, sizeof(*m));
-  m->fd = -1;
+  m->fd = DS41_INVALID_FILE;
   static constexpr uint64_t kShardGap = 2ull << 20;
 
   uint64_t total = 0;
-  for (size_t i = 0; i < paths.size(); i++) {
-    m->shard_fd[i] = -1;
-  }
+  for (ds41_file& f : m->shard_fd)
+    f = DS41_INVALID_FILE;
   m->n_shards = (uint32_t)paths.size();
   for (size_t i = 0; i < paths.size(); i++) {
-    const int fd = open(paths[i].c_str(), O_RDONLY | O_CLOEXEC);
-    if (fd == -1) {
-      ds41_die_errno("cannot open model", paths[i].c_str());
+    std::string open_error;
+    const ds41_file fd = gufo::platform::OpenReadFile(
+        std::filesystem::u8path(paths[i]), &open_error);
+    if (!gufo::platform::FileValid(fd)) {
+      fprintf(stderr, "ds41: cannot open model %s: %s\n", paths[i].c_str(),
+              open_error.c_str());
       ds41_die("cannot open model shard");
     }
     m->shard_fd[i] = fd;
-    struct stat st;
-    if (fstat(fd, &st) == -1)
+    const std::optional<uint64_t> size = gufo::platform::FileSizeBytes(fd);
+    if (!size)
       ds41_die("cannot stat model shard");
-    if (st.st_size < 32)
+    if (*size < 32)
       ds41_die("model shard is too small to be GGUF");
     m->shard_offset[i] = total;
-    m->shard_size[i] = (uint64_t)st.st_size;
-    total = ds41_align_up(total + (uint64_t)st.st_size, kShardGap) + kShardGap;
+    m->shard_size[i] = *size;
+    total = ds41_align_up(total + *size, kShardGap) + kShardGap;
   }
   m->fd = m->shard_fd[0];
 
-  void* region = mmap(NULL, (size_t)total, PROT_NONE,
-                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-  if (region == MAP_FAILED)
-    ds41_die("cannot reserve the model address range");
-  m->map = static_cast<const uint8_t*>(region);
-  m->size = total;
-  for (uint32_t i = 0; i < m->n_shards; i++) {
-    void* at = (uint8_t*)region + m->shard_offset[i];
-    void* mapped = mmap(at, (size_t)m->shard_size[i], PROT_READ,
-                        MAP_SHARED | MAP_FIXED, m->shard_fd[i], 0);
-    if (mapped == MAP_FAILED) {
-      ds41_die_errno("cannot mmap model", paths[i].c_str());
-      ds41_die("cannot mmap model shard");
-    }
+  const char* map_error = nullptr;
+  m->map = ds41_map_shards(m->shard_fd, m->shard_offset, m->shard_size,
+                           m->n_shards, total, &map_error);
+  if (!m->map) {
+    fprintf(stderr, "ds41: %s (%s)\n", map_error, paths[0].c_str());
+    ds41_die("cannot map the model shards");
   }
+  m->size = total;
 
   for (uint32_t i = 0; i < m->n_shards; i++) {
     ds41_cursor c{
@@ -1693,6 +1683,9 @@ static void dspark_open(ds41_dspark_model* d, const char* path) {
  * the resident weights and every later GPU allocation must fit beside them.
  * The kernel's KHO scratch area (Ubuntu 26.04) can make that several GiB. */
 static void warn_free_cma(void) {
+#if defined(_WIN32)
+  return;  // no CMA on Windows
+#endif
   FILE* f = fopen("/proc/meminfo", "r");
   if (!f) return;
   char line[256];
@@ -1755,11 +1748,9 @@ static void engram_open(ds41_engram_tables* e, const ds41_weights* w,
     tensor_reject(t, "has an unsupported Engram row type");
   e->table = t;
   e->row_bytes = t->bytes / (uint64_t)rows;
-  for (uint32_t i = 0; i < m->n_shards; i++) {
-    (void)posix_fadvise(m->shard_fd[i], 0, 0, POSIX_FADV_RANDOM);
-    (void)madvise((void*)(m->map + m->shard_offset[i]),
-                  (size_t)m->shard_size[i], MADV_RANDOM);
-  }
+  for (uint32_t i = 0; i < m->n_shards; i++)
+    ds41_advise_random(m->shard_fd[i], m->map + m->shard_offset[i],
+                       m->shard_size[i]);
 }
 
 /* Builds published before the llama.cpp layout name the Engram file in
@@ -1808,63 +1799,38 @@ static uint64_t dspark_resident_bytes(const ds41_dspark_model* dspark) {
 }
 
 static void ds41_release_instance_lock(void) {
-  if (g_ds41_lock_fd >= 0) {
-    close(g_ds41_lock_fd);
-    g_ds41_lock_fd = -1;
-  }
+  g_ds41_lock.Release();
 }
 
 /* Refuse to start a second ds4 process.  The model can map tens of GiB, so a
  * stale accidental second run is more dangerous than a normal CLI error. */
 static void ds41_acquire_instance_lock(void) {
-  const char* path = getenv("DS41_LOCK_FILE");
-  if (!path || !path[0])
-    path = "/tmp/ds4.lock";
-
-  const int fd = open(path, O_RDWR | O_CREAT, 0600);
-  if (fd < 0) {
-    fprintf(stderr, "ds41: failed to open lock file %s: %s\n", path,
-            strerror(errno));
-    throw std::runtime_error("DeepSeek instance lock unavailable");
+  const char* env_path = getenv("DS41_LOCK_FILE");
+  const std::filesystem::path path =
+      (env_path && env_path[0])
+          ? std::filesystem::path(env_path)
+          : gufo::platform::DefaultProcessLockPath("ds4.lock");
+  bool contended = false;
+  std::string holder_pid;
+  g_ds41_lock = gufo::platform::FileLock::TryAcquireProcessLock(
+      path, &contended, &holder_pid);
+  if (g_ds41_lock.valid())
+    return;
+  if (contended) {
+    if (!holder_pid.empty() && holder_pid != "?")
+      fprintf(stderr,
+              "ds41: another ds4 process is already running (pid %s); "
+              "refusing to start\n",
+              holder_pid.c_str());
+    else
+      fprintf(stderr,
+              "ds41: another ds4 process is already running; refusing to "
+              "start\n");
+  } else {
+    fprintf(stderr, "ds41: failed to open or lock %s\n",
+            path.string().c_str());
   }
-  (void)fcntl(fd, F_SETFD, FD_CLOEXEC);
-
-  if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
-    if (errno == EWOULDBLOCK) {
-      char buf[64];
-      const ssize_t n = pread(fd, buf, sizeof(buf) - 1, 0);
-      long owner = -1;
-      if (n > 0) {
-        buf[n] = '\0';
-        char* end = NULL;
-        owner = strtol(buf, &end, 10);
-      }
-      if (owner > 0) {
-        fprintf(stderr,
-                "ds41: another ds4 process is already running (pid %ld); "
-                "refusing to start\n",
-                owner);
-      } else {
-        fprintf(stderr,
-                "ds41: another ds4 process is already running; refusing to "
-                "start\n");
-      }
-      close(fd);
-      throw std::runtime_error("DeepSeek instance lock unavailable");
-    }
-    fprintf(stderr, "ds41: failed to lock %s: %s\n", path, strerror(errno));
-    close(fd);
-    throw std::runtime_error("DeepSeek instance lock unavailable");
-  }
-
-  if (ftruncate(fd, 0) != 0) {
-    fprintf(stderr, "ds41: failed to truncate lock file %s: %s\n", path,
-            strerror(errno));
-    close(fd);
-    throw std::runtime_error("DeepSeek instance lock unavailable");
-  }
-  dprintf(fd, "%ld\n", (long)getpid());
-  g_ds41_lock_fd = fd;
+  throw std::runtime_error("DeepSeek instance lock unavailable");
 }
 
 /* Copies the direction adapter sets to the device and fills e->steer: each
@@ -2027,7 +1993,7 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
   }
   static std::mutex load_mutex;
   const std::lock_guard lock(load_mutex);
-  if (g_ds41_lock_fd >= 0) {
+  if (g_ds41_lock.valid()) {
     fprintf(stderr, "ds41: a DeepSeek engine is already open\n");
     return 1;
   }
@@ -2037,7 +2003,9 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
 
     e = static_cast<ds41_engine*>(ds41_xcalloc(1, sizeof(ds41_engine)));
     e->model = static_cast<ds41_model*>(ds41_xcalloc(1, sizeof(ds41_model)));
-    e->model->fd = -1;
+    e->model->fd = DS41_INVALID_FILE;
+    for (ds41_file& f : e->model->shard_fd)
+      f = DS41_INVALID_FILE;
     e->prefill_batch = opt->prefill_batch ? opt->prefill_batch
                                           : DS41_DEFAULT_PREFILL_BATCH;
     e->exact_prefill = opt->exact_prefill;
@@ -2168,7 +2136,8 @@ int ds41_engine_open(ds41_engine** out, const ds41_engine_options* opt) {
         return 1;
       }
       const std::string tails = std::string(opt->model_path) + ".expert-tails";
-      if (access(tails.c_str(), F_OK) == 0)
+      std::error_code exists_error;
+      if (std::filesystem::exists(std::filesystem::u8path(tails), exists_error))
         (void)ds41_expert_store_attach_tails(e->expert_store, tails.c_str());
     }
     if (!upload_loras(e, opt)) {

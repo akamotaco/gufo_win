@@ -3,6 +3,8 @@
 
 #include <cstdint>
 
+#include <gufo/ext/platform/mapped_file.hpp>
+
 /* Device setup and resident weight upload for the V4.1 runtime. Kernels are
  * declared in ds41_v41.h. */
 
@@ -24,7 +26,8 @@ int ds41_gpu_set_model_map_range(const void* model_map, uint64_t model_size,
                                  uint64_t map_offset, uint64_t map_size,
                                  uint64_t max_tensor_bytes);
 /* The GGUF shards inside the combined mapping, read through their files. */
-int ds41_gpu_set_model_shards(const int* fds, const uint64_t* offsets,
+int ds41_gpu_set_model_shards(const gufo::platform::PlatformFile* fds,
+                              const uint64_t* offsets,
                               const uint64_t* sizes, uint32_t count);
 /* Uploads a weight range unless it is already resident. */
 int ds41_gpu_cache_model_range(const void* model_map, uint64_t model_size,

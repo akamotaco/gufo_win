@@ -7,7 +7,6 @@
  * vendored mmvq (up to 8 tokens) and mmq kernels; everything else runs on
  * the kernels in kernels/rocm/ds41_v41.hip.cpp. */
 #include <hip/hip_runtime_api.h>
-#include <unistd.h>
 
 #include <algorithm>
 #include <array>
@@ -209,7 +208,7 @@ std::vector<float> rope_inv_freq(float base, uint64_t original_ctx) {
   for (uint32_t i = 0; i < dim / 2; i++) freqs[i] = 1.0f / powf(base, (float)(2 * i) / (float)dim);
   if (original_ctx > 0) {
     auto corrected = [&](double rotations) {
-      return dim * std::log((double)original_ctx / (rotations * 2 * M_PI)) / (2 * std::log((double)base));
+      return dim * std::log((double)original_ctx / (rotations * 2 * 3.14159265358979323846)) / (2 * std::log((double)base));
     };
     const double low = std::max(std::floor(corrected(DS41_ROPE_YARN_BETA_FAST)), 0.0);
     const double high = std::min(std::ceil(corrected(DS41_ROPE_YARN_BETA_SLOW)), (double)dim - 1);
@@ -435,7 +434,7 @@ private:
       const ds41_engram_tables* e = job->engine->engram;
       const ds41_tensor* table = e->table;
       const uint64_t base = table->abs_offset - e->file.shard_offset[0];
-      const int fd = e->file.shard_fd[0];
+      const ds41_file fd = e->file.shard_fd[0];
       const uint64_t row_bytes = e->row_bytes;
       const uint32_t type = table->type;
       const int64_t* rows = job->rows;
@@ -457,8 +456,8 @@ private:
           std::fill_n(dst, DS41_ENGRAM_HEAD_DIM, 0.0f);
           continue;
         }
-        const off_t at = (off_t)(base + (uint64_t)rows[i] * row_bytes);
-        if (pread(fd, raw.data(), row_bytes, at) != (ssize_t)row_bytes ||
+        const uint64_t at = base + (uint64_t)rows[i] * row_bytes;
+        if (!ds41_read_exact(fd, raw.data(), row_bytes, at) ||
             !dequant_row(type, raw.data(), dst, DS41_ENGRAM_HEAD_DIM))
           job->ok.store(false, std::memory_order_relaxed);
       }

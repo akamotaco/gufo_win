@@ -1,9 +1,7 @@
 /* DeepSeek V4.1 Flash DSpark drafter; see v41_dspark.h. */
 #include "v41_dspark.h"
 
-#include <fcntl.h>
 #include <hip/hip_runtime_api.h>
-#include <unistd.h>
 
 #include <algorithm>
 #include <cmath>
@@ -11,6 +9,9 @@
 #include <cstring>
 #include <vector>
 
+#include <gufo/ext/platform/fs.hpp>
+
+#include "ds41_platform.h"
 #include "ds41_v41.h"
 #include "mmq/ds41_mmq.h"
 #include "native_internal.h"
@@ -433,7 +434,7 @@ bool ds41_dspark_upload(ds41_dspark_model* m) {
   m->device_bytes = total;
   void* staging = nullptr;
   if (hipHostMalloc(&staging, kChunk) != hipSuccess) return false;
-  const int fd = m->file.shard_fd[0];
+  const ds41_file fd = m->file.shard_fd[0];
   bool ok = true;
   std::vector<uint16_t> half;
   std::vector<float> full;
@@ -441,22 +442,22 @@ bool ds41_dspark_upload(ds41_dspark_model* m) {
     const ds41_tensor* t = m->sources[i].src;
     ds41_dspark_tensor* dst = m->sources[i].dst;
     uint8_t* out = static_cast<uint8_t*>(m->device) + offsets[i];
-    const off_t at = (off_t)(t->abs_offset - m->file.shard_offset[0]);
+    const uint64_t at = t->abs_offset - m->file.shard_offset[0];
     if (widen(m->sources[i])) {
       half.resize(t->elements);
       full.resize(t->elements);
-      ok = pread(fd, half.data(), t->bytes, at) == (ssize_t)t->bytes;
+      ok = ds41_read_exact(fd, half.data(), t->bytes, at);
       for (uint64_t j = 0; ok && j < t->elements; j++) full[j] = half_to_float(half[j]);
       ok = ok && hipMemcpy(out, full.data(), t->elements * sizeof(float), hipMemcpyHostToDevice) == hipSuccess;
       dst->type = DS41_TENSOR_F32;
     } else {
       for (uint64_t done = 0; ok && done < t->bytes; done += kChunk) {
         const uint64_t bytes = std::min(kChunk, t->bytes - done);
-        ok = pread(fd, staging, bytes, at + (off_t)done) == (ssize_t)bytes &&
+        ok = ds41_read_exact(fd, staging, bytes, at + done) &&
              hipMemcpy(out + done, staging, bytes, hipMemcpyHostToDevice) == hipSuccess;
       }
     }
-    (void)posix_fadvise(fd, at, (off_t)t->bytes, POSIX_FADV_DONTNEED);
+    gufo::platform::Advise(fd, gufo::platform::AdviseHint::kDontNeed, at, t->bytes);
     dst->p = out;
   }
   (void)hipHostFree(staging);

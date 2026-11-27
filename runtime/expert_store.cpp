@@ -4,13 +4,12 @@
  * ranking that warms the cache, expert-pruned builds and histogram files. */
 #include "expert_store.h"
 
-#include <unistd.h>
-
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <gufo/ext/host_budget.hpp>
 #include <memory>
@@ -229,7 +228,10 @@ ds41_expert_store* ds41_expert_store_create(const ds41_model* model,
     owner->headroom += (prefill_batch - kReserveBatch) * kReservePerToken;
   /* The histogram when it parses, otherwise the built-in ranking. */
   const char* source = nullptr;
-  if (histogram_path && access(histogram_path, F_OK) == 0) {
+  std::error_code exists_error;
+  if (histogram_path &&
+      std::filesystem::exists(std::filesystem::u8path(histogram_path),
+                              exists_error)) {
     if (histogram_ranking(*owner, histogram_path, &policy.ranking))
       source = histogram_path;
     else

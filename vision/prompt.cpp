@@ -148,7 +148,7 @@ core::Image ResizeHorizontal(const core::Image& image, std::uint32_t width) {
       for (unsigned channel = 0; channel < 3; ++channel) {
         std::int64_t ss = std::int64_t{1} << (kPrecisionBits - 1);
         for (int i = 0; i < c.count[x]; ++i)
-          ss += std::int64_t{row[(std::size_t{c.first[x]} + i) * 3 + channel]} *
+          ss += std::int64_t{row[(static_cast<std::size_t>(c.first[x]) + i) * 3 + channel]} *
                 k[i];
         out.pixels[(std::size_t{y} * width + x) * 3 + channel] = Clip8(ss);
       }
@@ -169,7 +169,7 @@ core::Image ResizeVertical(const core::Image& image, std::uint32_t height) {
       for (int i = 0; i < c.count[y]; ++i)
         ss +=
             std::int64_t{
-                image.pixels[(std::size_t{c.first[y]} + i) * stride + x]} *
+                image.pixels[(static_cast<std::size_t>(c.first[y]) + i) * stride + x]} *
             k[i];
       out.pixels[std::size_t{y} * stride + x] = Clip8(ss);
     }
