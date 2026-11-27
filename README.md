@@ -16,6 +16,7 @@ so `main` here is an upstream release plus what upstream does not carry:
 | --- | --- | --- |
 | Engine and Windows build | [gufo-org/gufo](https://github.com/gufo-org/gufo) `main` (v0.37.0 + 5, November 26, 2026) | Gufo itself, the `windows-release` preset and its Windows platform code; since #1046/#1047 also every hook the Gemma 4 extension needs |
 | Gemma 4 engine | [franzmoca/gemma4-gufo-extension](https://github.com/franzmoca/gemma4-gufo-extension) 0.2.2, which includes this fork's Windows fixes since #9: branch [`gemma4-ext`](https://github.com/akamotaco/gufo_win/tree/gemma4-ext) of this repository (upstream plus a README), built with `-DGUFO_EXTENSION_DIRS` | Gemma 4 26B-A4B / 31B with MTP, vision and tool calls |
+| DeepSeek V4.1 Flash engine | [franzmoca/ds41-gufo-extension](https://github.com/franzmoca/ds41-gufo-extension) 0.5.1 with a Windows port: branch [`ds41-ext`](https://github.com/akamotaco/gufo_win/tree/ds41-ext) of this repository, built with `-DGUFO_EXTENSION_DIRS` | DeepSeek V4.1 Flash 1017 with DSpark drafting, vision and tool calls; routed experts streamed from the SSD (see [DeepSeek V4.1 Flash on Windows](#deepseek-v41-flash-on-windows)) |
 | Fork-only fixes | this repository | See below |
 
 Fork-only changes:
@@ -39,6 +40,13 @@ Fork-only changes:
     buffer. The 2D copy from the mapped GGUF failed inside the Windows driver
     ("Failed PAL memory allocation", 27 times at every load) while reporting
     success, so Gemma 4 described images that were not there.
+- **Streamed experts stay in video memory on Windows** (`src/core/hip/expert_stream`). The
+  expert cache sized itself to free host RAM and allocated managed memory, which on Windows
+  is system RAM, so a streamed model filled the 32 GB the OS sees while ~100 GB of carve-out
+  stayed unused. Where device pages are not host memory, the cache budget is now the device
+  heap's free bytes, capped by the adapter's dedicated video memory (DXGI; HIP's heap and the
+  DXGI local budget also count shared memory, which WDDM pages to system RAM), and its chunks
+  come from `hipMalloc`. Linux is unchanged.
 - The per-request image budget is 256 MiB instead of 20 MiB (agents resend every image).
 - `tools\windows\gufo_monitor.py` (a read-only web monitor) and `tools\windows\tdr_delay.bat`
   (GPU timeout).
@@ -49,6 +57,47 @@ branch and also served the AtomicChat Flash-Next mix (IQ4_XS/IQ4_NL/Q5_0 experts
 Both are kept in history; the AtomicChat formats were not carried to v0.30's
 extension layout until branch `q5_k_m` (below) re-ported them in November 2026. The original Windows port (until October 27, 2026) is tag
 `win-old-port-20261027`.
+
+### DeepSeek V4.1 Flash on Windows
+
+Branch [`ds41-ext`](https://github.com/akamotaco/gufo_win/tree/ds41-ext) is franzmoca's
+DeepSeek V4.1 extension (0.5.1, Linux-only upstream) plus a Windows port, MIT like the original:
+
+- Shard files are Gufo `PlatformFile`s, so the expert store and the weight uploader take
+  them as they are. `runtime/ds41_platform.{h,cpp}` maps a build's shards back to back in
+  one range: `mmap` with `MAP_FIXED` on POSIX, a `VirtualAlloc2` placeholder split and
+  replaced by `MapViewOfFile3` views on Windows (looked up in kernelbase.dll at run time).
+  Reads go through `ReadFileAt`; the instance lock is Gufo's `FileLock`; the CMA check is
+  Linux-only.
+- Compile flags go through `GUFO_CLANG_OPTION` (`/clang:` under clang-cl keeps `-O3` and
+  `-ffast-math` for the device compile), the text target links `gufo_ext_core` (OpenSSL
+  headers), and three clang-cl errors (`M_PI`, `isatty`, an int-to-size_t narrowing) are fixed.
+- The expert budget and the wide-prefill check use `CacheAvailableBytes` (above).
+
+Build Gufo with both extension directories, e.g.
+`-DGUFO_EXTENSION_DIRS="C:/path/gemma4-ext;C:/path/ds41-ext"`. Files (about 221 GiB), from
+`ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF` and `Lucebox/DeepSeek-V4.1-Flash-1017-ROCMFP-GGUF`:
+`IQ1_M` shards 1-5 (112.4 GiB), `DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf` (103 GiB, read from
+the SSD every token, so keep it on the NVMe drive) hard-linked as shard 6 of 6
+(`mklink /H ...-IQ1_M-00006-of-00006.gguf DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf`; a hard link
+needs no Developer Mode), `mmproj-DeepSeek-V4.1-Flash-1017-BF16.gguf` and
+`DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf`. Serve with:
+
+```
+gufo serve --port 8083 --sessions 1 llm --model ...-IQ1_M-00001-of-00006.gguf --context 262144 ^
+  --cache-ram-bytes 2147483648 --mmproj mmproj-DeepSeek-V4.1-Flash-1017-BF16.gguf ^
+  --speculative dspark --dspark-model DeepSeek-V4.1-Flash-1017-DSpark-draft-Q2K-Q4K.gguf --stream-experts
+```
+
+Measured November 27-28, 2026 (96 GB carve-out, Balance 120 W): loads in 26-30 s; the dense
+weights (5.3 GiB), drafter (4.6 GiB) and projector stay resident and the expert cache takes
+72.4 GiB of video memory (96-99% of routed experts served from it); host RAM holds only the
+prompt cache. Images, tool calls (buffered and streamed) and Korean answers work. Prefill 616
+(7.3K) to 884 (27K) tok/s; decode with DSpark 17-23 tok/s, without a drafter (`gufo bench
+tg256`) 16.2-16.5 tok/s, like Linux's streamed builds (16.5-18.7 tok/s AR in the extension's
+DECODE.md); the decode kernels run at Linux's rates (`ds41_gemv_bench`, 203-236 GB/s). With
+thinking off (`reasoning_effort: none`) `IQ1_M` sometimes repeats the prompt or slips into
+Chinese; keep thinking on. Not checked yet: the verbatim copy test and prompts past 32K.
 
 ### AtomicChat on the current engine: branch `q5_k_m`
 
