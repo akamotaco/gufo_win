@@ -123,7 +123,9 @@ def recent_requests(port, count=8):
         return []
     rows, seen = [], set()
     for pattern in ("gufo-%d-*.log", "gufo-%d-*.log.err"):
-        logs = sorted(LOGS.glob(pattern % port))
+        # Newest by modification time, not by name: a log not named by date (gufo-8083-ds41.log from a
+        # test launcher) sorts after every date and hid the running server's requests (2026-11-28).
+        logs = sorted(LOGS.glob(pattern % port), key=lambda p: p.stat().st_mtime)
         if not logs:
             continue
         name = logs[-1].name
