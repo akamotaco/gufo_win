@@ -92,8 +92,8 @@ gufo serve --port 8083 --sessions 1 llm --model ...-IQ1_M-00001-of-00006.gguf --
 
 Measured November 27-28, 2026 (96 GB carve-out, Balance 120 W): loads in 26-30 s; the dense
 weights (5.3 GiB), drafter (4.6 GiB) and projector stay resident and the expert cache takes
-72.4 GiB of video memory (96-99% of routed experts served from it); host RAM holds only the
-prompt cache. Images, tool calls (buffered and streamed) and Korean answers work. Prefill 616
+72.4 GiB of video memory (96-99% of routed experts served from it; 64 GiB with the launcher's
+cap since November 29, 98-99%); host RAM holds only the prompt cache. Images, tool calls (buffered and streamed) and Korean answers work. Prefill 616
 (7.3K) to 884 (27K) tok/s; decode with DSpark 17-23 tok/s, without a drafter (`gufo bench
 tg256`) 16.2-16.5 tok/s, like Linux's streamed builds (16.5-18.7 tok/s AR in the extension's
 DECODE.md); the decode kernels run at Linux's rates (`ds41_gemv_bench`, 203-236 GB/s). With
