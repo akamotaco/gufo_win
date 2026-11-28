@@ -16,6 +16,7 @@ Read-only: it never starts, stops or sends requests to a model.
 import argparse
 import ctypes
 import json
+import os
 import re
 import subprocess
 import threading
@@ -29,13 +30,17 @@ LOGS = None
 PORTS = {8080: "", 8081: "", 8082: ""}
 PAGE = Path(__file__).resolve().with_name("gufo_monitor.html")
 
-# One PowerShell samples the counters each second and prints one JSON line.
+# One PowerShell samples the counters each second and prints one JSON line. It ends with the monitor:
+# with errors silenced, a closed pipe alone did not stop it, and closed monitors left samplers using
+# ~20% of a core each (seven found on 2026-11-29, the oldest from 11-18).
 SAMPLER = r"""
 $ErrorActionPreference = 'SilentlyContinue'
+$parent = __PARENT__
 $names = '\GPU Adapter Memory(*)\Dedicated Usage','\GPU Adapter Memory(*)\Shared Usage',
   '\GPU Engine(*)\Utilization Percentage','\Memory\Available MBytes','\Memory\Committed Bytes',
   '\Memory\Commit Limit','\Memory\Pages Output/sec','\Paging File(_Total)\% Usage'
 while ($true) {
+  if (-not (Get-Process -Id $parent -ErrorAction SilentlyContinue)) { exit }
   $s = (Get-Counter $names).CounterSamples
   $eng = @{}
   foreach ($x in ($s | Where-Object Path -like '*utilization percentage')) {
@@ -64,7 +69,8 @@ lock = threading.Lock()
 
 def sampler():
     while True:
-        proc = subprocess.Popen(["powershell", "-NoProfile", "-Command", SAMPLER], stdout=subprocess.PIPE,
+        script = SAMPLER.replace("__PARENT__", str(os.getpid()))
+        proc = subprocess.Popen(["powershell", "-NoProfile", "-Command", script], stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL, text=True, creationflags=0x08000000)
         for line in proc.stdout:
             try:
