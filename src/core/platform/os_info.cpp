@@ -171,6 +171,18 @@ std::optional<HostMemory> QueryHostMemory() {
 #endif
 }
 
+std::optional<std::uint64_t> QueryCommitAvailable() {
+#if defined(_WIN32)
+  MEMORYSTATUSEX status{};
+  status.dwLength = sizeof(status);
+  if (!GlobalMemoryStatusEx(&status))
+    return std::nullopt;
+  return status.ullAvailPageFile;
+#else
+  return std::nullopt;
+#endif
+}
+
 bool LocalTime(std::time_t seconds, std::tm* out) noexcept {
 #if defined(_WIN32)
   return ::localtime_s(out, &seconds) == 0;

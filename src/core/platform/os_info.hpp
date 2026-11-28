@@ -65,6 +65,13 @@ struct HostMemory {
 /// Returns nullopt when the OS cannot report its memory.
 std::optional<HostMemory> QueryHostMemory();
 
+/// Bytes the process may still commit before the system commit limit at its
+/// current size (Windows: RAM plus the page file as it is now; a page file
+/// that can grow raises the limit only after commit reaches it). Video-memory
+/// allocations count against it on Windows. Nullopt where the OS has no such
+/// limit (Linux overcommits).
+std::optional<std::uint64_t> QueryCommitAvailable();
+
 /// Fills `out` with the process's local calendar time for `seconds`.
 /// Returns false when the platform cannot convert the time.
 bool LocalTime(std::time_t seconds, std::tm* out) noexcept;

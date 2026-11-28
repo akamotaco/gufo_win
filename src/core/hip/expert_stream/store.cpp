@@ -116,8 +116,15 @@ uint64_t CacheAvailableBytes() {
     const uint64_t cap = local->dedicated_bytes > used + kDedicatedMargin
                              ? local->dedicated_bytes - used - kDedicatedMargin
                              : 0;
-    return std::min<uint64_t>(heap_free, cap);
+    heap_free = std::min<uint64_t>(heap_free, cap);
   }
+  // Every video-memory allocation is also charged to the Windows commit limit.
+  // The cache keeps a margin of it free: drivers fail command submission when
+  // commit runs out (PAL "failed to submit CMD", device_lost, 2026-11-28).
+  constexpr uint64_t kCommitMargin = 8 * kGiB;
+  if (const auto commit = platform::QueryCommitAvailable())
+    heap_free = std::min<uint64_t>(
+        heap_free, *commit > kCommitMargin ? *commit - kCommitMargin : 0);
   return heap_free;
 }
 
