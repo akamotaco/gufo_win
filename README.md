@@ -46,7 +46,8 @@ Fork-only changes:
   stayed unused. Where device pages are not host memory, the cache budget is now the device
   heap's free bytes, capped by the adapter's dedicated video memory (DXGI; HIP's heap and the
   DXGI local budget also count shared memory, which WDDM pages to system RAM), and its chunks
-  come from `hipMalloc`. Linux is unchanged.
+  come from `hipMalloc`. It also keeps 8 GiB of Windows commit free, since video memory counts
+  against the commit limit there (see the DeepSeek note below). Linux is unchanged.
 - The per-request image budget is 256 MiB instead of 20 MiB (agents resend every image).
 - `tools\windows\gufo_monitor.py` (a read-only web monitor) and `tools\windows\tdr_delay.bat`
   (GPU timeout).
@@ -100,19 +101,31 @@ thinking off (`reasoning_effort: none`) `IQ1_M` sometimes repeats the prompt or 
 Chinese; keep thinking on. Prompts up to 245K tokens have been served (262K context); the
 verbatim copy test has not been run yet.
 
-> [!WARNING]
-> **Known issue: crash when the Windows commit limit runs out** (November 28, 2026). On this
-> machine every video-memory allocation is also charged to the Windows commit limit (RAM plus
-> page file: 31.6 + 96 = 127.6 GB here), and the streamed expert cache fills the dedicated memory
-> to within 2 GiB. With DeepSeek at 93.4 GB of video memory, 8.9 GB of host memory and a few
-> GB of other programs, commit sat at 122.9-124.6 of 128.7 GB for minutes; after a 100K-token
-> prefill released and re-grew the cache, the driver failed to submit and finalize command
-> buffers (`PAL failed to submit CMD! result:-7`, `... finalize a command buffer! result: -28`,
-> 34 lines), the expert stage failed and the server stopped with `event=device_lost` (exit 75).
-> Windows logged no GPU timeout (TDR) and no page writes; the commit limit was growing
-> (128.7 → 131.7 GB) as the page file expanded from its 96 GB initial size towards its 160 GB
-> maximum. Until the cache leaves more room: an initial page-file size equal to its maximum (so
-> the limit does not have to grow), and fewer large programs open beside the model.
+> [!NOTE]
+> **Fixed: crash when the Windows commit limit ran out** (November 28-29, 2026).
+>
+> *What happened.* On this machine every video-memory allocation is also charged to the Windows
+> commit limit (RAM plus page file: 31.6 + 96 = 127.6 GB here), and the streamed expert cache
+> filled the dedicated memory to within 2 GiB. With DeepSeek at 93.4 GB of video memory, 8.9 GB
+> of host memory and a few GB of other programs, commit sat at 122.9-124.6 of 128.7 GB for
+> minutes. After a 100K-token prefill released and re-grew the cache, the driver failed to
+> submit and finalize command buffers (`PAL failed to submit CMD! result:-7`,
+> `... finalize a command buffer! result: -28`, 34 lines), the expert stage failed and the
+> server stopped with `event=device_lost` (exit 75). Windows logged no GPU timeout (TDR) and no
+> page writes. The commit limit was growing (128.7 → 131.7 GB): the page file (96 GB initial,
+> 160 GB maximum) only expands once commit reaches the limit, and the driver's allocations
+> failed in that moment.
+>
+> *How it is avoided.* The expert cache now also keeps commit room. `platform::QueryCommitAvailable`
+> reads the commit left before the limit at its current size (`GlobalMemoryStatusEx`; none on
+> Linux), and `expert_stream::CacheAvailableBytes` keeps 8 GiB of it free, both when the cache is
+> sized at load and each time it grows again after a long prefill. The launcher also caps the
+> cache at 64 GiB (`--expert-cache-bytes`) as a fixed backstop. The page file is unchanged.
+>
+> *Checked.* A 137,652-token prompt plus 2K-31K requests: with the 64 GiB cap, commit never had
+> less than 11.9 GB free; without the cap the cache stopped by itself at 68.7 GiB (72.4 before)
+> and commit kept at least 9.4 GB free. No driver errors in either run; 98-99% of routed experts
+> still came from the cache.
 
 ### AtomicChat on the current engine: branch `q5_k_m`
 
