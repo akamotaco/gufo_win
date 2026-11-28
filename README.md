@@ -97,7 +97,22 @@ prompt cache. Images, tool calls (buffered and streamed) and Korean answers work
 tg256`) 16.2-16.5 tok/s, like Linux's streamed builds (16.5-18.7 tok/s AR in the extension's
 DECODE.md); the decode kernels run at Linux's rates (`ds41_gemv_bench`, 203-236 GB/s). With
 thinking off (`reasoning_effort: none`) `IQ1_M` sometimes repeats the prompt or slips into
-Chinese; keep thinking on. Not checked yet: the verbatim copy test and prompts past 32K.
+Chinese; keep thinking on. Prompts up to 245K tokens have been served (262K context); the
+verbatim copy test has not been run yet.
+
+> [!WARNING]
+> **Known issue: crash when the Windows commit limit runs out** (November 28, 2026). On this
+> machine every video-memory allocation is also charged to the Windows commit limit (RAM plus
+> page file: 31.6 + 96 = 127.6 GB here), and the streamed expert cache fills the dedicated memory
+> to within 2 GiB. With DeepSeek at 93.4 GB of video memory, 8.9 GB of host memory and a few
+> GB of other programs, commit sat at 122.9-124.6 of 128.7 GB for minutes; after a 100K-token
+> prefill released and re-grew the cache, the driver failed to submit and finalize command
+> buffers (`PAL failed to submit CMD! result:-7`, `... finalize a command buffer! result: -28`,
+> 34 lines), the expert stage failed and the server stopped with `event=device_lost` (exit 75).
+> Windows logged no GPU timeout (TDR) and no page writes; the commit limit was growing
+> (128.7 → 131.7 GB) as the page file expanded from its 96 GB initial size towards its 160 GB
+> maximum. Until the cache leaves more room: an initial page-file size equal to its maximum (so
+> the limit does not have to grow), and fewer large programs open beside the model.
 
 ### AtomicChat on the current engine: branch `q5_k_m`
 
